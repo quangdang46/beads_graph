@@ -4640,7 +4640,13 @@ fn go_rfc1123(rfc3339: &str) -> String {
     };
     let zoned = ts.to_zoned(jiff::tz::TimeZone::UTC);
     let dt = zoned.datetime();
-    let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][dt.weekday() as usize % 7];
+    // jiff numbers weekdays Monday=1..Sunday=7; Go's `time.RFC1123` layout
+    // ("Mon, 02 Jan 2006 15:04:05 MST") indexes a Monday-first table. The old
+    // lookup wrapped with `% 7` into a table that started at "Thu", so every
+    // date was off by one: 2026-08-22, a Saturday, printed as "Wed". The same
+    // formatter supplies `--export-md`'s "*Generated:*" footer.
+    const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let weekday = WEEKDAYS[dt.weekday() as usize - 1];
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -4916,6 +4922,36 @@ fn run_update(args: &[String]) -> ExitCode {
 /// `pkg/updater` accepts — an installable release needs a `state: uploaded`
 /// platform archive, a checksum manifest, a `sha256:` digest on both and URLs
 /// pinned to this repo (github.rs:375-463).
+#[cfg(test)]
+mod rfc1123_tests {
+    use super::go_rfc1123;
+
+    /// Go `time.RFC1123` names the weekday, and the layout is
+    /// "Mon, 02 Jan 2006 15:04:05 MST". One case per weekday catches a table
+    /// that is off by one in either direction, which a single date cannot.
+    #[test]
+    fn weekday_names_match_go_for_every_day() {
+        // 2026-08-17 is a Monday, so these seven dates cover Mon..Sun.
+        let cases = [
+            ("2026-08-17T09:05:03Z", "Mon, 17 Aug 2026 09:05:03 UTC"),
+            ("2026-08-18T09:05:03Z", "Tue, 18 Aug 2026 09:05:03 UTC"),
+            ("2026-08-19T09:05:03Z", "Wed, 19 Aug 2026 09:05:03 UTC"),
+            ("2026-08-20T09:05:03Z", "Thu, 20 Aug 2026 09:05:03 UTC"),
+            ("2026-08-21T09:05:03Z", "Fri, 21 Aug 2026 09:05:03 UTC"),
+            ("2026-08-22T09:05:03Z", "Sat, 22 Aug 2026 09:05:03 UTC"),
+            ("2026-08-23T09:05:03Z", "Sun, 23 Aug 2026 09:05:03 UTC"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(go_rfc1123(input), want, "for {input}");
+        }
+    }
+
+    #[test]
+    fn unparseable_input_is_passed_through() {
+        assert_eq!(go_rfc1123("not-a-timestamp"), "not-a-timestamp");
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod update_cli_tests {
@@ -12145,9 +12181,12 @@ fn run_robot_impact_network(args: &[String]) -> ExitCode {
 
     let cwd = std::env::current_dir().unwrap_or_default();
     // Go: correlation.ValidateRepository runs before the beads file is
-    // located (robot_registry.go:3335-3337).
+    // located (robot_registry.go:3335-3337). The dispatcher wraps whatever the
+    // handler returns as `Error handling <flag>: <err>` when the handler has
+    // not reported it itself (robot_registry.go:506-509), so a bare `Error:`
+    // here loses the command the failure belongs to.
     if let Err(e) = validate_correlation_repository(&cwd) {
-        eprintln!("Error: {e}");
+        eprintln!("Error handling --robot-impact-network: {e}");
         return ExitCode::from(1);
     }
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
