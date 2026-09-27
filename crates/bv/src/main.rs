@@ -1525,10 +1525,15 @@ fn main() -> ExitCode {
         print_robot_help();
         return ExitCode::from(0);
     }
+    // Go main.go:2172 — any action, or either modifier, enters the agents
+    // command. `--agents-dry-run` and `--agents-force` on their own used to fall
+    // through to the TUI, which an agent invoking them cannot drive.
     if presence.has("agents-add")
         || presence.has("agents-remove")
         || presence.has("agents-update")
         || presence.has("agents-check")
+        || presence.has("agents-dry-run")
+        || presence.has("agents-force")
     {
         return run_agents_commands(&presence, &args);
     }
@@ -5966,7 +5971,9 @@ fn run_rollback() -> ExitCode {
 
 /// Go agent management commands (--agents-add/remove/update/check).
 fn run_agents_commands(presence: &validation::Presence, _args: &[String]) -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // Go reports the directory it searched, and `os.Getwd` prefers `$PWD`, so a
+    // run under /tmp must say /tmp and not /private/tmp.
+    let cwd = go_working_dir();
     let detection = bv_core::agents::detect::detect_agent_file_in_parents(&cwd, 3);
     let is_robot = presence.has("robot-robot") || std::env::var("BV_ROBOT").as_deref() == Ok("1");
     let dry_run = presence.has("agents-dry-run");
