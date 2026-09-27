@@ -1865,9 +1865,19 @@ fn main() -> ExitCode {
             eprintln!("Error running pre-export hooks: {e}");
             return ExitCode::from(1);
         }
+        // Go prints a different completion line per format, and only the
+        // interactive one reports the graph's own edge count (main.go:3536).
+        let edges = bv_analysis::analyzer::build_graph(&issues).edge_count();
         match std::fs::write(&out, &content) {
             Ok(_) => {
-                println!("Exported {} issues to {} ({fmt})", issues.len(), out);
+                if fmt == "html" {
+                    println!(
+                        "✓ Interactive graph exported to {out} ({} nodes, {edges} edges)",
+                        issues.len()
+                    );
+                } else {
+                    println!("Exported {} issues to {} ({fmt})", issues.len(), out);
+                }
                 return ExitCode::from(0);
             }
             Err(e) => {
@@ -7002,6 +7012,10 @@ fn run_robot_orphans() -> ExitCode {
         None => 30,
     };
 
+    // Go wraps the history report's own failure as
+    // `generating history report: %w` before the caller's
+    // `generating report: %w`, so the chain reads
+    // "generating report: generating history report: extracting events: ...".
     let report = match generate_correlation_report(&cwd, &issues, &opts, jiff_now(), true) {
         Ok(r) => r,
         Err(e) => {
@@ -14292,7 +14306,7 @@ fn run_robot_explain_correlation(args: &[String]) -> ExitCode {
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Error: generating report: {e}");
+            eprintln!("Error handling --robot-explain-correlation: generating report: generating history report: {e}");
             return ExitCode::from(1);
         }
     };
@@ -16037,7 +16051,9 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Error: generating report: {e}");
+            eprintln!(
+                "Error handling {flag_name}: generating report: generating history report: {e}"
+            );
             return ExitCode::from(1);
         }
     };
