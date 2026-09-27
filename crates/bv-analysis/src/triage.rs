@@ -802,7 +802,43 @@ fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-pub fn build_triage(issues: &[Issue], g: &DiGraph, now: jiff::Timestamp) -> TriageOutput {
+pub fn build_triage(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+    // True when the caller is time-travelling (--as-of). Go runs that path
+    // without timing the analysis phases, and statusEntry serialises ms only
+    // when Elapsed is non-zero (graph.go:131-147), so those payloads carry no
+    // per-metric timing at all.
+    time_travelling: bool,
+) -> TriageOutput {
+    build_triage_inner(issues, g, now, true, time_travelling)
+}
+
+/// Go parity variant for `cmd/bv/main.go:4013` (`--emit-script`), the one
+/// triage caller that omits `TriageOptions.WaitForPhase2` (triage.go:400).
+/// The `opts.WaitForPhase2 && hasOpenIssues` guard at triage.go:517-519
+/// therefore never fires, so `ComputeImpactScoresFromStats` reads a
+/// `GraphStats` whose `pageRank`/`betweenness` maps are still the empty
+/// `make(map[string]float64)` from graph.go:1740. `findMax` over an empty map
+/// is 0 (priority.go:445-453) and `normalize(v, 0)` is 0 (priority.go:429-434),
+/// so `prNorm`/`bwNorm` are 0 for every node and both terms drop out of the
+/// composite. This is deliberate Go parity, not an oversight.
+pub fn build_triage_phase2_pending(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+) -> TriageOutput {
+    build_triage_inner(issues, g, now, false, false)
+}
+
+fn build_triage_inner(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+    phase2_awaited: bool,
+    time_travelling: bool,
+) -> TriageOutput {
     // Go TriageConfig (fast config) parity: PageRank exact, Betweenness
     // approximate with sample 50 (falling back to exact inside the
     // approximator when sample >= n), all other Phase-2 metrics skipped.
@@ -831,16 +867,24 @@ pub fn build_triage(issues: &[Issue], g: &DiGraph, now: jiff::Timestamp) -> Tria
     let bw_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     // Go TriageConfig skips ComputeCriticalPath: no time-to-impact component.
-    let pr: BTreeMap<String, f64> = pagerank
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
-        .collect();
-    let bw: BTreeMap<String, f64> = betweenness
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
-        .collect();
+    let pr: BTreeMap<String, f64> = if phase2_awaited {
+        pagerank
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let bw: BTreeMap<String, f64> = if phase2_awaited {
+        betweenness
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
 
     // Go graph.go:1913-1916 marks every metric "skipped" on an empty graph
     // (`emptyGraphMetricStatus`). Everything else in the result is still
@@ -859,6 +903,21 @@ pub fn build_triage(issues: &[Issue], g: &DiGraph, now: jiff::Timestamp) -> Tria
         articulation: all_skipped.clone(),
         slack: all_skipped,
     };
+
+    // Go's statusEntry serialises `ms` only when Elapsed is non-zero
+    // (graph.go:131-147, `json:"ms,omitempty"`), and the time-travel path
+    // leaves Elapsed at zero — so `--as-of` payloads carry no per-metric timing
+    // at all. Measuring the phases here and reporting them unconditionally
+    // added an `ms` key the oracle never emits.
+    let timed = |ms: f64| {
+        if time_travelling {
+            0.0
+        } else {
+            ms
+        }
+    };
+    let pr_ms = timed(pr_ms);
+    let bw_ms = timed(bw_ms);
 
     let skipped = crate::analyzer::StatusEntry::skipped("disabled by triage fast config");
     let metric_status = if empty_graph {
@@ -1160,7 +1219,7 @@ mod tests {
         //         not_actionable=11
         let issues = fixture_issues("small_chain");
         let g = crate::analyzer::build_graph(&issues);
-        let out = build_triage(&issues, &g, jiff::Timestamp::now());
+        let out = build_triage(&issues, &g, jiff::Timestamp::now(), false);
         assert_eq!(out.quick_ref.open_count, 12);
         assert_eq!(out.quick_ref.actionable_count, 1);
         assert_eq!(out.quick_ref.blocked_count, 0);
@@ -1176,7 +1235,7 @@ mod tests {
     fn recommendations_ranked_desc_with_id_tiebreak() {
         let issues = fixture_issues("medium_tree");
         let g = crate::analyzer::build_graph(&issues);
-        let out = build_triage(&issues, &g, jiff::Timestamp::now());
+        let out = build_triage(&issues, &g, jiff::Timestamp::now(), false);
         for w in out.recommendations.windows(2) {
             let ok = w[0].score > w[1].score || (w[0].score == w[1].score && w[0].id <= w[1].id);
             assert!(
@@ -1273,7 +1332,7 @@ mod tests {
             "Go sorts and dedupes the blocker set (readiness.go:212-214)"
         );
         let g = crate::analyzer::build_graph(&issues);
-        let out = build_triage(&issues, &g, jiff::Timestamp::now());
+        let out = build_triage(&issues, &g, jiff::Timestamp::now(), false);
         let unblocks_of = |id: &str| {
             out.recommendations
                 .iter()

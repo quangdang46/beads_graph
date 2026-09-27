@@ -2660,7 +2660,17 @@ fn extract_as_of() -> Option<String> {
 /// discovery chain returns only the issue vector.
 #[derive(Debug, Clone, Default)]
 struct SourceMeta {
+    /// The path `source_authority.sources[].source_path` names.
     path: String,
+    /// The path the envelope's top-level `source_path` names, when it differs.
+    ///
+    /// Under `--as-of` the two are not the same string: Go builds the
+    /// authority's entry from the git loader's file path plus the resolved SHA
+    /// (`.beads/issues.jsonl@6fa2454…`, main.go:2645-2652) while the envelope
+    /// says `.beads@HEAD~1` (main.go:2804) — the ref, not the commit. Carrying
+    /// one path for both put the ref where the SHA belonged and changed
+    /// `authority_hash` with it. Empty means "same as `path`".
+    envelope_path: String,
     kind: String,
     valid: usize,
     errors: usize,
@@ -2858,6 +2868,25 @@ fn load_issues_auto_unscoped(
 /// would produce different scopes.
 static SCOPE_FLAGS: std::sync::OnceLock<[String; 3]> = std::sync::OnceLock::new();
 
+/// The `--as-of` ref and its resolved SHA, published for the envelope builder.
+///
+/// Go declares both as `RobotEnvelope` fields (main.go:7222-7223) and fills them
+/// from the context, so they are emitted at the TOP LEVEL, right after
+/// `source_kind`. bvr wrote them inside the per-command payload — and for
+/// `--robot-triage`, inside `triage` — which put them where Go never puts them.
+static AS_OF: std::sync::OnceLock<[String; 2]> = std::sync::OnceLock::new();
+
+fn set_as_of(ref_name: &str, commit: &str) {
+    let _ = AS_OF.set([ref_name.to_string(), commit.to_string()]);
+}
+
+fn as_of_pair() -> (String, String) {
+    AS_OF
+        .get()
+        .map(|p| (p[0].clone(), p[1].clone()))
+        .unwrap_or_default()
+}
+
 /// Go's unknown-recipe rejection (pkg/recipe/loader.go:44-51, printed by
 /// cmd/bv/main.go with the available list appended).
 ///
@@ -3042,6 +3071,7 @@ fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
         if let Ok(Some(jsonl)) = bv_core::discovery::find_jsonl_path_with_warnings(&dir, |_| {}) {
             return SourceMeta {
                 path: jsonl.to_string_lossy().to_string(),
+                envelope_path: String::new(),
                 kind: "jsonl_local".to_string(),
                 valid: issues.len(),
                 errors: 0,
@@ -3318,18 +3348,22 @@ fn load_issues_auto_meta_raw(
         );
         let hash = bv_core::data_hash::compute_data_hash(&issues);
         let valid = issues.len();
-        return Ok((
-            issues,
-            hash,
-            Some(resolved),
-            SourceMeta {
-                path: format!("@{revision}"),
-                kind: "git".to_string(),
-                valid,
-                errors: 0,
-                skipped: 0,
-            },
-        ));
+        // Built before the tuple: `Some(resolved)` moves `resolved` when the
+        // third element is evaluated, which is before the fourth.
+        //
+        // Two different strings, and Go builds both. The authority's entry is
+        // the git loader's file path plus the resolved commit
+        // (main.go:2645-2652); the envelope's `source_path` is the literal
+        // `.beads@<asOf>` naming the ref instead (main.go:2804).
+        let source = SourceMeta {
+            path: format!(".beads/issues.jsonl@{resolved}"),
+            envelope_path: format!(".beads@{revision}"),
+            kind: "git".to_string(),
+            valid,
+            errors: 0,
+            skipped: 0,
+        };
+        return Ok((issues, hash, Some(resolved), source));
     }
     // Go main.go:2678 — an explicit `--workspace` wins over discovery.
     let explicit_ws = workspace_override().map(std::path::Path::to_path_buf);
@@ -3354,6 +3388,7 @@ fn load_issues_auto_meta_raw(
                     None,
                     SourceMeta {
                         path: ws_path.to_string_lossy().to_string(),
+                        envelope_path: String::new(),
                         kind: "workspace".to_string(),
                         valid,
                         errors: 0,
@@ -3395,6 +3430,7 @@ fn load_issues_auto_meta_raw(
         None,
         SourceMeta {
             path: jsonl.to_string_lossy().to_string(),
+            envelope_path: String::new(),
             kind: "jsonl_local".to_string(),
             valid,
             errors: stats.errors,
@@ -3451,7 +3487,7 @@ fn run_robot_next() -> ExitCode {
     }
 
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    let out = bv_analysis::triage::build_triage(&issues, &g, robot_now());
+    let out = bv_analysis::triage::build_triage(&issues, &g, robot_now(), as_of.is_some());
 
     // Claimability filter (Go robotNextClaimabilityReasons): the pick must
     // be open, non-epic, unassigned, and free of open blockers.
@@ -4174,12 +4210,16 @@ fn run_robot_triage() -> ExitCode {
     // "the command failed". bvr emitted a three-key stub instead, so an agent
     // parsing it found no `triage.quick_ref` at all and had no way to tell the
     // two apart. The analysis below is defined for an empty graph.
+    set_as_of(
+        &as_of.clone().unwrap_or_default(),
+        &as_of_commit.clone().unwrap_or_default(),
+    );
     // Go keeps the loader's data_hash: scopeLoadedIssues sets
     // DataHashMatchesIssues=false so the payload still names the file it came
     // from (main.go:4890-4900).
     let data_hash = loaded_hash;
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    let mut out = bv_analysis::triage::build_triage(&issues, &g, robot_now());
+    let mut out = bv_analysis::triage::build_triage(&issues, &g, robot_now(), as_of.is_some());
     // Go stamps every recommendation with `issue.Actions(claimable)`
     // (triage.go:658). The tracker route needs the loaded source path, which
     // only the CLI layer has, so it is resolved here rather than in the
@@ -4677,9 +4717,10 @@ fn run_robot_triage() -> ExitCode {
         }
     }
     // Add as_of/as_of_commit only when --as-of was used (Go omitempty parity).
-    if let Some(ref a) = as_of {
-        payload["triage"]["as_of"] = serde_json::json!(a);
-    }
+    // Deliberately NOT written under `triage`: Go declares as_of and
+    // as_of_commit on RobotEnvelope (main.go:7222-7223) and its TriageResult
+    // has no such fields, so a nested copy was a key the oracle never emits.
+    let _ = &as_of;
     if let Some(ref c) = as_of_commit {
         payload["triage"]["as_of_commit"] = serde_json::json!(c);
     }
@@ -7206,11 +7247,25 @@ fn full_envelope_json_with_source_and_authority(
     }
     env.insert("version".into(), serde_json::json!(GO_APP_VERSION));
     if let Some(meta) = source {
-        if !meta.path.is_empty() {
-            env.insert("source_path".into(), serde_json::json!(meta.path));
+        let envelope_path = if meta.envelope_path.is_empty() {
+            &meta.path
+        } else {
+            &meta.envelope_path
+        };
+        if !envelope_path.is_empty() {
+            env.insert("source_path".into(), serde_json::json!(envelope_path));
         }
         if !meta.kind.is_empty() {
             env.insert("source_kind".into(), serde_json::json!(meta.kind));
+        }
+        // Go's declaration order (main.go:7222-7223) puts both immediately
+        // after source_kind and before `scope`.
+        let (as_of_ref, as_of_commit) = as_of_pair();
+        if !as_of_ref.is_empty() {
+            env.insert("as_of".into(), serde_json::json!(as_of_ref));
+        }
+        if !as_of_commit.is_empty() {
+            env.insert("as_of_commit".into(), serde_json::json!(as_of_commit));
         }
         // Go derives the scope from the active --label/--recipe/--repo flags
         // (robot_registry.go:257-269) and emits the object alongside its hash.
@@ -13779,7 +13834,7 @@ fn run_emit_script(args: &[String]) -> ExitCode {
         return ExitCode::from(0);
     }
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    let out = bv_analysis::triage::build_triage(&issues, &g, robot_now());
+    let out = bv_analysis::triage::build_triage_phase2_pending(&issues, &g, robot_now());
 
     // Go writes `len(triage.Recommendations)`, and the recommendations list is
     // sliced to `opts.TopN` before it is built (pkg/analysis/triage.go:635-640).
@@ -13921,7 +13976,8 @@ fn compute_brief_triage() -> Result<BriefTriage, ExitCode> {
         return Err(ExitCode::from(1));
     }
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    let out = bv_analysis::triage::build_triage(&issues, &g, robot_now());
+    let out =
+        bv_analysis::triage::build_triage(&issues, &g, robot_now(), !as_of_pair().0.is_empty());
     let authority = source_authority(&loaded_source, &data_hash);
     let claims_proven = authority.claim_safe;
 
