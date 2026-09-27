@@ -4185,7 +4185,7 @@ fn run_robot_triage() -> ExitCode {
     // only the CLI layer has, so it is resolved here rather than in the
     // analysis layer.
     // Describe the loaded file, not the scoped analysis set.
-    let source = loaded_source;
+    let source = loaded_source.clone();
     for rec in out.recommendations.iter_mut() {
         let origin = bv_core::tracker::resolve_issue_origin(&source.path, &rec.id);
         let actions = bv_core::tracker::build_actions(&origin, rec.claimable);
@@ -4547,7 +4547,12 @@ fn run_robot_triage() -> ExitCode {
             entry.reason.clear();
         }
     }
-    let mut payload = full_envelope_for(&data_hash, &loaded);
+    let mut payload = full_envelope_json_with_source_and_authority(
+        &data_hash,
+        &_hash,
+        Some(&loaded_source),
+        &loaded,
+    );
     payload["output_format"] = serde_json::json!(env.output_format);
     payload["version"] = serde_json::json!(GO_APP_VERSION);
 
@@ -7174,6 +7179,25 @@ fn full_envelope_json_with_source(
     source: Option<&SourceMeta>,
     issues: &[bv_core::model::Issue],
 ) -> serde_json::Value {
+    full_envelope_json_with_source_and_authority(data_hash, data_hash, source, issues)
+}
+
+/// As [`full_envelope_json_with_source`], but the source authority may name a
+/// different digest from the top-level `data_hash`.
+///
+/// `--repo` and `--label` narrow the analysed set while the envelope keeps
+/// describing the file it was loaded from: `scopeLoadedIssues` sets
+/// `DataHashMatchesIssues = false` precisely so the payload still names its
+/// origin (main.go:4890-4900). Go therefore publishes the *loaded* file's
+/// digest inside `source_authority` and the *filtered* one at the top level.
+/// Collapsing the two gave the authority "empty" for a filter that matched
+/// nothing, which in turn changed `authority_hash` and `scope_hash`.
+fn full_envelope_json_with_source_and_authority(
+    data_hash: &str,
+    authority_hash_input: &str,
+    source: Option<&SourceMeta>,
+    issues: &[bv_core::model::Issue],
+) -> serde_json::Value {
     let mut env = serde_json::Map::new();
     env.insert("generated_at".into(), serde_json::json!(jiff_now()));
     env.insert("data_hash".into(), serde_json::json!(data_hash));
@@ -7220,7 +7244,7 @@ fn full_envelope_json_with_source(
                 serde_json::to_value(&scope).unwrap_or(serde_json::Value::Null),
             );
         }
-        let authority = source_authority(meta, data_hash);
+        let authority = source_authority(meta, authority_hash_input);
         let ahash = bv_robot::authority_hash(&authority);
         env.insert(
             "source_authority".into(),
@@ -7229,7 +7253,11 @@ fn full_envelope_json_with_source(
         if !ahash.is_empty() {
             env.insert("authority_hash".into(), serde_json::json!(ahash));
         }
-        let shash = bv_robot::scope_hash(&label, &recipe, &repo, data_hash, &candidate_ids);
+        // Go passes ctx.DataHash here (robot_registry.go:257), and that field
+        // is the digest of the file that was loaded, not of the set a scope
+        // filter left behind — the same distinction the authority follows.
+        let shash =
+            bv_robot::scope_hash(&label, &recipe, &repo, authority_hash_input, &candidate_ids);
         if !shash.is_empty() {
             env.insert("scope_hash".into(), serde_json::json!(shash));
         }
