@@ -95,7 +95,10 @@ fn robot_help_lists_primaries() {
         "TUI Key Bindings:",
         "Run bvr --help for all options.",
     ] {
-        assert!(stdout.contains(section), "missing {section:?} in --robot-help");
+        assert!(
+            stdout.contains(section),
+            "missing {section:?} in --robot-help"
+        );
     }
     // The key-bindings table is generated from KEY_BINDING_DOCS; one binding
     // per category is enough to catch an empty or truncated table.

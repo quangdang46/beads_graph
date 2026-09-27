@@ -4330,8 +4330,17 @@ fn find_one_cycle_in_scc(g: &bv_graph_core::DiGraph, scc: &[usize]) -> Option<Ve
     None
 }
 
-fn capture_baseline(
-) -> Result<(bv_analysis::drift::BaselineStats, Vec<Vec<String>>, String), String> {
+/// What a baseline capture produces: the stats snapshot, one representative
+/// cycle per cyclic component, the data hash, and the five top-N metric lists
+/// Go stores under `top_metrics`.
+type BaselineCapture = (
+    bv_analysis::drift::BaselineStats,
+    Vec<Vec<String>>,
+    String,
+    bv_analysis::drift::TopMetrics,
+);
+
+fn capture_baseline() -> Result<BaselineCapture, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let (issues, _hash, _as_of_commit) = load_issues_auto(&cwd, None)?;
     capture_baseline_for(&issues)
@@ -4340,12 +4349,12 @@ fn capture_baseline(
 /// `capture_baseline` over an already-loaded (and possibly `--label`-scoped)
 /// issue set, so a scoped command compares like with like instead of silently
 /// measuring the whole repo.
-fn capture_baseline_for(
-    issues: &[bv_core::model::Issue],
-) -> Result<(bv_analysis::drift::BaselineStats, Vec<Vec<String>>, String), String> {
+fn capture_baseline_for(issues: &[bv_core::model::Issue]) -> Result<BaselineCapture, String> {
     let hash = bv_core::data_hash::compute_data_hash(issues);
     let g = bv_analysis::analyzer::build_graph(issues);
     let p1 = bv_analysis::analyzer::analyze_phase1(&g);
+    // Only the actionable count needs the computed blocked set; the recorded
+    // `blocked_count` is status-based, as Go counts it.
     let blocked = bv_analysis::triage::compute_blocked_set(issues);
     let actionable = issues
         .iter()
@@ -4369,31 +4378,78 @@ fn capture_baseline_for(
     // truncate. Ranking by graph iteration order instead selected a
     // different set, so the "entered top" details disagreed with the
     // oracle even at the same count.
-    let mut ranked: Vec<(String, f64)> = bv_analysis::algorithms::pagerank::pagerank_default(&g)
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
-        .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(10);
-    let pr_map: std::collections::BTreeMap<String, f64> = ranked.into_iter().collect();
+    // Go `buildMetricItems` (main.go:5242-5258) is called for five metrics, not
+    // one (main.go:3683-3687). Each is the same shape: id -> value map, sorted
+    // by value descending, truncated to 10.
+    //
+    // Only the *order* of equal scores is unmatchable, and deliberately so: Go
+    // feeds `sort.Slice` a slice built by ranging a Go map, so the pre-sort
+    // order is randomized per process and the sort is not stable. Three
+    // consecutive oracle runs on small_chain returned betweenness top-4 of
+    // [FIX-6,FIX-7,FIX-5,FIX-8], [FIX-7,FIX-6,FIX-5,FIX-8] and
+    // [FIX-6,FIX-7,FIX-8,FIX-5]. Chasing that would mean matching a coin flip.
+    // Sorting stably (id ascending) keeps the *set* identical and makes the
+    // document reproducible, which is strictly better and still comparable:
+    // the values themselves match the oracle exactly. It also means the
+    // membership of a truncated top-10 can differ from a given oracle run when
+    // more than ten nodes tie at the cut — the values agree, the tie-break
+    // cannot.
+    let top_map = |values: &[f64]| -> std::collections::BTreeMap<String, f64> {
+        let mut ranked: Vec<(String, f64)> = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), *v))
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(10);
+        ranked.into_iter().collect()
+    };
+    let pr_map = top_map(&bv_analysis::algorithms::pagerank::pagerank_default(&g));
+    let hits = bv_graph_core::hits_default(&g);
+    let top_metrics = bv_analysis::drift::TopMetrics {
+        pagerank: bv_analysis::drift::TopMetrics::from_map(&pr_map, 10),
+        betweenness: bv_analysis::drift::TopMetrics::from_map(
+            &top_map(&bv_analysis::analyzer::go_betweenness(&g)),
+            10,
+        ),
+        critical_path: bv_analysis::drift::TopMetrics::from_map(
+            &top_map(&bv_analysis::algorithms::critical_path::critical_path_heights(&g)),
+            10,
+        ),
+        hubs: bv_analysis::drift::TopMetrics::from_map(&top_map(&hits.hubs), 10),
+        authorities: bv_analysis::drift::TopMetrics::from_map(&top_map(&hits.authorities), 10),
+    };
     Ok((
         bv_analysis::drift::BaselineStats {
             node_count: p1.node_count,
             edge_count: p1.edge_count,
             density: p1.density,
+            // Go counts these by *status* (cmd/bv/main.go:3661-3672), not by
+            // readiness: `open` is StatusOpen plus StatusInProgress, `blocked`
+            // is StatusBlocked. Rust used the computed blocked set — issues
+            // that *have* an open blocker — which on small_chain is 11 against
+            // Go's 0, because those issues are open rather than blocked.
             open: issues
                 .iter()
-                .filter(|i| matches!(i.status, bv_core::model::Status::Open))
+                .filter(|i| {
+                    matches!(
+                        i.status,
+                        bv_core::model::Status::Open | bv_core::model::Status::InProgress
+                    )
+                })
                 .count(),
             closed: issues.iter().filter(|i| i.status.is_closed()).count(),
-            blocked: blocked.len(),
+            blocked: issues
+                .iter()
+                .filter(|i| i.status == bv_core::model::Status::Blocked)
+                .count(),
             cycle_count: new_cycles.len(),
             actionable,
             pagerank: pr_map,
         },
         new_cycles,
         hash,
+        top_metrics,
     ))
 }
 
@@ -4495,27 +4551,149 @@ fn warn_unknown_theme(args: &[String]) {
     }
 }
 
+/// Go `GetGitInfo` (baseline.go:139-155): HEAD sha, first line of the subject,
+/// and the branch name, each from a separate `git` invocation. A missing git or
+/// a repo-less directory yields empty strings, exactly as Go's error-swallowing
+/// `runGit` does.
+fn baseline_git_info() -> (String, String, String) {
+    let run = |args: &[&str]| -> String {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    (
+        run(&["rev-parse", "HEAD"]),
+        run(&["log", "-1", "--format=%s"]),
+        run(&["rev-parse", "--abbrev-ref", "HEAD"]),
+    )
+}
+
+/// Go `Baseline.Summary` (baseline.go:170-214).
+fn baseline_summary(
+    stats: &bv_analysis::drift::BaselineStats,
+    top: &bv_analysis::drift::TopMetrics,
+    created_at: &str,
+    commit_sha: &str,
+    commit_message: &str,
+    branch: &str,
+    description: &str,
+) -> String {
+    let mut sb = format!("Baseline created: {}\n", go_rfc1123(created_at));
+    if !commit_sha.is_empty() {
+        let short = &commit_sha[..commit_sha.len().min(8)];
+        if branch.is_empty() {
+            sb.push_str(&format!("Commit: {short}\n"));
+        } else {
+            sb.push_str(&format!("Commit: {short} ({branch})\n"));
+        }
+        if !commit_message.is_empty() {
+            sb.push_str(&format!("Message: {commit_message}\n"));
+        }
+    }
+    if !description.is_empty() {
+        sb.push_str(&format!("Note: {description}\n"));
+    }
+    sb.push_str(&format!(
+        "\nGraph: {} nodes, {} edges (density: {:.4})\n",
+        stats.node_count, stats.edge_count, stats.density
+    ));
+    sb.push_str(&format!(
+        "Status: {} open, {} blocked, {} closed\n",
+        stats.open, stats.blocked, stats.closed
+    ));
+    sb.push_str(&format!(
+        "Actionable: {} | Cycles: {}\n",
+        stats.actionable, stats.cycle_count
+    ));
+    if !top.pagerank.is_empty() {
+        sb.push_str("\nTop PageRank:\n");
+        for item in top.pagerank.iter().take(5) {
+            sb.push_str(&format!("  {}: {:.4}\n", item.id, item.value));
+        }
+    }
+    sb
+}
+
 fn run_save_baseline(desc: &str) -> ExitCode {
     match capture_baseline() {
         Err(e) => {
             eprintln!("Error: {e}");
             ExitCode::from(1)
         }
-        Ok((stats, cycles, hash)) => {
-            let doc = serde_json::json!({
+        Ok((stats, cycles, hash, top_metrics)) => {
+            let _ = hash;
+            // Go `baseline.Baseline` (baseline.go:17-44), field for field and in
+            // declaration order, with `omitempty` honoured. The previous
+            // document used Rust's own key names and omitted `top_metrics`
+            // entirely, so Go read every count as zero and no PageRank list at
+            // all — which made `--check-drift` report every current node as
+            // having "entered top" against a baseline bvr itself had written.
+            let mut doc = serde_json::json!({
                 "version": 1,
-                "created_at": jiff_now(),
+                "created_at": jiff_local_now(),
                 "description": desc,
                 "stats": stats,
-                "commit_sha": "",
-                "branch": "",
-                "cycles": cycles,
-                "data_hash": hash,
+                "top_metrics": top_metrics,
             });
+            // Go's `Cycles` is `omitempty` (baseline.go:41), so a graph with no
+            // cycles writes no `cycles` key at all. Emitting `[]` made the two
+            // documents differ on a clean repo.
+            if !cycles.is_empty() {
+                doc["cycles"] = serde_json::json!(cycles);
+            }
+            // Go `baseline.New` (baseline.go:216-231) stamps the current git
+            // HEAD into the document, which `Summary` then echoes back. Rust
+            // wrote empty strings, so Go read a saved baseline as having no
+            // commit at all and never printed the Commit/Message lines.
+            let (sha, message, branch) = baseline_git_info();
+            let commit_sha = sha.clone();
+            if !sha.is_empty() {
+                doc["commit_sha"] = serde_json::json!(sha);
+            }
+            if !message.is_empty() {
+                doc["commit_message"] = serde_json::json!(message);
+            }
+            if !branch.is_empty() {
+                doc["branch"] = serde_json::json!(branch);
+            }
             std::fs::create_dir_all(".bv").ok();
+            let created_at = doc["created_at"].as_str().unwrap_or_default().to_string();
+            let stats = &stats;
+            let top = &top_metrics;
             match std::fs::write(BASELINE_PATH, serde_json::to_vec_pretty(&doc).unwrap()) {
                 Ok(_) => {
-                    println!("Baseline saved to {BASELINE_PATH} (desc: {desc})");
+                    // Go main.go:3629-3630: the path, then `bl.Summary()`.
+                    // Go builds the path from an absolute `os.Getwd()`
+                    // (main.go:2558, baseline.go:89-91), so it echoes the
+                    // resolved location rather than the relative one.
+                    // `current_dir`, not `canonicalize`: on macOS the latter
+                    // resolves /tmp to /private/tmp, which Go's `os.Getwd()`
+                    // does not, so the two would echo different paths.
+                    // `PWD`, not `current_dir()`: on macOS the latter reports
+                    // the resolved physical path, so a run under a symlinked
+                    // directory (a /tmp scratch dir, say) echoed /private/tmp
+                    // where Go echoed /tmp. Go's `os.Getwd()` prefers `$PWD`
+                    // for exactly this reason.
+                    let abs = std::env::var("PWD")
+                        .map(|d| std::path::PathBuf::from(d).join(BASELINE_PATH))
+                        .unwrap_or_else(|_| std::path::PathBuf::from(BASELINE_PATH));
+                    println!("Baseline saved to {}", abs.display());
+                    print!(
+                        "{}",
+                        baseline_summary(
+                            stats,
+                            top,
+                            &created_at,
+                            &commit_sha,
+                            &message,
+                            &branch,
+                            desc
+                        )
+                    );
                     ExitCode::from(0)
                 }
                 Err(e) => {
@@ -4634,12 +4812,59 @@ fn run_baseline_info() -> ExitCode {
 
 /// Render an RFC3339 timestamp the way Go's `time.RFC1123` layout does:
 /// `Mon, 02 Jan 2006 15:04:05 MST`.
+/// The signed seconds an RFC3339 zone designator like `+07:00` denotes.
+fn rfc3339_offset_seconds(label: &str) -> Option<i64> {
+    let (sign, rest) = match label.strip_prefix('-') {
+        Some(r) => (-1i64, r),
+        None => (1i64, label.strip_prefix('+')?),
+    };
+    // `+07` and `+07:00` both reach here: the wire form carries minutes, the
+    // label `rfc3339_offset_label` produces is hour-only because that is what
+    // Go's `MST` layout prints.
+    let (h, m) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => (rest, "0"),
+    };
+    Some(sign * (h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60))
+}
+
+/// The zone label Go's `MST` layout prints for an RFC3339 timestamp: `UTC` for
+/// `Z`, otherwise the numeric offset truncated to whole hours (`+07`).
+fn rfc3339_offset_label(rfc3339: &str) -> Option<String> {
+    let (_, tail) = rfc3339.rsplit_once('T')?;
+    // The zone designator is the first `+` or `-` after the time fields. The
+    // date's own `-` signs are behind us, so anything here is an offset.
+    let idx = tail.find(['+', '-'])?;
+    let sign = &tail[idx..idx + 1];
+    let digits: String = tail[idx + 1..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    // `+07:00` and `+0700` both occur; the label Go prints is whole hours.
+    let hours: i64 = digits.get(..2)?.parse().ok()?;
+    Some(format!("{sign}{hours:02}"))
+}
+
 fn go_rfc1123(rfc3339: &str) -> String {
     let Ok(ts) = rfc3339.parse::<jiff::Timestamp>() else {
         return rfc3339.to_string();
     };
-    let zoned = ts.to_zoned(jiff::tz::TimeZone::UTC);
-    let dt = zoned.datetime();
+    // Go renders the timestamp in its own location ("Mon, 02 Jan 2006
+    // 15:04:05 MST"), so a baseline saved in +07:00 prints "+07" while one
+    // stored as UTC prints "UTC". Forcing UTC reported the right instant under
+    // the wrong zone, and the wrong wall clock under the right zone.
+    // Shift into the zone the timestamp is written in. Parsing normalises to
+    // UTC, so without this the printed wall clock is the UTC one under a local
+    // label — "00:44 +07" for an instant that is 07:44 local.
+    let label = rfc3339_offset_label(rfc3339);
+    let offset_secs = label
+        .as_deref()
+        .and_then(rfc3339_offset_seconds)
+        .unwrap_or(0);
+    let shifted = ts
+        .checked_add(std::time::Duration::from_secs(offset_secs.unsigned_abs()))
+        .unwrap_or(ts);
+    let dt = shifted.to_zoned(jiff::tz::TimeZone::UTC).datetime();
     // jiff numbers weekdays Monday=1..Sunday=7; Go's `time.RFC1123` layout
     // ("Mon, 02 Jan 2006 15:04:05 MST") indexes a Monday-first table. The old
     // lookup wrapped with `% 7` into a table that started at "Thu", so every
@@ -4650,8 +4875,14 @@ fn go_rfc1123(rfc3339: &str) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
+    // Go's `MST` renders the zone's abbreviation, or its numeric offset when
+    // the zone has no name — which is what a parsed RFC3339 offset gives.
+    // `Timestamp` is UTC-based, so parsing has already discarded the offset
+    // and it has to be read back off the wire form. Go keeps it: a
+    // `time.Time` carries its own location, and `MST` prints that.
+    let zone = label.unwrap_or_else(|| "UTC".to_string());
     format!(
-        "{weekday}, {:02} {} {:04} {:02}:{:02}:{:02} UTC",
+        "{weekday}, {:02} {} {:04} {:02}:{:02}:{:02} {zone}",
         dt.day(),
         MONTHS[(dt.month() - 1) as usize],
         dt.year(),
@@ -5687,6 +5918,61 @@ fn start_cpu_profile(path: Option<&str>) -> Result<Option<CpuProfileGuard>, Stri
     }))
 }
 
+/// Go reads the top-N metric lists from a baseline's sibling `top_metrics`
+/// object (baseline.go:38-40), not from `stats`. A document without it — which
+/// includes every baseline this port wrote before the schema was corrected —
+/// yields an empty list, and the drift calculator then reports every current
+/// entry as having "entered top", exactly as Go does.
+fn baseline_top_metrics(doc: &serde_json::Value) -> bv_analysis::drift::TopMetrics {
+    doc.get("top_metrics")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Go `Result.Summary` (pkg/drift/drift.go:752-786) — the human-readable
+/// rendering `--check-drift` prints when `--robot-drift` is absent. Go picks
+/// between this and the JSON envelope with a single `if *robotDriftCheck`
+/// (cmd/bv/main.go:3708); without it the CLI wrote a Rust-only JSON blob whose
+/// `summary` was a formatted string rather than Go's object.
+fn drift_summary(result: &bv_analysis::drift::DriftResult) -> String {
+    if !result.has_drift {
+        return "No drift detected. Project metrics are within baseline thresholds.\n".to_string();
+    }
+    let mut sb = String::from("Drift Analysis Summary\n======================\n\n");
+    if result.critical_count > 0 {
+        sb.push_str(&format!(
+            "🔴 CRITICAL: {} issue(s)\n",
+            result.critical_count
+        ));
+    }
+    if result.warning_count > 0 {
+        sb.push_str(&format!("🟡 WARNING: {} issue(s)\n", result.warning_count));
+    }
+    if result.info_count > 0 {
+        sb.push_str(&format!("🔵 INFO: {} issue(s)\n", result.info_count));
+    }
+    sb.push_str("\nDetails:\n");
+    for alert in &result.alerts {
+        let icon = match alert.severity {
+            bv_analysis::drift::Severity::Critical => "🔴",
+            bv_analysis::drift::Severity::Warning => "🟡",
+            _ => "ℹ️",
+        };
+        // Go prints the alert type's wire value; AlertType serializes
+        // snake_case and has no Display, so read it back off the JSON form.
+        let alert_type = serde_json::to_value(alert.alert_type)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        sb.push_str(&format!("  {icon} [{alert_type}] {}\n", alert.message));
+        for detail in &alert.details {
+            sb.push_str(&format!("      - {detail}\n"));
+        }
+    }
+    sb.push('\n');
+    sb
+}
+
 fn run_check_drift() -> ExitCode {
     let baseline_doc = match std::fs::read_to_string(BASELINE_PATH) {
         Ok(raw) => raw,
@@ -5695,15 +5981,31 @@ fn run_check_drift() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let base: serde_json::Value = serde_json::from_str(&baseline_doc).expect("baseline parses");
-    let base_stats: bv_analysis::drift::BaselineStats =
-        serde_json::from_value(base["stats"].clone()).expect("baseline stats shape");
+    let base: serde_json::Value = match serde_json::from_str(&baseline_doc) {
+        Ok(v) => v,
+        Err(e) => {
+            // Go reports this as `Error loading baseline: parsing baseline: ...`
+            // and exits 1 (cmd/bv/main.go:2571-2575). Rust panicked on a
+            // malformed file instead, which is a crash on user data.
+            eprintln!("Error loading baseline: parsing baseline: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut base_stats: bv_analysis::drift::BaselineStats =
+        match serde_json::from_value(base["stats"].clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Error loading baseline: parsing baseline: {e}");
+                return ExitCode::from(1);
+            }
+        };
+    base_stats.pagerank = baseline_top_metrics(&base).pagerank_map();
     let old_cycles: Vec<Vec<String>> = base
         .get("cycles")
         .and_then(|c| serde_json::from_value(c.clone()).ok())
         .unwrap_or_default();
 
-    let (current, new_cycles, _hash) = match capture_baseline() {
+    let (current, new_cycles, _hash, _top) = match capture_baseline() {
         Ok(x) => x,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -5741,18 +6043,7 @@ fn run_check_drift() -> ExitCode {
         &issues,
         robot_now(),
     );
-    println!(
-        "{}",
-        serde_json::json!({
-            "has_drift": result.has_drift,
-            "exit_code": result.exit_code(),
-            "summary": format!(
-                "{} critical, {} warning, {} info",
-                result.critical_count, result.warning_count, result.info_count
-            ),
-            "alerts": result.alerts,
-        })
-    );
+    print!("{}", drift_summary(&result));
     ExitCode::from(result.exit_code())
 }
 
@@ -5770,9 +6061,25 @@ fn run_robot_drift() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let base: serde_json::Value = serde_json::from_str(&baseline_doc).expect("baseline parses");
-    let base_stats: bv_analysis::drift::BaselineStats =
-        serde_json::from_value(base["stats"].clone()).expect("baseline stats shape");
+    let base: serde_json::Value = match serde_json::from_str(&baseline_doc) {
+        Ok(v) => v,
+        Err(e) => {
+            // Go reports this as `Error loading baseline: parsing baseline: ...`
+            // and exits 1 (cmd/bv/main.go:2571-2575). Rust panicked on a
+            // malformed file instead, which is a crash on user data.
+            eprintln!("Error loading baseline: parsing baseline: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut base_stats: bv_analysis::drift::BaselineStats =
+        match serde_json::from_value(base["stats"].clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Error loading baseline: parsing baseline: {e}");
+                return ExitCode::from(1);
+            }
+        };
+    base_stats.pagerank = baseline_top_metrics(&base).pagerank_map();
     let old_cycles: Vec<Vec<String>> = base
         .get("cycles")
         .and_then(|c| serde_json::from_value(c.clone()).ok())
@@ -5788,7 +6095,7 @@ fn run_robot_drift() -> ExitCode {
         .unwrap_or("")
         .to_string();
 
-    let (current, new_cycles, _hash) = match capture_baseline() {
+    let (current, new_cycles, _hash, _top) = match capture_baseline() {
         Ok(x) => x,
         Err(e) => {
             let payload = serde_json::json!({
@@ -9521,7 +9828,7 @@ fn run_robot_alerts() -> ExitCode {
     // current stats against themselves when no baseline exists. Passing the
     // same stats for both sides — as this handler used to — made every
     // drift check trivially zero, so --robot-alerts always reported none.
-    let (current, cycles, _hash) = match capture_baseline_for(&issues) {
+    let (current, cycles, _hash, _top) = match capture_baseline_for(&issues) {
         Ok(x) => x,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -15344,6 +15651,66 @@ fn robot_now() -> jiff::Timestamp {
         }
     }
     jiff::Timestamp::now()
+}
+
+/// The wall clock in the machine's own zone, second precision.
+///
+/// `baseline.created_at` is the one timestamp Go takes from `time.Now()`
+/// rather than `robotNow()` (baseline.go:224), so it is deliberately *not*
+/// pinned by SOURCE_DATE_EPOCH and carries the local UTC offset. Every
+/// envelope `generated_at` goes through [`jiff_now`] and stays pinned; this
+/// exists so the baseline document matches the oracle's own file.
+fn jiff_local_now() -> String {
+    // Go stamps `baseline.created_at` from `time.Now()`, which carries the
+    // machine's own UTC offset. The tz database is not consulted here: jiff's
+    // `TimeZone::system()` resolves UTC on macOS, so reading the offset from
+    // the C library is the only way to get the instant Go would have written.
+    // Getting this wrong is not cosmetic — the stored timestamp is what every
+    // later `--check-drift` compares against.
+    let offset = local_utc_offset_seconds();
+    let local = jiff::Timestamp::now()
+        .checked_add(std::time::Duration::from_secs(offset.unsigned_abs()))
+        .unwrap_or_else(|_| jiff::Timestamp::now());
+    let dt = local.to_zoned(jiff::tz::TimeZone::UTC).datetime();
+    let zone = if offset == 0 {
+        "Z".to_string()
+    } else {
+        let sign = if offset < 0 { '-' } else { '+' };
+        let (h, m) = (offset.abs() / 3600, (offset.abs() % 3600) / 60);
+        format!("{sign}{h:02}:{m:02}")
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{zone}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
+/// The machine's current UTC offset in seconds, from the C library's
+/// `localtime_r`. Falls back to 0 (UTC) if the call is unavailable.
+fn local_utc_offset_seconds() -> i64 {
+    #[cfg(unix)]
+    {
+        // SAFETY: `localtime_r` writes a single `tm` we own and initialise to
+        // zero first; `time` with a null argument is the documented way to
+        // read the current time.
+        unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut tm: libc::tm = std::mem::zeroed();
+            if libc::localtime_r(&now, &mut tm).is_null() {
+                return 0;
+            }
+            tm.tm_gmtoff as i64
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn jiff_now() -> String {

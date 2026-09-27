@@ -91,20 +91,99 @@ pub struct Alert {
     pub downstream_priority_sum: Option<i64>,
 }
 
-/// Baseline stats snapshot (Go baseline.json v1 subset used by checks).
+/// Baseline stats snapshot — Go `baseline.GraphStats` (baseline.go:47-56).
+///
+/// The JSON names are Go's, not Rust's: Go writes `open_count`/`closed_count`/
+/// `blocked_count`/`actionable_count` where this struct used to write `open`,
+/// `closed`, `blocked` and `actionable`. Go has no `pagerank` field on
+/// GraphStats at all — the top-N PageRank lives in a sibling `top_metrics`
+/// object (baseline.go:38-40, :59-61) — so `pagerank` is skipped in both
+/// directions and populated from `top_metrics` by the reader. Serialising it
+/// under `stats` produced a document Go silently ignored, which made every
+/// current entry look like it had "entered top".
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BaselineStats {
     pub node_count: usize,
     pub edge_count: usize,
     pub density: f64,
+    // The `alias` on each count keeps baselines this port wrote before the
+    // schema was corrected readable. Go has no such alias: it ignores the old
+    // key and reads zero, which is why an old file looks like drift to it.
+    #[serde(rename = "open_count", alias = "open")]
     pub open: usize,
+    #[serde(rename = "closed_count", alias = "closed")]
     pub closed: usize,
+    #[serde(rename = "blocked_count", alias = "blocked")]
     pub blocked: usize,
     pub cycle_count: usize,
+    #[serde(rename = "actionable_count", alias = "actionable")]
     pub actionable: usize,
-    /// top PageRank per issue id (top-N stored at capture time)
-    #[serde(default)]
+    /// Top PageRank per issue id. Not part of `stats` in Go's schema; see the
+    /// type note. `skip` keeps it out of the written document and out of the
+    /// `stats` object on read, so it can only arrive via `top_metrics`.
+    #[serde(skip, default)]
     pub pagerank: BTreeMap<String, f64>,
+}
+
+/// Go `baseline.MetricItem` (baseline.go:77-80).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricItem {
+    pub id: String,
+    pub value: f64,
+}
+
+/// Go `baseline.TopMetrics` (baseline.go:59-75), in declaration order. Only
+/// `pagerank` participates in a drift check today; the rest are stored so a
+/// baseline Go writes round-trips through this port unchanged.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct TopMetrics {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pagerank: Vec<MetricItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub betweenness: Vec<MetricItem>,
+    #[serde(
+        rename = "critical_path",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub critical_path: Vec<MetricItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hubs: Vec<MetricItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorities: Vec<MetricItem>,
+}
+
+impl TopMetrics {
+    /// Go `buildMetricItems(metrics, 10)` (main.go:5242-5258): value
+    /// descending, then the top N. An empty map yields no items at all, which
+    /// is what `omitempty` then drops from the document.
+    pub fn from_map(items: &BTreeMap<String, f64>, limit: usize) -> Vec<MetricItem> {
+        if items.is_empty() {
+            return Vec::new();
+        }
+        let mut items: Vec<MetricItem> = items
+            .iter()
+            .map(|(id, value)| MetricItem {
+                id: id.clone(),
+                value: *value,
+            })
+            .collect();
+        items.sort_by(|a, b| {
+            b.value
+                .partial_cmp(&a.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        items.truncate(limit);
+        items
+    }
+
+    /// The `pagerank` list as the id -> value map the drift calculator reads.
+    pub fn pagerank_map(&self) -> BTreeMap<String, f64> {
+        self.pagerank
+            .iter()
+            .map(|m| (m.id.clone(), m.value))
+            .collect()
+    }
 }
 
 /// Per-label staleness threshold overrides (Go `LabelConfig`, bv-167).
