@@ -815,20 +815,6 @@ pub fn build_triage(
     build_triage_inner(issues, g, now, true, time_travelling)
 }
 
-/// Go `--emit-script` (cmd/bv/main.go:4013) calls
-/// `ComputeTriageWithOptions`, whose analyzer never had phase 2 awaited, so its
-/// PageRank and betweenness inputs are EMPTY and the ranking is driven by
-/// staleness, priority, effort and the unblock boost alone. The triage registry
-/// path awaits phase 2 (robot_registry.go:930-932) and does use them — the two
-/// rank the same issues differently, which is why bvr's script disagreed.
-pub fn build_triage_without_graph_metrics(
-    issues: &[Issue],
-    g: &DiGraph,
-    now: jiff::Timestamp,
-) -> TriageOutput {
-    build_triage_inner(issues, g, now, false, false)
-}
-
 /// Go parity variant for `cmd/bv/main.go:4013` (`--emit-script`), the one
 /// triage caller that omits `TriageOptions.WaitForPhase2` (triage.go:400).
 /// The `opts.WaitForPhase2 && hasOpenIssues` guard at triage.go:517-519
@@ -838,6 +824,14 @@ pub fn build_triage_without_graph_metrics(
 /// is 0 (priority.go:445-453) and `normalize(v, 0)` is 0 (priority.go:429-434),
 /// so `prNorm`/`bwNorm` are 0 for every node and both terms drop out of the
 /// composite. This is deliberate Go parity, not an oversight.
+/// Go `--emit-script` (cmd/bv/main.go:4013) calls
+/// `ComputeTriageWithOptions`, whose analyzer never had phase 2 awaited, so its
+/// PageRank and betweenness inputs are EMPTY and the ranking comes from
+/// staleness, priority, effort and the unblock boost alone. The triage registry
+/// path awaits phase 2 (robot_registry.go:930-932) and does use them, which is
+/// why the two rank the same issues differently — with graph metrics TREE-1
+/// scores 0.542 and leads nothing; without them it scores 0.355 and leads, which
+/// is what the oracle's script prints.
 pub fn build_triage_phase2_pending(
     issues: &[Issue],
     g: &DiGraph,

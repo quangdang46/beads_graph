@@ -13846,7 +13846,16 @@ fn run_emit_script(args: &[String]) -> ExitCode {
         return ExitCode::from(0);
     }
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    let out = bv_analysis::triage::build_triage_phase2_pending(&issues, &g, robot_now());
+    let mut out = bv_analysis::triage::build_triage_phase2_pending(&issues, &g, robot_now());
+    // The scoring builder leaves the reason in its generated cascade form —
+    // "🎯 Completing this unblocks N downstream issues (…)", counted over a full
+    // downstream closure. Go's unblocks set is the one-open-blocker relation
+    // (triage.go:796-830), and the reason names that set, so the generated line
+    // has to be restated against `unblocks_ids` exactly as the triage path does.
+    // Without it the script printed three items where the oracle prints two.
+    for rec in out.recommendations.iter_mut() {
+        restate_unblock_reason(&mut rec.reasons, &rec.unblocks_ids);
+    }
 
     // Go writes `len(triage.Recommendations)`, and the recommendations list is
     // sliced to `opts.TopN` before it is built (pkg/analysis/triage.go:635-640).
