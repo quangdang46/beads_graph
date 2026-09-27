@@ -842,22 +842,44 @@ pub fn build_triage(issues: &[Issue], g: &DiGraph, now: jiff::Timestamp) -> Tria
         .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
         .collect();
 
+    // Go graph.go:1913-1916 marks every metric "skipped" on an empty graph
+    // (`emptyGraphMetricStatus`). Everything else in the result is still
+    // computed — the velocity block in particular still gets its eight zeroed
+    // weekly buckets — so only the status is special-cased, not the output.
+    let empty_graph = g.node_count() == 0;
+    let all_skipped = crate::analyzer::StatusEntry::skipped("");
+    let empty_graph_status = crate::analyzer::MetricStatus {
+        page_rank: all_skipped.clone(),
+        betweenness: all_skipped.clone(),
+        eigenvector: all_skipped.clone(),
+        hits: all_skipped.clone(),
+        critical: all_skipped.clone(),
+        cycles: all_skipped.clone(),
+        kcore: all_skipped.clone(),
+        articulation: all_skipped.clone(),
+        slack: all_skipped,
+    };
+
     let skipped = crate::analyzer::StatusEntry::skipped("disabled by triage fast config");
-    let metric_status = crate::analyzer::MetricStatus {
-        page_rank: crate::analyzer::StatusEntry::computed(pr_ms),
-        betweenness: {
-            let mut e = crate::analyzer::StatusEntry::computed(bw_ms);
-            e.reason = "approximate".into();
-            e.sample = actual_sample;
-            e
-        },
-        eigenvector: skipped.clone(),
-        hits: skipped.clone(),
-        critical: skipped.clone(),
-        cycles: skipped.clone(),
-        kcore: skipped.clone(),
-        articulation: skipped.clone(),
-        slack: skipped.clone(),
+    let metric_status = if empty_graph {
+        empty_graph_status
+    } else {
+        crate::analyzer::MetricStatus {
+            page_rank: crate::analyzer::StatusEntry::computed(pr_ms),
+            betweenness: {
+                let mut e = crate::analyzer::StatusEntry::computed(bw_ms);
+                e.reason = "approximate".into();
+                e.sample = actual_sample;
+                e
+            },
+            eigenvector: skipped.clone(),
+            hits: skipped.clone(),
+            critical: skipped.clone(),
+            cycles: skipped.clone(),
+            kcore: skipped.clone(),
+            articulation: skipped.clone(),
+            slack: skipped.clone(),
+        }
     };
 
     let inputs = ImpactInputs {

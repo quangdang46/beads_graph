@@ -4551,7 +4551,7 @@ fn run_robot_triage() -> ExitCode {
         &data_hash,
         &_hash,
         Some(&loaded_source),
-        &loaded,
+        &issues,
     );
     payload["output_format"] = serde_json::json!(env.output_format);
     payload["version"] = serde_json::json!(GO_APP_VERSION);
@@ -4699,16 +4699,11 @@ fn run_robot_triage() -> ExitCode {
         "jq '.feedback.weight_adjustments' - View feedback-adjusted weights (bv-90)",
         "--graph-root <id> - Scope triage to subgraph rooted at a specific epic (bv-140)",
     ]);
-    match serde_json::to_string(&payload) {
-        Ok(s) => {
-            println!("{s}");
-            ExitCode::from(0)
-        }
-        Err(e) => {
-            eprintln!("Error: serialization failed: {e}");
-            ExitCode::from(1)
-        }
-    }
+    // `emit_json`, not `serde_json::to_string`: the Go encoder writes whole
+    // float64 values without a trailing ".0", so an empty graph's density
+    // renders as `0` and not `0.0`. Bypassing it made every zero in this
+    // payload differ from the oracle's byte for byte.
+    emit_json(&payload)
 }
 
 /// Go `ConfigForSize`'s `MaxCyclesToStore` for a graph of `nodes` nodes
@@ -7196,7 +7191,11 @@ fn full_envelope_json_with_source_and_authority(
     data_hash: &str,
     authority_hash_input: &str,
     source: Option<&SourceMeta>,
-    issues: &[bv_core::model::Issue],
+    // The set a scope filter left behind. Go builds the scope hash's id list
+    // from `ctx.Issues` (robot_registry.go:250-254), which is the scoped set,
+    // while the authority's counts describe the loaded file — so a `--repo`
+    // that matched nothing hashes an EMPTY id list, not every id that was read.
+    scoped_issues: &[bv_core::model::Issue],
 ) -> serde_json::Value {
     let mut env = serde_json::Map::new();
     env.insert("generated_at".into(), serde_json::json!(jiff_now()));
@@ -7221,7 +7220,8 @@ fn full_envelope_json_with_source_and_authority(
         // A --label scope narrows the candidate set to the label's own issues
         // (their neighbours stay in the analysis as context) — see Go
         // scopeLoadedIssues, main.go:4870-4900.
-        let (mut candidate_ids, _) = bv_analysis::label_health::label_scope_ids(&label, issues);
+        let (mut candidate_ids, _) =
+            bv_analysis::label_health::label_scope_ids(&label, scoped_issues);
         candidate_ids.sort();
         // Go emits `scope` between source_kind and source_authority, not after
         // scope_hash (RobotEnvelope, cmd/bv/main.go:7213-7229). The wire order
@@ -7253,11 +7253,12 @@ fn full_envelope_json_with_source_and_authority(
         if !ahash.is_empty() {
             env.insert("authority_hash".into(), serde_json::json!(ahash));
         }
-        // Go passes ctx.DataHash here (robot_registry.go:257), and that field
-        // is the digest of the file that was loaded, not of the set a scope
-        // filter left behind — the same distinction the authority follows.
-        let shash =
-            bv_robot::scope_hash(&label, &recipe, &repo, authority_hash_input, &candidate_ids);
+        // Go passes `ctx.DataHash` here (robot_registry.go:257), which is the
+        // same digest the envelope publishes at the top level — "empty" for a
+        // filter that matched nothing. Only `source_authority` names the loaded
+        // file; the scope hash does not, and feeding it the authority's digest
+        // changed scope_hash for every `--repo` and `--label` invocation.
+        let shash = bv_robot::scope_hash(&label, &recipe, &repo, data_hash, &candidate_ids);
         if !shash.is_empty() {
             env.insert("scope_hash".into(), serde_json::json!(shash));
         }
