@@ -2876,8 +2876,8 @@ static SCOPE_FLAGS: std::sync::OnceLock<[String; 3]> = std::sync::OnceLock::new(
 /// `--robot-triage`, inside `triage` — which put them where Go never puts them.
 static AS_OF: std::sync::OnceLock<[String; 2]> = std::sync::OnceLock::new();
 
-fn set_as_of(ref_name: &str, commit: &str) {
-    let _ = AS_OF.set([ref_name.to_string(), commit.to_string()]);
+fn set_as_of(ref_name: String, commit: String) {
+    let _ = AS_OF.set([ref_name, commit]);
 }
 
 fn as_of_pair() -> (String, String) {
@@ -3457,7 +3457,14 @@ fn run_robot_next() -> ExitCode {
         }
     };
 
-    let mut payload = full_envelope_for(&hash, &issues);
+    // The loader reported the source; re-deriving it from the working tree
+    // names a different file under `--as-of`.
+    set_as_of(
+        as_of.clone().unwrap_or_default(),
+        as_of_commit.clone().unwrap_or_default(),
+    );
+    let mut payload =
+        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&source), &issues);
     if let Some(ref a) = as_of {
         payload["as_of"] = serde_json::json!(a);
     }
@@ -4227,8 +4234,8 @@ fn run_robot_triage() -> ExitCode {
     // parsing it found no `triage.quick_ref` at all and had no way to tell the
     // two apart. The analysis below is defined for an empty graph.
     set_as_of(
-        &as_of.clone().unwrap_or_default(),
-        &as_of_commit.clone().unwrap_or_default(),
+        as_of.clone().unwrap_or_default(),
+        as_of_commit.clone().unwrap_or_default(),
     );
     // Go keeps the loader's data_hash: scopeLoadedIssues sets
     // DataHashMatchesIssues=false so the payload still names the file it came
@@ -7190,9 +7197,14 @@ type AnalysisTuple = (
 );
 
 /// Shared helper: load issues, build graph, run analysis phases.
-fn load_and_analyze() -> Result<AnalysisTuple, ExitCode> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let (issues, _) = match bv_core::discovery::load_issues_from_repo(&cwd) {
+fn load_and_analyze(as_of: Option<&str>) -> Result<AnalysisTuple, ExitCode> {
+    let cwd = go_working_dir();
+    // Through the metadata-returning loader so `--as-of` is honoured and the
+    // source records that the set came from git. The plain discovery call this
+    // used had no revision parameter and no provenance, which is why
+    // --robot-priority reported `source_kind: "jsonl_local"` under time travel
+    // where the oracle says "git".
+    let (issues, _hash, _as_of_commit, _source) = match load_issues_auto_meta_raw(&cwd, as_of) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
@@ -7203,7 +7215,15 @@ fn load_and_analyze() -> Result<AnalysisTuple, ExitCode> {
         }
     };
     // Provenance of the loaded file, captured BEFORE scoping.
-    let loaded_source = source_meta_for(&issues);
+    // The loader already knows where the issues came from — including a git
+    // revision, where re-deriving from the working tree names a different file
+    // entirely. Use what it reports, and publish the --as-of pair the envelope
+    // builder reads.
+    let loaded_source = _source;
+    set_as_of(
+        as_of.unwrap_or_default().to_string(),
+        _as_of_commit.clone().unwrap_or_default(),
+    );
     // Go main.go:2786 — `--repo` then `--label` narrow the set before any
     // handler analyses it, and a `--repo` filter re-hashes the narrowed source
     // (main.go:4883-4884).
@@ -9010,16 +9030,29 @@ fn go_track_id(mut n: usize) -> String {
 
 fn run_robot_plan() -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (issues, _, _as_of_commit) = match load_issues_auto(&cwd, None) {
-        Ok(x) => x,
-        Err(e) => {
-            if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+    // Same reason as load_and_analyze: the plain discovery call has no
+    // revision parameter and no provenance, so `--as-of` was ignored and the
+    // plan described the working tree rather than the requested commit.
+    let as_of = extract_as_of();
+    let (issues, _hash, _as_of_commit, _source) =
+        match load_issues_auto_meta(&cwd, as_of.as_deref()) {
+            Ok(x) => x,
+            Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source();
+                }
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
             }
-            eprintln!("Error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+        };
+    // Publish the revision pair for the envelope builder, and keep the
+    // loader's provenance: re-deriving it from the working tree would name a
+    // different file entirely under `--as-of`.
+    set_as_of(
+        as_of.clone().unwrap_or_default(),
+        _as_of_commit.clone().unwrap_or_default(),
+    );
+    let plan_source = _source.clone();
     let hash = bv_core::data_hash::compute_data_hash(&issues);
     let g = bv_analysis::analyzer::build_graph(&issues);
     let blocked = bv_analysis::triage::compute_blocked_set(&issues);
@@ -9207,7 +9240,10 @@ fn run_robot_plan() -> ExitCode {
     // (generated_at, data_hash, output_format, version, source_path,
     // source_kind, source_authority, authority_hash, scope_hash), so build it
     // with the shared helper instead of the hand-rolled two-field prefix.
-    let mut payload = full_envelope_for(&hash, &issues);
+    // The loader reported the source; re-deriving it from the working tree
+    // names a different file under `--as-of`.
+    let mut payload =
+        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&plan_source), &issues);
     payload["analysis_config"] = plan_analysis_config(g.len());
     payload["status"] = plan_priority_status(&g);
     // Go declares LabelScope/LabelContext between Status and Plan
@@ -10078,10 +10114,11 @@ fn run_robot_priority(args: &[String]) -> ExitCode {
         .filter(|v| *v > 0)
         .unwrap_or(10) as usize;
 
-    let (issues, _hash, _p1, status, _g, loaded_source) = match load_and_analyze() {
-        Ok(x) => x,
-        Err(code) => return code,
-    };
+    let (issues, _hash, _p1, status, _g, loaded_source) =
+        match load_and_analyze(extract_as_of().as_deref()) {
+            Ok(x) => x,
+            Err(code) => return code,
+        };
     // Go scores the whole graph and filters the *recommendation list*
     // afterwards (robot_registry.go:940-951). Filtering the issue set first
     // shrank total_issues and stripped the graph context the surviving
@@ -16295,10 +16332,11 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
 }
 
 fn run_robot_label_health() -> ExitCode {
-    let (issues, hash, _p1, _status, _g, loaded_source) = match load_and_analyze() {
-        Ok(x) => x,
-        Err(code) => return code,
-    };
+    let (issues, hash, _p1, _status, _g, loaded_source) =
+        match load_and_analyze(extract_as_of().as_deref()) {
+            Ok(x) => x,
+            Err(code) => return code,
+        };
     let cfg = bv_analysis::label_health::LabelHealthConfig::default();
     let results = bv_analysis::label_health::compute_all_label_health(&issues, &cfg, robot_now());
     let mut payload =
@@ -16315,10 +16353,11 @@ fn run_robot_label_health() -> ExitCode {
 }
 
 fn run_robot_label_flow() -> ExitCode {
-    let (issues, hash, _p1, _status, _g, loaded_source) = match load_and_analyze() {
-        Ok(x) => x,
-        Err(code) => return code,
-    };
+    let (issues, hash, _p1, _status, _g, loaded_source) =
+        match load_and_analyze(extract_as_of().as_deref()) {
+            Ok(x) => x,
+            Err(code) => return code,
+        };
     let cfg = bv_analysis::label_health::LabelHealthConfig::default();
     let flow = bv_analysis::label_health::compute_cross_label_flow(&issues, &cfg);
     let mut payload =
