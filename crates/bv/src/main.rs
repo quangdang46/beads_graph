@@ -857,25 +857,112 @@ fn parse_go_bool(value: &str) -> Option<bool> {
 /// markdown + JSON under `docs/generated`; we emit the JSON artifact plus a
 /// markdown index so the flag is a real, terminating command rather than a
 /// fall-through to the TUI launcher.
+/// Go `ReplaceBetweenMarkers` (internal/docgen/docgen.go:561-572): replace the
+/// body between `<!-- bv:generated:NAME -->` and the matching closing comment,
+/// leaving the markers themselves in place.
+///
+/// Returns `None` when the document has no such pair, which is Go's `ok` flag —
+/// a document without the markers is left untouched rather than treated as an
+/// error.
+fn replace_between_markers(content: &str, marker: &str, body: &str) -> Option<String> {
+    let open = format!("<!-- bv:generated:{marker} -->");
+    // Go's closing tag allows the name to be repeated: `<!-- /bv:generated:NAME
+    // -->` and `<!-- /bv:generated -->` both close it.
+    let close_with = format!("<!-- /bv:generated:{marker} -->");
+    let close_bare = "<!-- /bv:generated -->";
+    let start = content.find(&open)?;
+    let after = start + open.len();
+    let end = content[after..]
+        .find(&close_with)
+        .map(|i| after + i)
+        .or_else(|| content[after..].find(close_bare).map(|i| after + i))?;
+    // Everything from just after the opening marker up to the closing one is
+    // the old body and is replaced wholesale — slicing to `end` would keep it
+    // and simply append the new table below.
+    let mut out = String::with_capacity(content.len() + body.len());
+    out.push_str(&content[..after]);
+    out.push('\n');
+    out.push_str(body.trim());
+    out.push('\n');
+    out.push_str(&content[end..]);
+    Some(out)
+}
+
+/// Go `docgen.Generate` steps 3 and 4 (docgen.go:630-672): rewrite the
+/// generated tables in README.md, and in AGENTS.md when it exists.
+///
+/// README.md is read unconditionally and its absence is an error — that is the
+/// behaviour being reproduced. Rust previously wrote two files under
+/// docs/generated and stopped, so a repository with no README reported success
+/// having done nothing to the document the command exists to update.
+fn update_generated_markers(repo_root: &std::path::Path, tables: &[(&str, String)]) -> ExitCode {
+    let readme = repo_root.join("README.md");
+    let readme_bytes = match std::fs::read(&readme) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "generating docs: reading README.md: {}",
+                go_path_error("open", &readme.to_string_lossy(), &e)
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let original = String::from_utf8_lossy(&readme_bytes).to_string();
+    let mut updated = original.clone();
+    for (marker, table) in tables {
+        if let Some(next) = replace_between_markers(&updated, marker, table) {
+            updated = next;
+        }
+    }
+    if updated != original {
+        if let Err(e) = std::fs::write(&readme, &updated) {
+            eprintln!(
+                "generating docs: updating README.md: {}",
+                go_path_error("open", &readme.to_string_lossy(), &e)
+            );
+            return ExitCode::from(1);
+        }
+    }
+    // AGENTS.md is optional: Go ignores a read failure and only writes when the
+    // content actually changed.
+    let agents = repo_root.join("AGENTS.md");
+    if let Ok(bytes) = std::fs::read(&agents) {
+        let original = String::from_utf8_lossy(&bytes).to_string();
+        let mut updated = original.clone();
+        for (marker, table) in tables {
+            if let Some(next) = replace_between_markers(&updated, marker, table) {
+                updated = next;
+            }
+        }
+        if updated != original {
+            let _ = std::fs::write(&agents, &updated);
+        }
+    }
+    ExitCode::from(0)
+}
+
 fn run_generate_docs() -> ExitCode {
     let out_dir = std::path::Path::new("docs/generated");
     if let Err(e) = std::fs::create_dir_all(out_dir) {
         eprintln!("Error: generating docs: {e}");
         return ExitCode::from(1);
     }
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let issues = match bv_core::discovery::load_issues_from_repo(&cwd) {
-        Ok((i, _)) => i,
-        Err(e) => {
-            eprintln!("Error: generating docs: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    // `$PWD`, not `current_dir()`: on macOS the latter reports the resolved
+    // physical path, so every path Go names in its errors would read
+    // /private/tmp where Go says /tmp.
+    let cwd = std::env::var("PWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_default();
+    // Go's docgen never loads issues: it renders the flag, env, alerts, recipe
+    // and key-binding registries and rewrites the README/AGENTS markers. Rust
+    // loaded the issue set to put a count in a JSON file Go does not produce,
+    // which made the command fail in any repository without a `.beads` — the
+    // one place a README is most likely to need regenerating.
     let doc = serde_json::json!({
         "generated_by": "bvr",
         "version": GO_APP_VERSION,
         "contract_version": bv_robot::ROBOT_CONTRACT_VERSION,
-        "issue_count": issues.len(),
         "flags": flags::flag_names(),
     });
     let json_path = out_dir.join("bvr-docs.json");
@@ -884,10 +971,9 @@ fn run_generate_docs() -> ExitCode {
         return ExitCode::from(1);
     }
     let md = format!(
-        "# bv generated docs\n\n- version: {}\n- contract: {}\n- issues: {}\n- flags: {}\n",
+        "# bv generated docs\n\n- version: {}\n- contract: {}\n- flags: {}\n",
         GO_APP_VERSION,
         bv_robot::ROBOT_CONTRACT_VERSION,
-        issues.len(),
         flags::flag_names().len()
     );
     let md_path = out_dir.join("bvr-docs.md");
@@ -900,7 +986,31 @@ fn run_generate_docs() -> ExitCode {
         md_path.display(),
         json_path.display()
     );
-    ExitCode::from(0)
+    // The `flags` marker is the one this port has a real table for; the others
+    // Go fills from the recipes, env and drift registries, which are separate
+    // ports. A marker with no table is left as it is, exactly as Go's `ok`
+    // flag does.
+    let flags_table = render_generated_flags_table();
+    update_generated_markers(&cwd, &[("flags", flags_table)])
+}
+
+/// The `flags` table body written between the README markers. A definition per
+/// line, in registry order.
+fn render_generated_flags_table() -> String {
+    let mut out = String::from("| Flag | Type |\n| --- | --- |\n");
+    for f in flags::ROBOT_PRIMARIES
+        .iter()
+        .chain(flags::MODIFIER_FLAGS.iter())
+    {
+        let kind = match f.kind {
+            flags::FlagKind::Bool => "bool",
+            flags::FlagKind::Str | flags::FlagKind::RepeatableStr => "string",
+            flags::FlagKind::Int => "int",
+            flags::FlagKind::Float => "float",
+        };
+        out.push_str(&format!("| `--{}` | {} |\n", f.name, kind));
+    }
+    out
 }
 
 /// `--export` (Go cmd/bv/main.go:4372). Writes a report using recipe defaults
