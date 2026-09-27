@@ -741,7 +741,13 @@ fn export_writes_a_report_and_exits_zero() {
     let (code, stdout, stderr) = run(&["--export", out_path.to_str().unwrap()]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(!stderr.contains("launching TUI"), "{stderr}");
-    assert!(stdout.contains("Exported"), "{stdout}");
+    // Go main.go:4424 / :4478 — a progress line naming the count and the path,
+    // then "Done!". The previous assertion looked for "Exported", which pinned
+    // a message Go never printed.
+    assert!(
+        stdout.contains("Exporting") && stdout.contains("Done!"),
+        "{stdout}"
+    );
     let written = std::fs::read_to_string(&out_path).expect("report written");
     // Go's `ResolveReportOptions` seeds Title with "Beads Export"
     // (pkg/export/markdown.go:50); "Beads Report" was never a Go value.

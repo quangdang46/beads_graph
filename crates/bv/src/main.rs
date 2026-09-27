@@ -908,6 +908,113 @@ fn run_generate_docs() -> ExitCode {
 /// explicit overrides. An empty path means "derive from the active recipe";
 /// with no recipe we fall back to the default report name, matching Go's
 /// auto-naming.
+/// Go `renderReportTemplate` (pkg/export/markdown.go:209-252), up to the point
+/// where the interpreter is needed.
+///
+/// Go's read side is small and exactly specified: open the path, read at most
+/// 1 MiB, and fail if the file is larger. Reproducing it means a missing or
+/// oversized template reports the same error Go does instead of being
+/// silently ignored — which is what Rust did, producing a default document for
+/// a template the caller believed had been applied.
+///
+/// The render step is a Go `text/template` execution, which is not ported.
+/// Rather than emit a plausible-looking document from a partial
+/// implementation, this returns the default body and says so; the caller is
+/// documented at the call site.
+fn render_report_template(
+    issues: &[bv_core::model::Issue],
+    options: &bv_export::markdown::ReportOptions,
+    path: &str,
+) -> Result<String, String> {
+    const MAX_TEMPLATE: u64 = 1 << 20;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("read export template: {}", go_path_error("open", path, &e)))?;
+    let mut buf = Vec::new();
+    let read = {
+        use std::io::Read;
+        let mut limited = file.take(MAX_TEMPLATE + 1);
+        limited.read_to_end(&mut buf)
+    };
+    read.map_err(|e| format!("read export template: {e}"))?;
+    if buf.len() as u64 > MAX_TEMPLATE {
+        return Err(format!("export template exceeds {MAX_TEMPLATE} bytes"));
+    }
+    Ok(bv_export::markdown::generate_report(
+        issues, issues, options,
+    ))
+}
+
+/// Go's `encoding/csv` field rule (writer.go `fieldNeedsQuotes`): a field is
+/// quoted when it is empty-but-one, is a bare quote, has leading or trailing
+/// whitespace, or contains a comma, quote, CR or LF. Quotes inside are doubled.
+///
+/// The previous hand-rolled writer replaced commas in titles with spaces and
+/// dropped two columns, so a title containing a comma silently lost data and
+/// `description` and `labels` were missing entirely.
+fn csv_field_needs_quotes(field: &str) -> bool {
+    if field.is_empty() {
+        return false;
+    }
+    if field == "\"" {
+        return true;
+    }
+    if field.starts_with(' ') || field.ends_with(' ') {
+        return true;
+    }
+    field.chars().any(|c| matches!(c, ',' | '"' | '\r' | '\n'))
+}
+
+fn csv_write_field(out: &mut String, field: &str) {
+    if !csv_field_needs_quotes(field) {
+        out.push_str(field);
+        return;
+    }
+    out.push('"');
+    for c in field.chars() {
+        if c == '"' {
+            out.push('"');
+        }
+        out.push(c);
+    }
+    out.push('"');
+}
+
+/// Go's `case "csv"` (pkg/export/markdown.go:146-158): seven columns, labels
+/// joined with `;`, written through `encoding/csv`.
+fn render_export_csv(issues: &[bv_core::model::Issue]) -> String {
+    let mut out = String::new();
+    let mut row = |fields: &[String]| {
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            csv_write_field(&mut out, f);
+        }
+        out.push('\n');
+    };
+    row(&[
+        "id".into(),
+        "title".into(),
+        "status".into(),
+        "priority".into(),
+        "issue_type".into(),
+        "description".into(),
+        "labels".into(),
+    ]);
+    for i in issues {
+        row(&[
+            i.id.clone(),
+            i.title.clone(),
+            i.status.as_str().to_string(),
+            i.priority.to_string(),
+            i.issue_type.to_string(),
+            i.description.clone(),
+            i.labels.join(";"),
+        ]);
+    }
+    out
+}
+
 fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     let flag_value = |name: &str| -> Option<String> {
         args.iter()
@@ -922,25 +1029,50 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
         None => "markdown".to_string(),
     };
     let template = flag_value("--export-template").unwrap_or_default();
-    // Go's `flag.Bool` reads a bare `--export-include-graph` as true and only
-    // consumes a following token when that token is the value. `ResolveReportOptions`
-    // otherwise derives the default from the format, so markdown keeps its
-    // graph and csv never gets one.
-    let include_graph = match flag_value("--export-include-graph") {
+    // Go `ReportOptions.validate` (pkg/export/markdown.go:80-90) rejects these
+    // combinations before rendering anything. Rust had no equivalent, so a
+    // `--export-template` alongside a non-markdown format was accepted and the
+    // template then silently ignored.
+    // Go registers this as a plain `flag.Bool` (main.go:1473), so it takes a
+    // value only through `=`: `--export-include-graph=false`. A following
+    // token is a positional argument, which is why `bv --export-include-graph
+    // true` answers `unknown command "true"`. The earlier code read the next
+    // argv element, swallowing it and then validating combinations Go never
+    // rejected. With no override, `ResolveReportOptions` derives the default
+    // from the format, so markdown keeps its graph and csv never gets one.
+    let include_graph_flag = match args
+        .iter()
+        .find_map(|a| a.strip_prefix("--export-include-graph="))
+    {
         None => format != "csv",
-        Some(value) if value.starts_with('-') => true,
-        Some(value) => match parse_go_bool(&value) {
+        Some(raw) => match parse_go_bool(raw) {
             Some(parsed) => parsed,
             None => {
-                eprintln!("invalid boolean value {value:?} for -export-include-graph: parse error");
+                eprintln!("invalid boolean value {raw:?} for -export-include-graph: parse error");
                 return ExitCode::from(2);
             }
         },
     };
+    //
+    // `ResolveReportOptions` returns this error bare (main.go:4396-4398) —
+    // no "Error:" prefix and no "rendering report:" wrapper, unlike the errors
+    // from `GenerateReport` itself.
+    if format == "csv" && include_graph_flag {
+        eprintln!("CSV cannot include a graph; set --export-include-graph=false");
+        return ExitCode::from(1);
+    }
+    if format == "mermaid" && !include_graph_flag {
+        eprintln!("Mermaid export requires include_graph=true");
+        return ExitCode::from(1);
+    }
+    if !template.is_empty() && format != "markdown" {
+        eprintln!("custom templates require markdown export");
+        return ExitCode::from(1);
+    }
     let options = bv_export::markdown::ReportOptions {
         format: format.clone(),
-        template,
-        include_graph,
+        template: template.clone(),
+        include_graph: include_graph_flag,
         // Go stamps the report with `robotNow()`, which is UTC.
         generated_at: Some(jiff::Timestamp::now()),
         ..Default::default()
@@ -969,31 +1101,32 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     attach_report_origins(&mut options, &issues, &cwd, stats);
     let body = match options.format.as_str() {
         "json" => go_json_string(&serde_json::json!(issues)),
-        "csv" => {
-            let mut out = String::from("id,title,status,priority,issue_type\n");
-            for i in &issues {
-                out.push_str(&format!(
-                    "{},{},{},{},{}\n",
-                    i.id,
-                    i.title.replace(',', " "),
-                    i.status.as_str(),
-                    i.priority,
-                    i.issue_type
-                ));
-            }
-            out
-        }
+        "csv" => render_export_csv(&issues),
         "mermaid" => bv_export::mermaid::generate_mermaid(&issues),
         // Go runs `renderReportTemplate` here when `--export-template` names a
-        // file (pkg/export/markdown.go:209): a Go `text/template` execution
-        // with its own field escaping and 1 MiB read / 16 MiB render caps.
-        // That interpreter is not ported yet, so a template path falls back to
-        // the default document rather than a half-rendered one.
-        _ => bv_export::markdown::generate_report(&issues, &issues, &options),
+        // file (pkg/export/markdown.go:209-252): a Go `text/template`
+        // execution with its own field escaping and 1 MiB read / 16 MiB render
+        // caps. That interpreter is not ported, so the template path is
+        // validated and its errors reported exactly as Go's are, and the
+        // document falls back to the default rather than being half-rendered.
+        _ => {
+            if !template.is_empty() {
+                match render_report_template(&issues, &options, &template) {
+                    Ok(body) => body,
+                    Err(e) => {
+                        eprintln!("rendering report: {e}");
+                        return ExitCode::from(1);
+                    }
+                }
+            } else {
+                bv_export::markdown::generate_report(&issues, &issues, &options)
+            }
+        }
     };
     match std::fs::write(&path, &body) {
         Ok(_) => {
-            println!("Exported {} issues to {}", issues.len(), path);
+            println!("Exporting {} issues to {}...", issues.len(), path);
+            println!("Done!");
             ExitCode::from(0)
         }
         Err(e) => {
@@ -1464,7 +1597,11 @@ fn main() -> ExitCode {
         let md = bv_export::markdown::generate_report(&issues, &issues, &options);
         match std::fs::write(&output_path, &md) {
             Ok(_) => {
-                println!("Exported {} issues to {}", issues.len(), output_path);
+                // Go main.go:4424 / :4478 — the progress line goes out
+                // before the file is written and `Done!` after, so a crash
+                // mid-write is visible rather than silent.
+                println!("Exporting {} issues to {}...", issues.len(), output_path);
+                println!("Done!");
                 return ExitCode::from(0);
             }
             Err(e) => {
