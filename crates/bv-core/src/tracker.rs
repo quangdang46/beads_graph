@@ -240,6 +240,22 @@ pub fn build_command(origin: &IssueOrigin, mutating: bool, operation: &[&str]) -
 }
 
 /// Go `Issue.Actions(claimable)` (pkg/model/types.go:163).
+/// Go `Issue.Actions` (types.go:163-167) for an issue with NO tracker origin:
+/// it returns immediately with just that reason, before looking at the origin at
+/// all.
+///
+/// The time-travel loader is the case that reaches it — a `--as-of` issue
+/// carries no Origin, so Go never derives a local id or reads
+/// `.beads/metadata.json`. Rust synthesised an origin anyway and then reported
+/// whatever its resolution failure was ("source has no readable tracker
+/// metadata"), which named a file problem that does not exist here.
+pub fn actions_without_origin() -> IssueActions {
+    IssueActions {
+        unavailable_reason: "source has no verified live tracker".to_string(),
+        ..Default::default()
+    }
+}
+
 pub fn build_actions(origin: &IssueOrigin, claimable: bool) -> IssueActions {
     let mut actions = IssueActions {
         working_directory: origin.working_directory.clone(),

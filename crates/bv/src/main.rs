@@ -3608,8 +3608,9 @@ fn run_robot_next() -> ExitCode {
             let id = top["id"].as_str().unwrap_or_default().to_string();
             // Go v0.25.0: live tracker route suggestions replace the flat
             // claim_command/show_command strings.
-            let origin = bv_core::tracker::resolve_issue_origin(&source.path, &id);
-            let actions = bv_core::tracker::build_actions(&origin, true);
+            let actions = actions_for_source(&source, &id, true);
+            let unavailable_reason = actions.unavailable_reason.clone();
+            let has_claim = actions.claim.is_some();
             payload["actions"] = serde_json::to_value(&actions).unwrap_or(serde_json::Value::Null);
 
             // Go (robot_registry.go:2558-2566) treats a missing claim route as a
@@ -3617,12 +3618,10 @@ fn run_robot_next() -> ExitCode {
             // under `diagnostic_top_pick`, sets actionable=false, and explains
             // why. Claimability alone is not enough — a source with no readable
             // tracker metadata (every synthetic fixture) must take this path.
-            if actions.claim.is_none() {
+            if !has_claim {
                 payload["actionable"] = serde_json::json!(false);
-                payload["message"] = serde_json::json!(format!(
-                    "No claim command emitted: {}",
-                    actions.unavailable_reason
-                ));
+                payload["message"] =
+                    serde_json::json!(format!("No claim command emitted: {unavailable_reason}"));
                 payload["diagnostic_top_pick"] = serde_json::json!({
                     "id": top["id"],
                     "title": top["title"],
@@ -3633,7 +3632,7 @@ fn run_robot_next() -> ExitCode {
                 payload["degraded"] = serde_json::json!([{
                     "code": "live_action_route_unavailable",
                     "severity": "info",
-                    "message": actions.unavailable_reason,
+                    "message": unavailable_reason,
                 }]);
             } else {
                 payload["actionable"] = serde_json::json!(true);
@@ -3751,6 +3750,23 @@ fn format_unblock_list(ids: &[String]) -> String {
 /// line is restated here from the authority. Replaces the line in place when
 /// present, inserts at the head when Go would emit one and the scorer emitted
 /// none, and drops it when the authority says this issue unblocks nothing.
+/// Go's `Issue.Actions` for an issue the loader gave no tracker Origin
+/// (types.go:165-167). The time-travel loader is the case that reaches it: a
+/// `--as-of` issue carries no Origin, so Go never derives a local id and never
+/// reads `.beads/metadata.json`. Resolving one anyway named a metadata-file
+/// failure that had not happened, and put a `local_id` in the payload Go omits.
+fn actions_for_source(
+    source: &SourceMeta,
+    id: &str,
+    claimable: bool,
+) -> bv_core::tracker::IssueActions {
+    if source.kind == "git" {
+        return bv_core::tracker::actions_without_origin();
+    }
+    let origin = bv_core::tracker::resolve_issue_origin(&source.path, id);
+    bv_core::tracker::build_actions(&origin, claimable)
+}
+
 fn restate_unblock_reason(reasons: &mut Vec<String>, unblocks_ids: &[String]) {
     const CASCADE: &str = "🎯 Completing this unblocks ";
     const LIST: &str = "🔓 Unblocks ";
@@ -4227,9 +4243,15 @@ fn run_robot_triage() -> ExitCode {
     // Describe the loaded file, not the scoped analysis set.
     let source = loaded_source.clone();
     for rec in out.recommendations.iter_mut() {
-        let origin = bv_core::tracker::resolve_issue_origin(&source.path, &rec.id);
-        let actions = bv_core::tracker::build_actions(&origin, rec.claimable);
-        rec.actions = Some(serde_json::to_value(&actions).unwrap_or(serde_json::Value::Null));
+        // Go attaches a tracker Origin to issues it loaded from the working
+        // tree; the time-travel loader does not, so a `--as-of` issue reaches
+        // `Issue.Actions` with a nil origin (types.go:165-167) and the payload
+        // carries only the unavailable reason. Resolving one anyway named a
+        // metadata-file failure that had not happened.
+        rec.actions = Some(
+            serde_json::to_value(actions_for_source(&source, &rec.id, rec.claimable))
+                .unwrap_or(serde_json::Value::Null),
+        );
         restate_unblock_reason(&mut rec.reasons, &rec.unblocks_ids);
     }
 
@@ -4435,10 +4457,7 @@ fn run_robot_triage() -> ExitCode {
         .first()
         .map(|r| r.id.as_str())
         .unwrap_or("");
-    let top_actions = bv_core::tracker::build_actions(
-        &bv_core::tracker::resolve_issue_origin(&source.path, top_id),
-        true,
-    );
+    let top_actions = actions_for_source(&source, top_id, true);
     let commands = serde_json::json!({
         "claim_top": top_actions.claim.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
         "show_top": top_actions.show.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
@@ -4716,14 +4735,12 @@ fn run_robot_triage() -> ExitCode {
                 serde_json::json!(build_recommendations_by_label(&grouped, &issue_by_id));
         }
     }
-    // Add as_of/as_of_commit only when --as-of was used (Go omitempty parity).
-    // Deliberately NOT written under `triage`: Go declares as_of and
-    // as_of_commit on RobotEnvelope (main.go:7222-7223) and its TriageResult
-    // has no such fields, so a nested copy was a key the oracle never emits.
-    let _ = &as_of;
-    if let Some(ref c) = as_of_commit {
-        payload["triage"]["as_of_commit"] = serde_json::json!(c);
-    }
+    // as_of and as_of_commit are deliberately NOT written here. Go declares
+    // both on RobotEnvelope (main.go:7222-7223) and its TriageResult has
+    // neither, so the envelope builder publishes them and a nested copy was a
+    // key the oracle never emits. The bindings are still read for that
+    // builder via the `AS_OF` global set at load time.
+    let _ = (&as_of, &as_of_commit);
     payload["usage_hints"] = serde_json::json!([
         "jq '.triage.quick_ref.top_picks[:3]' - Top 3 picks for immediate work",
         "jq '.triage.recommendations[3:10] | map({id,title,score})' - Next candidates after top picks",

@@ -465,13 +465,15 @@ pub struct IssueImpact {
     /// blockers; omitted when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
+    /// Go `Recommendation.Claimable` (triage.go:658) — true iff this item
+    /// passes `isClaimableRecommendation`. Declared before `actions` because
+    /// that is Go's order (triage.go:133-140); the two are adjacent in the
+    /// wire form, so the swap is a byte diff whenever both are present.
+    pub claimable: bool,
     /// Go `model.IssueActions` — the live tracker route for this issue.
     /// `None` when no tracker origin could be resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<serde_json::Value>,
-    /// Go `Recommendation.Claimable` (triage.go:658) — true iff this item
-    /// passes `isClaimableRecommendation`.
-    pub claimable: bool,
 }
 
 /// Golden field names + order. Mirrors Go `ScoreBreakdown`
