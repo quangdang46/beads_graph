@@ -2999,7 +2999,9 @@ fn full_envelope_for(data_hash: &str, issues: &[bv_core::model::Issue]) -> serde
 /// Derive `SourceMeta` for the current working directory. Used by command
 /// handlers that build their envelope without an explicit cwd in scope.
 fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // Go's `os.Getwd` semantics, so `source_path` reads the way the user typed
+    // the path rather than its resolved form.
+    let cwd = go_working_dir();
     if let Ok(dir) = bv_core::discovery::get_beads_dir(&cwd) {
         if let Ok(Some(jsonl)) = bv_core::discovery::find_jsonl_path_with_warnings(&dir, |_| {}) {
             return SourceMeta {
@@ -13680,7 +13682,7 @@ fn run_emit_script(args: &[String]) -> ExitCode {
     // (and any unrecognised value) also gets `set -euo pipefail`.
     let format = flag_value(args, "script-format").unwrap_or("bash");
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (loaded, hash, _as_of_commit, loaded_source) = match load_issues_auto_meta_raw(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
@@ -13703,7 +13705,14 @@ fn run_emit_script(args: &[String]) -> ExitCode {
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
     let out = bv_analysis::triage::build_triage(&issues, &g, robot_now());
 
-    let total = out.recommendations.len();
+    // Go writes `len(triage.Recommendations)`, and the recommendations list is
+    // sliced to `opts.TopN` before it is built (pkg/analysis/triage.go:635-640).
+    // Rust keeps the full scored set in `out.recommendations` and applies the
+    // same cap when it builds the payload, so reading the raw length here
+    // reported every issue in the repository rather than the ten the list
+    // actually shows.
+    const TRIAGE_TOP_N: usize = 10;
+    let total = out.recommendations.len().min(TRIAGE_TOP_N);
     let recs: Vec<&bv_analysis::impact::IssueImpact> =
         out.recommendations.iter().take(limit).collect();
     let claim_shell = |r: &bv_analysis::impact::IssueImpact| -> Option<String> {
