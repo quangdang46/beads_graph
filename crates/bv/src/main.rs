@@ -6013,10 +6013,15 @@ fn run_check_drift() -> ExitCode {
         }
     };
 
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let issues = load_issues_auto(&cwd, None)
-        .map(|(i, _, _)| i)
-        .unwrap_or_default();
+    // Go builds this calculator at main.go:3704 and never calls `SetIssues`,
+    // so `c.issues` stays nil and every issue-level check short-circuits:
+    // `checkStaleness` returns on `len(c.issues) == 0` (drift.go:577), as do
+    // blocking-cascade, duplicate and priority-mismatch. Passing the issues
+    // here made bvr report twelve critical stale_issue alerts against a
+    // baseline that had been saved seconds earlier, where Go reports none.
+    // The compatibility contract says match Go, so the list is deliberately
+    // empty here — not an oversight to be tidied away.
+    const NO_ISSUES: &[bv_core::model::Issue] = &[];
 
     let norm: std::collections::HashSet<String> = old_cycles
         .iter()
@@ -6040,7 +6045,7 @@ fn run_check_drift() -> ExitCode {
         &current,
         &bv_analysis::drift::DriftConfig::default(),
         &fresh_cycles,
-        &issues,
+        NO_ISSUES,
         robot_now(),
     );
     print!("{}", drift_summary(&result));
@@ -6049,6 +6054,55 @@ fn run_check_drift() -> ExitCode {
 
 /// Go `robot-drift` — wraps `--check-drift` with structured JSON output.
 /// JSON schema matches Go output struct at cmd/bv/main.go:3509-3541.
+/// The `baseline` sub-object of the `--robot-drift` payload (main.go:3727-3730).
+///
+/// `commit_sha` is `omitempty` in Go, so a baseline saved outside a git
+/// repository carries no key at all rather than an empty string. `json!` has
+/// no spread, hence the imperative build.
+fn drift_baseline_block(created_at: &str, commit_sha: &str) -> serde_json::Value {
+    let mut block = serde_json::json!({ "created_at": created_at });
+    if !commit_sha.is_empty() {
+        block["commit_sha"] = serde_json::json!(commit_sha);
+    }
+    block
+}
+
+/// Re-render an RFC3339 timestamp at second precision, keeping its zone.
+/// Mirrors Go's `time.RFC3339` formatting of a value it read from a baseline
+/// file; an unparseable string is passed through untouched.
+fn rfc3339_second_precision(rfc3339: &str) -> String {
+    let Ok(ts) = rfc3339.parse::<jiff::Timestamp>() else {
+        return rfc3339.to_string();
+    };
+    let offset = rfc3339_offset_label(rfc3339)
+        .as_deref()
+        .and_then(rfc3339_offset_seconds)
+        .unwrap_or(0);
+    let shifted = ts
+        .checked_add(std::time::Duration::from_secs(offset.unsigned_abs()))
+        .unwrap_or(ts);
+    let dt = shifted.to_zoned(jiff::tz::TimeZone::UTC).datetime();
+    let zone = if offset == 0 {
+        "Z".to_string()
+    } else {
+        let sign = if offset < 0 { '-' } else { '+' };
+        format!(
+            "{sign}{:02}:{:02}",
+            offset.abs() / 3600,
+            (offset.abs() % 3600) / 60
+        )
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{zone}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
 fn run_robot_drift() -> ExitCode {
     let baseline_doc = match std::fs::read_to_string(BASELINE_PATH) {
         Ok(raw) => raw,
@@ -6084,11 +6138,15 @@ fn run_robot_drift() -> ExitCode {
         .get("cycles")
         .and_then(|c| serde_json::from_value(c.clone()).ok())
         .unwrap_or_default();
+    // Go re-formats the stored timestamp through `time.RFC3339` on the way out
+    // (main.go:3732), which is second precision. A baseline file carries
+    // nanoseconds — Go's own `time.Time` marshals RFC3339Nano — so passing the
+    // string through verbatim echoed a fraction the oracle truncates.
     let baseline_created_at = base
         .get("created_at")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(rfc3339_second_precision)
+        .unwrap_or_default();
     let baseline_commit_sha = base
         .get("commit_sha")
         .and_then(|v| v.as_str())
@@ -6107,10 +6165,15 @@ fn run_robot_drift() -> ExitCode {
         }
     };
 
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let issues = load_issues_auto(&cwd, None)
-        .map(|(i, _, _)| i)
-        .unwrap_or_default();
+    // Go builds this calculator at main.go:3704 and never calls `SetIssues`,
+    // so `c.issues` stays nil and every issue-level check short-circuits:
+    // `checkStaleness` returns on `len(c.issues) == 0` (drift.go:577), as do
+    // blocking-cascade, duplicate and priority-mismatch. Passing the issues
+    // here made bvr report twelve critical stale_issue alerts against a
+    // baseline that had been saved seconds earlier, where Go reports none.
+    // The compatibility contract says match Go, so the list is deliberately
+    // empty here — not an oversight to be tidied away.
+    const NO_ISSUES: &[bv_core::model::Issue] = &[];
 
     let norm: std::collections::HashSet<String> = old_cycles
         .iter()
@@ -6134,7 +6197,7 @@ fn run_robot_drift() -> ExitCode {
         &current,
         &bv_analysis::drift::DriftConfig::default(),
         &fresh_cycles,
-        &issues,
+        NO_ISSUES,
         robot_now(),
     );
 
@@ -6149,10 +6212,7 @@ fn run_robot_drift() -> ExitCode {
             "info": result.info_count,
         },
         "alerts": result.alerts,
-        "baseline": {
-            "created_at": baseline_created_at,
-            "commit_sha": baseline_commit_sha,
-        },
+        "baseline": drift_baseline_block(&baseline_created_at, &baseline_commit_sha),
     });
     emit_json(&payload);
     ExitCode::from(result.exit_code())
