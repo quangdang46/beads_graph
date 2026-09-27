@@ -958,6 +958,9 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     let (issues, stats) = match bv_core::discovery::load_issues_from_repo(&cwd) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -1443,6 +1446,9 @@ fn main() -> ExitCode {
         let (issues, stats) = match bv_core::discovery::load_issues_from_repo(&cwd) {
             Ok(x) => x,
             Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source();
+                }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
             }
@@ -1475,6 +1481,9 @@ fn main() -> ExitCode {
         let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
             Ok(x) => x,
             Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source();
+                }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
             }
@@ -2397,6 +2406,127 @@ fn source_authority(meta: &SourceMeta, data_hash: &str) -> bv_robot::RobotSource
     }
 }
 
+/// Go `robotWorkspaceAuthority` (main.go:7374-7391) over a single *failed*
+/// report — the envelope Go still emits when the beads source cannot be
+/// resolved.
+///
+/// This is not a convenience fallback. `source_authority` is the contract that
+/// tells an agent whether the numbers in the payload mean anything, and a bare
+/// `Error:` line throws it away: an agent can no longer distinguish "this
+/// repository has no issues" from "bvr could not read the data", and the second
+/// is exactly the case where claiming work would be unsafe. Go keeps the
+/// envelope, marks it `claim_safe: false` / `readiness: provisional`, and puts
+/// the reason in `error`.
+fn failed_source_authority(source_path: &str, error: &str) -> bv_robot::RobotSourceAuthority {
+    use bv_robot::{RobotSourceAuthority, RobotSourceReport};
+    let report = RobotSourceReport {
+        name: String::new(),
+        repo_path: String::new(),
+        source_path: source_path.to_string(),
+        source_kind: "jsonl_local".to_string(),
+        status: "failed".to_string(),
+        // Go marks a source it never read with the literal "empty" rather than
+        // a digest of nothing.
+        data_hash: "empty".to_string(),
+        valid: 0,
+        errors: 0,
+        skipped: 0,
+        read_errors: 0,
+        visible: 0,
+        tombstones: 0,
+        stale: false,
+        warning_count: 0,
+        warnings: Vec::new(),
+        error: error.to_string(),
+    };
+    RobotSourceAuthority {
+        state: "unknown".to_string(),
+        claim_safe: false,
+        readiness: "provisional".to_string(),
+        loaded: 0,
+        failed: 1,
+        disabled: 0,
+        valid: 0,
+        errors: 0,
+        skipped: 0,
+        read_errors: 0,
+        visible: 0,
+        tombstones: 0,
+        warning_count: 0,
+        sources: vec![report],
+    }
+}
+
+/// The `<cwd>/.beads/issues.jsonl` Go names in its "no beads issues found at"
+/// message when the source cannot be resolved.
+///
+/// `PWD` rather than `current_dir()`: on macOS the latter reports the resolved
+/// physical path, so a run under a symlinked directory would name
+/// /private/tmp where Go says /tmp.
+fn expected_jsonl_path() -> String {
+    let base = std::env::var("PWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_default();
+    base.join(".beads/issues.jsonl")
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Emit Go's degraded envelope for an unresolvable beads source and exit 1.
+///
+/// Go writes the envelope to stdout first and the two diagnostic lines to
+/// stderr after it (cmd/bv/main.go:2686-2688). The order matters to anything
+/// capturing both streams together, and stdout stays pure JSON either way.
+fn emit_unresolved_source() -> ExitCode {
+    let path = expected_jsonl_path();
+    let error = format!("no beads issues found at {path}");
+    let authority = failed_source_authority(&path, &error);
+    let ahash = bv_robot::authority_hash(&authority);
+    let mut payload = serde_json::json!({
+        "generated_at": jiff_now(),
+        "data_hash": "",
+        "output_format": output_format(),
+        "version": GO_APP_VERSION,
+        "source_authority": serde_json::to_value(&authority).unwrap_or(serde_json::Value::Null),
+    });
+    if !ahash.is_empty() {
+        payload["authority_hash"] = serde_json::json!(ahash);
+    }
+    // Go still publishes a scope hash for a scope that selected nothing.
+    let shash = bv_robot::scope_hash("", "", "", "", &[]);
+    if !shash.is_empty() {
+        payload["scope_hash"] = serde_json::json!(shash);
+    }
+    payload["actionable"] = serde_json::json!(false);
+    payload["error"] = serde_json::json!(error);
+    let _ = emit_json(&payload);
+    eprintln!("Error loading beads: {error}");
+    eprintln!("Make sure you are in a project initialized with 'br init'.");
+    ExitCode::from(1)
+}
+
+/// True when `e` is the load failure Go answers with the degraded envelope
+/// rather than a bare error line.
+fn is_unresolved_source_error(e: &str) -> bool {
+    e.contains("no beads JSONL or SQLite database found")
+        || e.contains("failed to read beads directory")
+        || e.contains("no beads JSONL found")
+}
+
+/// Whether the beads source at `cwd` cannot be resolved.
+///
+/// Go loads the issues before it validates the repository, so a directory with
+/// neither a `.git` nor a `.beads` fails on the *beads* source and carries the
+/// degraded envelope. Rust validated the repository first and reported "not a
+/// git repository" instead, which names a different problem than the one an
+/// agent will actually hit.
+fn unresolved_source_probe(cwd: &std::path::Path) -> bool {
+    bv_core::discovery::load_issues_from_repo(cwd)
+        .err()
+        .is_some_and(|e| is_unresolved_source_error(&e.to_string()))
+}
+
 fn load_issues_auto(
     cwd: &std::path::Path,
     as_of: Option<&str>,
@@ -2919,6 +3049,9 @@ fn run_robot_next() -> ExitCode {
     let (issues, hash, as_of_commit, source) = match load_issues_auto_meta(&cwd, as_of.as_deref()) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -3655,6 +3788,9 @@ fn run_robot_triage() -> ExitCode {
         match load_issues_auto_meta_raw(&cwd, as_of.as_deref()) {
             Ok(x) => x,
             Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source();
+                }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
             }
@@ -6008,6 +6144,9 @@ fn run_check_drift() -> ExitCode {
     let (current, new_cycles, _hash, _top) = match capture_baseline() {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -6326,12 +6465,21 @@ fn parse_relative_time(raw: &str) -> Result<Option<String>, String> {
 fn run_robot_history() -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Err(e) = validate_correlation_repository(&cwd) {
+        if unresolved_source_probe(&cwd) {
+            return emit_unresolved_source();
+        }
+        // Go returns this as a plain error, so its dispatcher wraps it
+        // as `Error handling <flag>: <err>` (robot_registry.go:508).
+        eprintln!("Error handling --robot-history: {e}");
         eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -6438,12 +6586,21 @@ fn run_robot_history() -> ExitCode {
 fn run_robot_orphans() -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Err(e) = validate_correlation_repository(&cwd) {
+        if unresolved_source_probe(&cwd) {
+            return emit_unresolved_source();
+        }
+        // Go returns this as a plain error, so its dispatcher wraps it
+        // as `Error handling <flag>: <err>` (robot_registry.go:508).
+        eprintln!("Error handling --robot-orphans: {e}");
         eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -6554,6 +6711,9 @@ fn load_and_analyze() -> Result<AnalysisTuple, ExitCode> {
     let (issues, _) = match bv_core::discovery::load_issues_from_repo(&cwd) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return Err(emit_unresolved_source());
+            }
             eprintln!("Error: {e}");
             return Err(ExitCode::from(1));
         }
@@ -6870,6 +7030,9 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
         match bv_core::discovery::load_issues_from_repo(&cwd) {
             Ok((issues, _)) => issues,
             Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return Err(emit_unresolved_source());
+                }
                 eprintln!("Error: {e}");
                 return Err(ExitCode::from(1));
             }
@@ -8248,6 +8411,9 @@ fn run_robot_plan() -> ExitCode {
     let (issues, _, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -9443,6 +9609,9 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit, loaded_source) = match load_issues_auto_meta(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -9532,6 +9701,9 @@ fn run_profile_startup(json_output: bool) -> ExitCode {
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -9873,6 +10045,9 @@ fn run_robot_alerts() -> ExitCode {
     let (loaded, hash, _as_of_commit) = match load_issues_auto_unscoped(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -9891,6 +10066,9 @@ fn run_robot_alerts() -> ExitCode {
     let (current, cycles, _hash, _top) = match capture_baseline_for(&issues) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -10177,6 +10355,9 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -11799,6 +11980,9 @@ fn run_robot_search(args: &[String]) -> ExitCode {
     let dim = match search_embedder_dim(&embed_cfg) {
         Ok(dim) => dim,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -11809,6 +11993,9 @@ fn run_robot_search(args: &[String]) -> ExitCode {
     let project_dir = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -11818,6 +12005,9 @@ fn run_robot_search(args: &[String]) -> ExitCode {
         match load_issues_auto_unscoped(&project_dir, as_of.as_deref()) {
             Ok(x) => x,
             Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source();
+                }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
             }
@@ -12159,12 +12349,21 @@ fn run_robot_causality(args: &[String]) -> ExitCode {
         .unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Err(e) = validate_correlation_repository(&cwd) {
+        if unresolved_source_probe(&cwd) {
+            return emit_unresolved_source();
+        }
+        // Go returns this as a plain error, so its dispatcher wraps it
+        // as `Error handling <flag>: <err>` (robot_registry.go:508).
+        eprintln!("Error handling --robot-causality: {e}");
         eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12427,12 +12626,21 @@ fn run_robot_related(args: &[String]) -> ExitCode {
 
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Err(e) = validate_correlation_repository(&cwd) {
+        if unresolved_source_probe(&cwd) {
+            return emit_unresolved_source();
+        }
+        // Go returns this as a plain error, so its dispatcher wraps it
+        // as `Error handling <flag>: <err>` (robot_registry.go:508).
+        eprintln!("Error handling --robot-related: {e}");
         eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12553,12 +12761,21 @@ fn run_robot_impact_network(args: &[String]) -> ExitCode {
     // not reported it itself (robot_registry.go:506-509), so a bare `Error:`
     // here loses the command the failure belongs to.
     if let Err(e) = validate_correlation_repository(&cwd) {
+        if unresolved_source_probe(&cwd) {
+            return emit_unresolved_source();
+        }
+        // Go returns this as a plain error, so its dispatcher wraps it
+        // as `Error handling <flag>: <err>` (robot_registry.go:508).
+        eprintln!("Error handling --robot-impact-network: {e}");
         eprintln!("Error handling --robot-impact-network: {e}");
         return ExitCode::from(1);
     }
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12736,6 +12953,9 @@ fn run_robot_sprint_list() -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12743,6 +12963,9 @@ fn run_robot_sprint_list() -> ExitCode {
     let sprints = match bv_core::sprint::load_sprints(&cwd) {
         Ok(s) => s,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12769,6 +12992,9 @@ fn run_robot_sprint_show(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12776,6 +13002,9 @@ fn run_robot_sprint_show(args: &[String]) -> ExitCode {
     let sprints = match bv_core::sprint::load_sprints(&cwd) {
         Ok(s) => s,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12825,6 +13054,9 @@ fn run_robot_burndown(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12832,6 +13064,9 @@ fn run_robot_burndown(args: &[String]) -> ExitCode {
     let sprints = match bv_core::sprint::load_sprints(&cwd) {
         Ok(s) => s,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -12895,6 +13130,9 @@ fn run_robot_forecast(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13008,6 +13246,9 @@ fn run_emit_script(args: &[String]) -> ExitCode {
     let (loaded, hash, _as_of_commit, loaded_source) = match load_issues_auto_meta_raw(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13407,6 +13648,9 @@ fn run_robot_capacity(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13579,6 +13823,9 @@ fn run_robot_explain_correlation(args: &[String]) -> ExitCode {
     let (issues, _, _) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13615,6 +13862,9 @@ fn run_robot_explain_correlation(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13665,6 +13915,12 @@ fn describe_correlation_feedback(fb: &bv_correlation::feedback::CorrelationFeedb
 /// generated on this path.
 fn run_robot_correlation_stats() -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_default();
+    // Go loads the issues before it reaches the feedback store, so a directory
+    // with no beads source fails there — with the degraded envelope — rather
+    // than reporting correlation counts over a repository never read.
+    if unresolved_source_probe(&cwd) {
+        return emit_unresolved_source();
+    }
     let Some(store) = load_correlation_feedback_store(&cwd) else {
         eprintln!("Error: getting beads directory");
         return ExitCode::from(1);
@@ -13786,6 +14042,9 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
     let issues = match load_issues_auto(&cwd, None) {
         Ok((issues, _, _)) => issues,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13793,6 +14052,9 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
     let (report, file_lookup) = match file_lookup_envelope(args, &issues) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13829,12 +14091,21 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
 fn run_robot_file_hotspots(args: &[String]) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Err(e) = validate_correlation_repository(&cwd) {
+        if unresolved_source_probe(&cwd) {
+            return emit_unresolved_source();
+        }
+        // Go returns this as a plain error, so its dispatcher wraps it
+        // as `Error handling <flag>: <err>` (robot_registry.go:508).
+        eprintln!("Error handling --robot-file-hotspots: {e}");
         eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _, _) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13905,6 +14176,9 @@ fn run_robot_file_relations(args: &[String]) -> ExitCode {
     let issues = match load_issues_auto(&cwd, None) {
         Ok((issues, _, _)) => issues,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -13912,6 +14186,9 @@ fn run_robot_file_relations(args: &[String]) -> ExitCode {
     let (report, file_lookup) = match file_lookup_envelope(args, &issues) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15125,6 +15402,9 @@ fn run_robot_metrics() -> ExitCode {
     let issues = match loaded {
         Ok((issues, _stats)) => issues,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15223,6 +15503,9 @@ fn run_robot_blocker_chain(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15284,6 +15567,9 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
     let (issues, _, _) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15322,6 +15608,9 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
             return ExitCode::from(1);
         }
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15456,6 +15745,9 @@ fn run_robot_label_attention() -> ExitCode {
             (issues, h)
         }
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15562,6 +15854,9 @@ fn run_robot_impact(args: &[String]) -> ExitCode {
     let issues = match load_issues_auto(&cwd, None) {
         Ok((issues, _, _)) => issues,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15569,6 +15864,9 @@ fn run_robot_impact(args: &[String]) -> ExitCode {
     let (report, file_lookup) = match file_lookup_envelope(args, &issues) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15615,6 +15913,9 @@ fn run_robot_diff(args: &[String]) -> ExitCode {
     let (current, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
@@ -15678,6 +15979,9 @@ fn run_robot_not_ready_labels(args: &[String]) -> ExitCode {
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
+            if is_unresolved_source_error(&e.to_string()) {
+                return emit_unresolved_source();
+            }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
         }
