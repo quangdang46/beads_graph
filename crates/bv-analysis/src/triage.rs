@@ -1023,12 +1023,12 @@ pub fn build_triage(issues: &[Issue], g: &DiGraph, now: jiff::Timestamp) -> Tria
         };
 
         // Quick-win boost: depth-based factor * base score * weight. Go's gate
-        // is `blockerDepth <= QuickWinMaxDepth && blockerDepth >= 0`
-        // (triage.go:1379); the `>= 0` half is what a `usize` depth could not
-        // express, so it is spelled out here rather than left to the types.
-        let quickwin_boost = if rec.status != Status::InProgress.as_str()
-            && (0..=TRIAGE_QUICKWIN_MAX_DEPTH as i64).contains(&blocker_depth)
-        {
+        // is exactly `blockerDepth <= QuickWinMaxDepth && blockerDepth >= 0`
+        // (triage.go:1386) and has NO status term. An earlier version here also
+        // excluded InProgress, so an in-progress issue lost a boost Go still
+        // gave it — the `>= 0` half is what a `usize` depth cannot express and
+        // is spelled out below, but the status half was never in the oracle.
+        let quickwin_boost = if (0..=TRIAGE_QUICKWIN_MAX_DEPTH as i64).contains(&blocker_depth) {
             let depth_factor =
                 1.0 - blocker_depth as f64 / (TRIAGE_QUICKWIN_MAX_DEPTH as f64 + 1.0);
             (depth_factor * base_score * TRIAGE_QUICKWIN_BOOST).min(TRIAGE_QUICKWIN_BOOST)

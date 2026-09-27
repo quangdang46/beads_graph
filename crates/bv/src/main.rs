@@ -3654,11 +3654,14 @@ fn recommendations_top_n(recs: &[bv_analysis::impact::IssueImpact]) -> Vec<serde
 /// set. Go slices `allRecommendations` to this at :666-669 and the sliced
 /// list is what the track/label groupers receive (:697, :700) as well as what
 /// the `recommendations` field carries.
+/// Go's `opts.TopN` (pkg/analysis/triage.go:635-640): the recommendations list
+/// is sliced to this before anything reads it.
+const TRIAGE_TOP_N: usize = 10;
+
 fn recommendations_top_n_refs(
     recs: &[bv_analysis::impact::IssueImpact],
 ) -> Vec<&bv_analysis::impact::IssueImpact> {
-    const TOP_N: usize = 10;
-    recs.iter().take(TOP_N).collect()
+    recs.iter().take(TRIAGE_TOP_N).collect()
 }
 
 /// Go's claimability gate for a triage recommendation (triage.go:657).
@@ -4557,11 +4560,15 @@ fn run_robot_triage() -> ExitCode {
         let brief_recs: Vec<serde_json::Value> = out
             .recommendations
             .iter()
+            .take(TRIAGE_TOP_N)
             .map(|r| {
                 // Go `briefTriageRecommendation` (robot_registry.go:2276-2284):
                 // id, title, status, assignee(omitempty), score, unblocks,
-                // blocked_by, actions — and no TopN slice, so this is the full
-                // list, not `recommendations_top_n`.
+                // blocked_by, actions — a projection of `triage.Recommendations`,
+                // which Go has already sliced to opts.TopN. An earlier comment
+                // here claimed the opposite and published all 121
+                // recommendations where the oracle publishes 10; the slice is
+                // the same `take` the --robot-triage payload uses.
                 let assignee = issue_by_id
                     .get(r.id.as_str())
                     .map(|i| i.assignee.clone())
@@ -13911,7 +13918,14 @@ fn compute_brief_triage() -> Result<BriefTriage, ExitCode> {
             "blocked_count": out.quick_ref.blocked_count,
             "in_progress_count": out.quick_ref.in_progress_count,
         },
-        "recommendations": serde_json::to_value(&out.recommendations).unwrap_or_default(),
+        // Go's `TriageResult.Recommendations` is sliced to `opts.TopN` before it
+        // is built (pkg/analysis/triage.go:635-640); this port keeps the full
+        // scored set in `out` and caps it when it builds the --robot-triage
+        // payload. `--brief` projected `out` directly, so it published all 121
+        // recommendations where the oracle publishes 10 — and every downstream
+        // reader of that document got a different set.
+        "recommendations": serde_json::to_value(recommendations_top_n(&out.recommendations))
+            .unwrap_or_default(),
         "quick_wins": Vec::<serde_json::Value>::new(),
         "blockers_to_clear": Vec::<serde_json::Value>::new(),
     });
