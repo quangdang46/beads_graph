@@ -7161,6 +7161,15 @@ type AnalysisTuple = (
     bv_analysis::analyzer::Phase1Stats,
     bv_analysis::MetricStatus,
     std::sync::Arc<bv_graph_core::DiGraph>,
+    // Provenance of the file that was LOADED, before any scope filter.
+    //
+    // `source_authority` describes that file, not the set a `--repo` or
+    // `--label` filter left behind (Go: the loader assigns the authority at
+    // main.go:2772, before scopeLoadedIssues runs at :2786). Deriving it from
+    // the filtered issues reported valid: 0 and visible: 0 for a filter that
+    // matched nothing, which reads as an empty repository rather than an empty
+    // selection.
+    SourceMeta,
 );
 
 /// Shared helper: load issues, build graph, run analysis phases.
@@ -7176,17 +7185,19 @@ fn load_and_analyze() -> Result<AnalysisTuple, ExitCode> {
             return Err(ExitCode::from(1));
         }
     };
+    // Provenance of the loaded file, captured BEFORE scoping.
+    let loaded_source = source_meta_for(&issues);
     // Go main.go:2786 — `--repo` then `--label` narrow the set before any
     // handler analyses it, and a `--repo` filter re-hashes the narrowed source
     // (main.go:4883-4884).
     let (issues, hash_override) = apply_scope(&issues);
-    if issues.is_empty() {
-        println!(
-            "{{\"generated_at\":\"{}\",\"data_hash\":\"empty\",\"error\":\"no issues loaded\"}}",
-            jiff_now()
-        );
-        return Err(ExitCode::from(0));
-    }
+    // An empty set is not a reason to stop: `--robot-priority`,
+    // `--robot-label-health` and `--robot-label-flow` all come through here, and
+    // each must still produce its full envelope with every metric "skipped" and
+    // the counts zeroed. The three-key stub this used to print left an agent
+    // with no `quick_ref` to read, so "nothing matched my filter" was
+    // indistinguishable from "the command failed". The analysis is defined for
+    // an empty graph; `run_robot_triage` was fixed the same way in 884bc45.
     let data_hash = hash_override.unwrap_or_else(|| bv_core::data_hash::compute_data_hash(&issues));
     let g = std::sync::Arc::new(bv_analysis::build_graph(&issues));
     let p1 = bv_analysis::analyze_phase1(&g);
@@ -7201,7 +7212,7 @@ fn load_and_analyze() -> Result<AnalysisTuple, ExitCode> {
     let g2 = std::sync::Arc::clone(&g);
     let (status, _phase2) = bv_analysis::analyze_phase2_blocking(g2, &budget);
 
-    Ok((issues, data_hash, p1, status, g))
+    Ok((issues, data_hash, p1, status, g, loaded_source))
 }
 
 /// Go `NewRobotEnvelope` parity: for handlers whose Go output embeds the
@@ -10050,7 +10061,7 @@ fn run_robot_priority(args: &[String]) -> ExitCode {
         .filter(|v| *v > 0)
         .unwrap_or(10) as usize;
 
-    let (issues, _hash, _p1, status, _g) = match load_and_analyze() {
+    let (issues, _hash, _p1, status, _g, loaded_source) = match load_and_analyze() {
         Ok(x) => x,
         Err(code) => return code,
     };
@@ -10098,7 +10109,8 @@ fn run_robot_priority(args: &[String]) -> ExitCode {
 
     recommendations.truncate(max_results);
 
-    let mut payload = full_envelope_for(&hash, &issues);
+    let mut payload =
+        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&loaded_source), &issues);
     payload["analysis_config"] = priority_analysis_config(g.len());
     // Real status from phase2 analysis (Go priority uses full config).
     // Go's `statusEntry.MarshalJSON` (pkg/analysis/graph.go:131-147) omits
@@ -16257,13 +16269,14 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
 }
 
 fn run_robot_label_health() -> ExitCode {
-    let (issues, hash, _p1, _status, _g) = match load_and_analyze() {
+    let (issues, hash, _p1, _status, _g, loaded_source) = match load_and_analyze() {
         Ok(x) => x,
         Err(code) => return code,
     };
     let cfg = bv_analysis::label_health::LabelHealthConfig::default();
     let results = bv_analysis::label_health::compute_all_label_health(&issues, &cfg, robot_now());
-    let mut payload = full_envelope_for(&hash, &issues);
+    let mut payload =
+        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&loaded_source), &issues);
     payload["analysis_config"] = serde_json::to_value(&cfg).unwrap_or_default();
     payload["results"] = serde_json::to_value(&results).unwrap_or_default();
     payload["usage_hints"] = serde_json::json!([
@@ -16276,13 +16289,14 @@ fn run_robot_label_health() -> ExitCode {
 }
 
 fn run_robot_label_flow() -> ExitCode {
-    let (issues, hash, _p1, _status, _g) = match load_and_analyze() {
+    let (issues, hash, _p1, _status, _g, loaded_source) = match load_and_analyze() {
         Ok(x) => x,
         Err(code) => return code,
     };
     let cfg = bv_analysis::label_health::LabelHealthConfig::default();
     let flow = bv_analysis::label_health::compute_cross_label_flow(&issues, &cfg);
-    let mut payload = full_envelope_for(&hash, &issues);
+    let mut payload =
+        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&loaded_source), &issues);
     // Go: nil arrays serialize as null (not []) for empty list fields.
     let mut flow_obj = serde_json::Map::new();
     flow_obj.insert("labels".into(), serde_json::json!(flow.labels));
