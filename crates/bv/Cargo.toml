@@ -23,6 +23,9 @@ bv-export = { path = "../bv-export" }
 bv-tui = { path = "../bv-tui" }
 bv-search = { path = "../bv-search" }
 bv-update = { path = "../bv-update" }
+# `--recipe` is resolved and rejected when the name is unknown, which is
+# `pkg/recipe.Loader.Resolve` and its `UnknownRecipeError`.
+bv-recipe = { path = "../bv-recipe" }
 # `--id-pattern` hands each value to regex::Regex::compile before registering
 # it with bv-correlation (Go main.go:1772-1782), so the CLI needs the type.
 regex = "1"

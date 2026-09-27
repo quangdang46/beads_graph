@@ -207,6 +207,7 @@ dependencies = [
  "bv-correlation",
  "bv-export",
  "bv-graph-core",
+ "bv-recipe",
  "bv-robot",
  "bv-search",
  "bv-tui",

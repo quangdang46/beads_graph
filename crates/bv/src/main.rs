@@ -1472,6 +1472,20 @@ fn main() -> ExitCode {
     // once inside `scopeLoadedIssues`, so every robot handler, every export and
     // the TUI see the same narrowed issue set. Recorded from the REWRITTEN argv
     // so `-l` / `-r` are visible.
+    // Go resolves `--recipe` at main.go:2580-2596 and rejects an unknown name
+    // before any handler runs, listing what is available. The flag was recorded
+    // and then never resolved here, so `--recipe nosuchrecipe` scoped nothing
+    // and the command produced a full payload for the *unfiltered* issue set —
+    // a caller asking for one view silently got another.
+    if let Some(recipe) = flag_value(&args, "recipe")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if let Some(err) = validate_recipe_name(recipe) {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    }
     set_scope_flags(
         flag_value(&args, "label").unwrap_or_default().to_string(),
         flag_value(&args, "recipe").unwrap_or_default().to_string(),
@@ -1597,8 +1611,8 @@ fn main() -> ExitCode {
         if fb_show {
             // Go main.go:2464-2469 — `ToJSON` re-indented with two spaces and
             // printed, deliberately NOT wrapped in the robot envelope.
-            match serde_json::to_string_pretty(&feedback.to_json()) {
-                Ok(s) => println!("{s}"),
+            match serde_json::to_value(feedback.to_json()) {
+                Ok(v) => println!("{}", go_json_string_pretty(&v)),
                 Err(e) => {
                     eprintln!("Error encoding feedback: {e}");
                     return ExitCode::from(1);
@@ -2803,6 +2817,48 @@ fn load_issues_auto_unscoped(
 /// would produce different scopes.
 static SCOPE_FLAGS: std::sync::OnceLock<[String; 3]> = std::sync::OnceLock::new();
 
+/// Go's unknown-recipe rejection (pkg/recipe/loader.go:44-51, printed by
+/// cmd/bv/main.go with the available list appended).
+///
+/// Returns the message to print, or `None` when the name resolves — which
+/// includes a path to a recipe file, since Go's `isPathArgument` check runs
+/// first and a file that loads is not "unknown".
+fn validate_recipe_name(name: &str) -> Option<String> {
+    // `with_project_dir` so a run under a symlinked directory resolves the same
+    // project config Go would.
+    let cwd = std::env::var("PWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_default();
+    // `load()` is what pulls in the builtin recipes, the user config and the
+    // project file; without it `resolve` sees an empty table and every name
+    // would be reported unknown.
+    let mut loader = bv_recipe::Loader::new().with_project_dir(cwd.to_string_lossy().to_string());
+    if loader.load().is_err() {
+        return None;
+    }
+    match loader.resolve(name) {
+        Ok(_) => None,
+        Err(bv_recipe::ResolveError::Unknown(e)) => {
+            // Go main.go:2590-2601, verbatim in structure: the error, a blank
+            // line, the sorted available names each padded to 15 and followed
+            // by its description, then the hint about loading a recipe file.
+            let mut msg = e.to_string();
+            msg.push_str("\n\nAvailable recipes:");
+            for summary in loader.list_summaries() {
+                msg.push_str(&format!("\n  {:<15} {}", summary.name, summary.description));
+            }
+            msg.push_str(
+                "\n\nA path ending in .yaml or .yml loads one recipe file, e.g. --recipe .beads/recipes/sprint.yaml",
+            );
+            Some(format!("Error: {msg}"))
+        }
+        // A file that exists but does not parse is a different failure, and Go
+        // reports it as one; it is left to the loader's own error path.
+        Err(_) => None,
+    }
+}
+
 fn set_scope_flags(label: String, recipe: String, repo: String) {
     let _ = SCOPE_FLAGS.set([label, recipe, repo]);
 }
@@ -2902,14 +2958,32 @@ fn apply_repo_scope(issues: &[bv_core::model::Issue]) -> Vec<bv_core::model::Iss
 /// loader's hash alone and only sets `DataHashMatchesIssues = false`. Getting
 /// that backwards would change the `data_hash` on every `--label` golden.
 fn apply_scope(issues: &[bv_core::model::Issue]) -> (Vec<bv_core::model::Issue>, Option<String>) {
-    let (_label, _recipe, repo) = active_scope_flags();
+    let (_label, recipe, repo) = active_scope_flags();
     let repo_scoped = apply_repo_scope(issues);
     let hash_override = if repo.is_empty() {
         None
     } else {
         Some(bv_core::data_hash::compute_data_hash(&repo_scoped))
     };
-    (apply_label_scope(&repo_scoped), hash_override)
+    (
+        apply_recipe_scope(&apply_label_scope(&repo_scoped), &recipe),
+        hash_override,
+    )
+}
+
+/// Go `scopeLoadedIssues` also applies `recipe.Apply` to narrow the issue set
+/// (cmd/bv/main.go:4903-4922). That is not ported: `recipe::apply` takes a
+/// `Metrics` whose `graph` is a `GraphMetrics` trait nothing in the workspace
+/// implements outside a test stub, and whose `triage` map comes from a
+/// `compute_triage_scores` that does not exist here either. So `--recipe
+/// quick-wins` still answers with the whole repository rather than the quick
+/// wins, and `--recipe nosuchrecipe` is now rejected (the name is validated at
+/// the flag site) but a valid name that filters has no effect.
+fn apply_recipe_scope(
+    issues: &[bv_core::model::Issue],
+    _recipe: &str,
+) -> Vec<bv_core::model::Issue> {
+    issues.to_vec()
 }
 
 fn full_envelope_for(data_hash: &str, issues: &[bv_core::model::Issue]) -> serde_json::Value {
@@ -7116,6 +7190,79 @@ fn go_json_string(v: &serde_json::Value) -> String {
     let mut out = String::new();
     write_go_json(v, &mut out);
     out
+}
+
+/// Re-indent compact JSON the way Go's `json.Indent(dst, src, "", "  ")`
+/// does, which is what `Feedback.ToJSON` applies to the marshalled value
+/// (cmd/bv/main.go:2464-2469).
+///
+/// Operating on the already-escaped text is safe and keeps the number
+/// rendering in one place: a string can no longer contain a bare brace or
+/// newline, so the structural characters found are all structural. Go's
+/// float64 formatting is the part that matters here — `serde_json`'s pretty
+/// printer writes `0.0` and `1.0` where Go writes `0` and `1` — so the
+/// input must come from [`go_json_string`], never from serde.
+fn go_json_indent(compact: &str) -> String {
+    let mut out = String::with_capacity(compact.len() * 2);
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in compact.chars() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            '{' | '[' => {
+                let open = ch;
+                let close = if open == '{' { '}' } else { ']' };
+                // An empty container stays `{}` / `[]` — Go's indenter does not
+                // break a line for one.
+                if compact[out.len()..].starts_with(&close.to_string()) {
+                    out.push(open);
+                } else {
+                    out.push(open);
+                    depth += 1;
+                    out.push('\n');
+                    out.push_str(&"  ".repeat(depth));
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                out.push('\n');
+                out.push_str(&"  ".repeat(depth));
+                out.push(ch);
+            }
+            ',' => {
+                out.push(ch);
+                out.push('\n');
+                out.push_str(&"  ".repeat(depth));
+            }
+            ':' => {
+                out.push(ch);
+                out.push(' ');
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Go's `json.MarshalIndent(v, "", "  ")` for this port's values: the Go
+/// number and string rendering, re-indented.
+fn go_json_string_pretty(v: &serde_json::Value) -> String {
+    go_json_indent(&go_json_string(v))
 }
 
 /// Quote a string the way Go's `encoding/json` does with its default HTML
