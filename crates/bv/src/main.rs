@@ -1502,7 +1502,21 @@ fn main() -> ExitCode {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        set_workspace_override(std::path::PathBuf::from(ws));
+        // An EXPLICIT --workspace that cannot be read is fatal. Go loads the
+        // named path verbatim and stops (main.go:2678-2721) rather than
+        // quietly reading a different repository; bvr warned and carried on to
+        // the TUI, so a typo in the path still produced a working-looking run
+        // over the local .beads. The message is Go's, down to the PathError
+        // wording from go_path_error.
+        let path = std::path::PathBuf::from(ws);
+        if let Err(e) = std::fs::File::open(&path) {
+            eprintln!(
+                "Error loading workspace: failed to load workspace config: {}",
+                go_path_error("open", &path.to_string_lossy(), &e)
+            );
+            return ExitCode::from(1);
+        }
+        set_workspace_override(path);
     }
     // Go main.go:1766 — the theme warning precedes EVERY dispatch, robot
     // commands included, so it runs here rather than on the TUI path.
