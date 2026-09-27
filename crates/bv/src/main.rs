@@ -2462,6 +2462,18 @@ th {{ background: #44475a; }}
             if let Some(code) = run_debug_render(&mut app, &issues, &args) {
                 return code;
             }
+            // Go's bubbletea opens /dev/tty before the program starts and
+            // reports the failure through the top-level handler
+            // (`Error running beads viewer: could not open a new TTY: open
+            // /dev/tty: ...`). Launching anyway leaves a much later, much
+            // vaguer failure — "TUI error: Device not configured" — which
+            // names neither the cause nor the way out. An agent running in CI
+            // gets a one-line answer either way, but only one of them says
+            // what to do.
+            if let Err(e) = open_tty() {
+                eprintln!("Error running beads viewer: could not open a new TTY: {e}");
+                return ExitCode::from(1);
+            }
             eprintln!("Loaded {} issues — launching TUI", issues.len());
             launch_tui(&mut app, &issues)
         }
@@ -14262,6 +14274,20 @@ fn resolve_correlated_commit<'a>(
 /// wrapper key (robot_registry.go:2871-2887). The report is the *raw* one, so
 /// a rejected pair can still be explained; the stored decision is attached to
 /// the explanation and overrides its recommendation.
+/// Open `/dev/tty` the way Go's bubbletea does before it starts a program.
+///
+/// This is a reachability check, not a handle anyone uses afterwards: it
+/// reproduces Go's up-front failure for a run with no controlling terminal,
+/// which is the case for every agent, CI job and cron entry.
+fn open_tty() -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map(|_| ())
+        .map_err(|e| go_path_error("open", "/dev/tty", &e))
+}
+
 fn run_robot_explain_correlation(args: &[String]) -> ExitCode {
     let raw = args
         .iter()
