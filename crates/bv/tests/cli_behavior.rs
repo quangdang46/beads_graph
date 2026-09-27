@@ -85,7 +85,35 @@ fn robot_help_lists_primaries() {
     let (code, stdout, _) = run(&["--robot-help"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("--robot-triage"));
-    assert!(stdout.contains("exit 0=success"));
+    // The four structural sections Go emits (robot_registry.go:559-616). The
+    // previous assertion looked for "exit 0=success", a line that only the old
+    // stub printed — Go's output has never contained it — so it pinned the
+    // stub rather than the contract.
+    for section in [
+        "Every payload carries:",
+        "All robot commands:",
+        "TUI Key Bindings:",
+        "Run bvr --help for all options.",
+    ] {
+        assert!(stdout.contains(section), "missing {section:?} in --robot-help");
+    }
+    // The key-bindings table is generated from KEY_BINDING_DOCS; one binding
+    // per category is enough to catch an empty or truncated table.
+    for category in [
+        "[Navigation]",
+        "[Views]",
+        "[Filters]",
+        "[Actions]",
+        "[Graph]",
+        "[Board]",
+        "[Tree]",
+        "[Insights]",
+        "[History]",
+        "[Attention]",
+        "[Sprint]",
+    ] {
+        assert!(stdout.contains(category), "missing {category:?}");
+    }
 }
 
 /// Go `generateRobotCapabilities` (cmd/bv/main.go:7903-7953) emits a manifest of

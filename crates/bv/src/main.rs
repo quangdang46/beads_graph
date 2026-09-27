@@ -15366,23 +15366,298 @@ fn jiff_now() -> String {
 /// Go `handleRobotNotReadyLabels` — `--robot-not-ready-labels <label1,label2,...>`.
 /// Filters triage results to exclude issues with "not-ready" labels.
 
+/// Go `writeRobotHelpFromRegistries` (cmd/bv/robot_registry.go:541-616) renders
+/// `--robot-help` from the robot *registries* — a different table from the
+/// `robotCommandDocs` list in main.go:7652 that `ROBOT_COMMAND_DOCS`
+/// transcribes. The two disagree: the registries carry bare flag names and
+/// one-line descriptions, the docs table carries placeholders and long
+/// prose. Transcribed row for row in the Go registration order so the
+/// generated list cannot drift from the oracle's.
+const ROBOT_HELP_COMMANDS: &[(&str, &str)] = &[
+    ("robot-help", "Show AI agent help"),
+    ("version", "Show version"),
+    (
+        "robot-capabilities",
+        "Output machine-readable command capabilities",
+    ),
+    ("robot-recipes", "Output recipe summaries for AI agents"),
+    (
+        "robot-schema",
+        "Output JSON schema definitions for robot commands",
+    ),
+    ("robot-metrics", "Output runtime performance metrics"),
+    ("robot-docs", "Output machine-readable robot documentation"),
+    ("robot-plan", "Output dependency-respecting execution plan"),
+    ("robot-priority", "Output enhanced priority recommendations"),
+    (
+        "robot-graph",
+        "Output dependency graph in JSON, DOT, or Mermaid",
+    ),
+    ("robot-alerts", "Output drift and proactive alerts"),
+    ("robot-suggest", "Output smart suggestions"),
+    ("robot-sprint-list", "Output all sprints as JSON"),
+    ("robot-burndown", "Output sprint burndown as JSON"),
+    ("robot-forecast", "Output ETA forecasts as JSON"),
+    (
+        "robot-search",
+        "Output keyword or hybrid search results as JSON",
+    ),
+    ("robot-diff", "Output snapshot diff as JSON"),
+    ("robot-insights", "Output deep graph analysis and insights"),
+    ("robot-next", "Output only the single top recommendation"),
+    ("robot-triage", "Output unified triage as JSON"),
+    (
+        "robot-triage-by-track",
+        "Output triage grouped by execution track",
+    ),
+    ("robot-triage-by-label", "Output triage grouped by label"),
+    (
+        "robot-history",
+        "Output bead-to-commit correlations as JSON",
+    ),
+    ("bead-history", "Output history for a specific bead as JSON"),
+    (
+        "robot-correlation-stats",
+        "Output correlation feedback statistics as JSON",
+    ),
+    (
+        "robot-explain-correlation",
+        "Explain why a commit is linked to a bead",
+    ),
+    (
+        "robot-confirm-correlation",
+        "Confirm a correlation is correct",
+    ),
+    (
+        "robot-reject-correlation",
+        "Reject an incorrect correlation",
+    ),
+    ("robot-label-health", "Output label health metrics as JSON"),
+    (
+        "robot-label-flow",
+        "Output cross-label dependency flow as JSON",
+    ),
+    (
+        "robot-label-attention",
+        "Output attention-ranked labels as JSON",
+    ),
+    ("robot-orphans", "Output orphan commit candidates as JSON"),
+    (
+        "robot-file-beads",
+        "Output beads that touched a file path as JSON",
+    ),
+    (
+        "robot-file-hotspots",
+        "Output files touched by most beads as JSON",
+    ),
+    ("robot-impact", "Analyze impact of modifying files"),
+    (
+        "robot-file-relations",
+        "Output files that frequently co-change with a target file",
+    ),
+    ("robot-related", "Output work related to a specific bead"),
+    (
+        "robot-blocker-chain",
+        "Output blocker chain analysis for an issue",
+    ),
+    ("robot-impact-network", "Output bead impact network as JSON"),
+    ("robot-causality", "Output causal chain analysis for a bead"),
+    (
+        "robot-sprint-show",
+        "Output details for a specific sprint as JSON",
+    ),
+    (
+        "robot-capacity",
+        "Output capacity simulation and projection as JSON",
+    ),
+];
+
+/// Go `ui.GetKeyBindingDocs` (pkg/ui/keybindings.go:218-...) — the
+/// authoritative TUI key table, transcribed row for row. Grouped by
+/// category in the order the Go slice declares them, which is the order
+/// `--robot-help` prints.
+const KEY_BINDING_DOCS: &[(&str, &str, &str, &str)] = &[
+    ("j", "Move down", "Navigation", "all"),
+    ("k", "Move up", "Navigation", "all"),
+    ("G", "Go to end", "Navigation", "all"),
+    ("home", "Go to start", "Navigation", "list"),
+    ("gg", "Go to start", "Navigation", "board,tree"),
+    ("ctrl+d", "Page down", "Navigation", "all"),
+    ("ctrl+u", "Page up", "Navigation", "all"),
+    ("enter", "Open details", "Navigation", "all"),
+    (
+        "esc",
+        "Back/close (list: clear filters)",
+        "Navigation",
+        "all",
+    ),
+    ("q", "Quit", "Navigation", "all"),
+    ("a", "Actionable view", "Views", "list,detail"),
+    ("b", "Board view", "Views", "list,detail"),
+    ("g", "Graph view", "Views", "list,detail"),
+    ("h", "History view", "Views", "list,detail"),
+    ("i", "Insights panel", "Views", "list,detail"),
+    (
+        "E",
+        "Tree view (parent-child hierarchy)",
+        "Views",
+        "list,detail",
+    ),
+    (
+        "f",
+        "Flow matrix (cross-label dependencies)",
+        "Views",
+        "list,detail",
+    ),
+    ("P", "Sprint dashboard", "Views", "list,detail"),
+    ("[", "Label dashboard", "Views", "list,detail"),
+    ("]", "Attention view", "Views", "list,detail"),
+    ("!", "Alerts panel", "Views", "list"),
+    ("w", "Repo picker (workspace mode)", "Views", "list"),
+    ("?", "Help overlay", "Views", "all"),
+    (";", "Shortcuts sidebar", "Views", "all"),
+    ("p", "Priority hints", "Views", "list,detail"),
+    ("o", "Open issues only", "Filters", "list"),
+    ("c", "Closed issues only", "Filters", "list"),
+    ("r", "Ready (unblocked)", "Filters", "list"),
+    ("l", "Label picker", "Filters", "list"),
+    ("/", "Search/filter", "Filters", "list"),
+    ("s", "Cycle sort mode", "Filters", "list"),
+    (
+        "S",
+        "Sort by triage score (triage recipe)",
+        "Filters",
+        "list",
+    ),
+    (
+        "t",
+        "Time travel (custom revision)",
+        "Actions",
+        "list,detail",
+    ),
+    ("T", "Time travel (HEAD~5)", "Actions", "list,detail"),
+    ("n", "Next changed issue (time travel)", "Actions", "list"),
+    (
+        "N",
+        "Previous changed issue (time travel)",
+        "Actions",
+        "list",
+    ),
+    ("x", "Export to markdown", "Actions", "list,detail"),
+    ("y", "Copy issue ID", "Actions", "all"),
+    ("C", "Copy full issue", "Actions", "detail"),
+    ("O", "Open in $EDITOR", "Actions", "detail"),
+    ("'", "Recipe picker", "Actions", "list"),
+    ("U", "Self-update check", "Actions", "all"),
+    ("V", "Cass sessions", "Actions", "list"),
+    ("hjkl", "Navigate graph", "Graph", "graph"),
+    ("H", "Scroll left", "Graph", "graph"),
+    ("L", "Scroll right", "Graph", "graph"),
+    ("J/K", "Scroll graph vertically", "Graph", "graph"),
+    (
+        "space",
+        "Expand/collapse dependency paths",
+        "Graph",
+        "graph",
+    ),
+    ("PgUp", "Previous 10 nodes", "Graph", "graph"),
+    ("PgDn", "Next 10 nodes", "Graph", "graph"),
+    ("h", "Previous column", "Board", "board"),
+    ("l", "Next column", "Board", "board"),
+    ("H", "First column", "Board", "board"),
+    ("L", "Last column", "Board", "board"),
+    ("s", "Cycle swimlane mode", "Board", "board"),
+    ("tab", "Toggle detail", "Board", "board"),
+    ("E", "Exit tree view", "Tree", "tree"),
+    ("ctrl+j", "Scroll detail down", "Board", "board"),
+    ("ctrl+k", "Scroll detail up", "Board", "board"),
+    ("h", "Previous panel", "Insights", "insights"),
+    ("l", "Next panel", "Insights", "insights"),
+    ("tab", "Next panel", "Insights", "insights"),
+    ("shift+tab", "Previous panel", "Insights", "insights"),
+    ("e", "Toggle explanations", "Insights", "insights"),
+    ("x", "Calculation proof", "Insights", "insights"),
+    ("m", "Heatmap toggle", "Insights", "insights"),
+    ("v", "Toggle git/bead mode", "History", "history"),
+    ("tab", "Toggle focus", "History", "history"),
+    ("t", "Toggle timeline pane", "History", "history"),
+    ("f", "Toggle file tree", "History", "history"),
+    ("J", "Detail scroll down", "History", "history"),
+    ("K", "Detail scroll up", "History", "history"),
+    ("o", "Open in browser", "History", "history"),
+    ("g", "Go to top", "Attention", "attention"),
+    ("enter", "Label drilldown", "Attention", "attention"),
+    ("1-9", "Filter list by rank", "Attention", "attention"),
+    ("]", "Close attention view", "Attention", "attention"),
+    ("P", "Close sprint dashboard", "Sprint", "sprint"),
+    ("j", "Next sprint", "Sprint", "sprint"),
+    ("k", "Previous sprint", "Sprint", "sprint"),
+];
+
+/// Go `writeRobotHelp` (cmd/bv/robot_registry.go:541-616).
+///
+/// The old implementation was a stub: it listed flag *names* from
+/// `ROBOT_PRIMARIES` with no descriptions, no envelope contract note, no
+/// modifiers heading and no key bindings — 47 lines against the oracle's 171.
+/// Everything below the intro is generated from [`ROBOT_HELP_COMMANDS`] and
+/// [`KEY_BINDING_DOCS`] so the list cannot drift from the tables, exactly as
+/// Go generates it from its registries.
 fn print_robot_help() {
-    println!("bvr robot commands (AI agent interface)");
-    println!();
-    println!("PRIMARY COMMANDS:");
-    for f in flags::ROBOT_PRIMARIES {
-        println!(
-            "  --{}{}",
-            f.name,
-            match f.kind {
-                flags::FlagKind::Str => " <value>",
-                flags::FlagKind::Int => " <n>",
-                flags::FlagKind::Float => " <f>",
-                _ => "",
-            }
-        );
+    print!(
+        "bvr (Beads Viewer) AI Agent Interface\n\
+         ====================================\n\
+         Use --robot-* flags for deterministic automation output.\n\
+         Bare bvr launches the interactive TUI.\n\
+         \n\
+         Start here:\n\
+         \x20 --robot-triage        Unified triage output (recommended entry point)\n\
+         \x20 --robot-next          Single top recommendation\n\
+         \x20 --robot-capabilities  Machine-readable command/contract manifest\n\
+         \x20 --robot-schema        JSON Schema definitions for robot outputs\n\
+         \x20 --robot-docs <topic>  Long-form agent documentation\n\
+         \n\
+         Every payload carries: generated_at, data_hash, source_path, source_kind,\n\
+         as_of/as_of_commit (with --as-of), scope (with --label/--recipe/--repo, plus\n\
+         scope.unsupported for flags a command cannot honour), load_stats (when records\n\
+         were dropped during load).\n\
+         Issue-backed responses also carry source_authority, authority_hash, and\n\
+         scope_hash. Partial or stale sources retain exploratory output with provisional\n\
+         readiness; source_authority.claim_safe must be true before claiming work.\n\
+         \n"
+    );
+
+    println!("All robot commands:");
+    println!("-------------------");
+    // Go `formatRobotFlag` (robot_registry.go:3822-3828) is "--" plus the
+    // name with one leading "--" trimmed; the registry stores bare names.
+    for (name, description) in ROBOT_HELP_COMMANDS {
+        println!("  {:<28} {}", format!("--{name}"), description);
     }
+    // Go emits a "Modifiers (combine with a command above):" section only when
+    // a registry command has IsModifier set. No Go command does, so the
+    // heading is absent from the oracle's output and is absent here.
+
     println!();
-    println!("Output contract: stdout=data only; stderr=diagnostics;");
-    println!("exit 0=success, 1=error/critical-drift, 2=usage/warning-drift.");
+    println!("TUI Key Bindings:");
+    println!("-----------------");
+    // Go groups by category, preserving first-seen order (robot_registry.go:
+    // :612-621), then prints a blank line before each heading.
+    let mut order: Vec<&str> = Vec::new();
+    for (_, _, category, _) in KEY_BINDING_DOCS {
+        if !order.contains(category) {
+            order.push(category);
+        }
+    }
+    for category in order {
+        println!();
+        println!("[{category}]");
+        for (key, description, cat, context) in KEY_BINDING_DOCS {
+            if *cat == category {
+                println!("  {:<12} {:<25} ({context})", key, description);
+            }
+        }
+    }
+
+    println!();
+    println!("Run bvr --help for all options.");
 }
