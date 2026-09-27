@@ -4167,13 +4167,13 @@ fn run_robot_triage() -> ExitCode {
     // describing the loaded file.
     let (issues, hash_override) = apply_scope(&loaded);
     let loaded_hash = hash_override.unwrap_or_else(|| _hash.clone());
-    if issues.is_empty() {
-        println!(
-            "{{\"generated_at\":\"{}\",\"data_hash\":\"empty\",\"triage\":{{}}}}",
-            jiff_now()
-        );
-        return ExitCode::from(0);
-    }
+    // An empty set is NOT a reason to stop. A `--repo` that matches nothing, or
+    // a `--label` nothing carries, still has to produce the full envelope with
+    // every metric marked "skipped", the counts zeroed and the lists empty —
+    // that document is how a caller tells "nothing matched the filter" from
+    // "the command failed". bvr emitted a three-key stub instead, so an agent
+    // parsing it found no `triage.quick_ref` at all and had no way to tell the
+    // two apart. The analysis below is defined for an empty graph.
     // Go keeps the loader's data_hash: scopeLoadedIssues sets
     // DataHashMatchesIssues=false so the payload still names the file it came
     // from (main.go:4890-4900).
