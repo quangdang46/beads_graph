@@ -4100,7 +4100,7 @@ fn generate_triage_history_bounded(
 }
 
 fn run_robot_triage() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let as_of = extract_as_of();
     // Use load_issues_auto_meta, not load_issues_auto: the latter discards the
     // SourceMeta, and re-deriving it via source_meta_for() is what hard-codes
@@ -6680,6 +6680,30 @@ fn run_robot_drift() -> ExitCode {
 
 /// Go `correlation.ValidateRepository` — a `.git` directory plus at least one
 /// of the known beads file names under `.beads/`.
+/// Go's `os.Getwd()`: on Unix it returns `$PWD` when that names the same
+/// directory, so a run under a symlinked path is reported the way the user
+/// typed it. `std::env::current_dir()` always resolves, so on macOS every path
+/// Go would print read `/private/tmp/...` instead of `/tmp/...` — and these
+/// paths end up verbatim in error messages, a baseline file's `source_path`,
+/// and the saved `created_at`.
+fn go_working_dir() -> std::path::PathBuf {
+    let physical = std::env::current_dir().unwrap_or_default();
+    // Go checks that `$PWD` names the *current* directory before trusting it
+    // (os/getwd.go: "If the operating system provides a Getwd call that uses
+    // the PWD environment variable, and the PWD variable names the current
+    // directory, use it"). Skipping that check makes a stale PWD win over the
+    // real cwd: running `bvr` from a fixture while the shell's PWD is the
+    // repository root would then read the repository's issues instead of the
+    // fixture's, and report success where Go reports the fixture's error.
+    if let Ok(pwd) = std::env::var("PWD") {
+        let pwd = std::path::PathBuf::from(pwd);
+        if std::fs::canonicalize(&pwd).ok() == std::fs::canonicalize(&physical).ok() {
+            return pwd;
+        }
+    }
+    physical
+}
+
 fn validate_correlation_repository(repo: &std::path::Path) -> Result<(), String> {
     if !repo.join(".git").exists() {
         return Err(format!("not a git repository: {}", repo.to_string_lossy()));
@@ -6784,7 +6808,7 @@ fn parse_relative_time(raw: &str) -> Result<Option<String>, String> {
 }
 
 fn run_robot_history() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
         if unresolved_source_probe(&cwd) {
             return emit_unresolved_source();
@@ -6792,7 +6816,6 @@ fn run_robot_history() -> ExitCode {
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
         eprintln!("Error handling --robot-history: {e}");
-        eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _, _as_of_commit) = match load_issues_auto(&cwd, None) {
@@ -6905,7 +6928,7 @@ fn run_robot_history() -> ExitCode {
 /// produces, hand it to the orphan detector (which scans exactly the window
 /// that index covered), then drop candidates below `--orphans-min-score`.
 fn run_robot_orphans() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
         if unresolved_source_probe(&cwd) {
             return emit_unresolved_source();
@@ -6913,7 +6936,6 @@ fn run_robot_orphans() -> ExitCode {
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
         eprintln!("Error handling --robot-orphans: {e}");
-        eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _, _as_of_commit) = match load_issues_auto(&cwd, None) {
@@ -12741,7 +12763,7 @@ fn run_robot_causality(args: &[String]) -> ExitCode {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
         if unresolved_source_probe(&cwd) {
             return emit_unresolved_source();
@@ -12749,7 +12771,6 @@ fn run_robot_causality(args: &[String]) -> ExitCode {
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
         eprintln!("Error handling --robot-causality: {e}");
-        eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
@@ -13018,7 +13039,7 @@ fn run_robot_related(args: &[String]) -> ExitCode {
         }
     };
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
         if unresolved_source_probe(&cwd) {
             return emit_unresolved_source();
@@ -13026,7 +13047,6 @@ fn run_robot_related(args: &[String]) -> ExitCode {
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
         eprintln!("Error handling --robot-related: {e}");
-        eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
@@ -13148,7 +13168,7 @@ fn run_robot_impact_network(args: &[String]) -> ExitCode {
         .unwrap_or(2)
         .clamp(1, 3);
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     // Go: correlation.ValidateRepository runs before the beads file is
     // located (robot_registry.go:3335-3337). The dispatcher wraps whatever the
     // handler returns as `Error handling <flag>: <err>` when the handler has
@@ -13160,7 +13180,6 @@ fn run_robot_impact_network(args: &[String]) -> ExitCode {
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
-        eprintln!("Error handling --robot-impact-network: {e}");
         eprintln!("Error handling --robot-impact-network: {e}");
         return ExitCode::from(1);
     }
@@ -14432,7 +14451,7 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
         },
         None => 20,
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let issues = match load_issues_auto(&cwd, None) {
         Ok((issues, _, _)) => issues,
         Err(e) => {
@@ -14449,7 +14468,7 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
             if is_unresolved_source_error(&e.to_string()) {
                 return emit_unresolved_source();
             }
-            eprintln!("Error: {e}");
+            eprintln!("Error handling --robot-file-beads: {e}");
             return ExitCode::from(1);
         }
     };
@@ -14483,7 +14502,7 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
 /// beads}` shape off the sha-only correlation map, which has no per-file
 /// history and no index stats.
 fn run_robot_file_hotspots(args: &[String]) -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
         if unresolved_source_probe(&cwd) {
             return emit_unresolved_source();
@@ -14491,7 +14510,6 @@ fn run_robot_file_hotspots(args: &[String]) -> ExitCode {
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
         eprintln!("Error handling --robot-file-hotspots: {e}");
-        eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
     let (issues, _, _) = match load_issues_auto(&cwd, None) {
