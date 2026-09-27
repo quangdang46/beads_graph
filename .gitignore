@@ -29,6 +29,14 @@ dist/
 # neither binary commits this).
 .bv/
 
+# ...except the hooks-loader fixtures, which are test data and only readable at
+# `.bv/hooks.yaml` because that is the path Go's `pkg/hooks` loader reads
+# (config.go:114-119). hooks_loader_parity.rs needs the directory name to
+# match; without this negation `git add -A` silently skips them, which is how
+# the whole tree went missing in the first place.
+!crates/bv-export/tests/fixtures/hooks/**/.bv/
+!crates/bv-export/tests/fixtures/hooks/**/.bv/**
+
 # Upstream reference clone (local only — do not publish Go source in Rust repo)
 beads_viewer/
 

@@ -1,0 +1,6 @@
+version: 1
+hooks:
+  pre-export:
+    - command: echo pre
+  post-export:
+    - command: echo post

@@ -1,0 +1,5 @@
+version: 1
+hooks:
+  pre-export:
+    - command: a
+      timeout: 5x

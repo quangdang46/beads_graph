@@ -1,0 +1,10 @@
+version: 1
+hooks:
+  pre-export:
+    - name: first
+      command: echo 1
+      env:
+        ZED: z
+        ALPHA: a
+    - name: second
+      command: echo 2

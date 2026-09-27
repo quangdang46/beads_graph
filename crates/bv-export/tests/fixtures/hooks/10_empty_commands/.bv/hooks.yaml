@@ -1,0 +1,11 @@
+version: 1
+hooks:
+  pre-export:
+    - command: ""
+    - name: real
+      command: echo hi
+    - command: ""
+    - name: after
+      command: echo after
+  post-export:
+    - command: ""

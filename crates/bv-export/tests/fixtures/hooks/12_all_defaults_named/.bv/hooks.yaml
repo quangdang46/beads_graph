@@ -1,0 +1,6 @@
+version: 1
+hooks:
+  post-export:
+    - command: a
+    - command: b
+    - command: c

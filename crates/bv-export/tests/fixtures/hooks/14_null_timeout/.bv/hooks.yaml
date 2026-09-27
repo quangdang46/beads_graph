@@ -1,0 +1,7 @@
+version: 1
+hooks:
+  pre-export:
+    - command: a
+      timeout: null
+    - command: b
+      timeout: ""

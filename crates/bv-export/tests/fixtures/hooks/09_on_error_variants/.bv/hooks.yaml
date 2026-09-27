@@ -1,0 +1,15 @@
+version: 1
+hooks:
+  pre-export:
+    - command: a
+      on_error: fail
+    - command: b
+    - command: c
+      on_error: "  CONTINUE  "
+    - command: d
+      on_error: retry
+    - command: e
+  post-export:
+    - command: f
+    - command: g
+      on_error: nope
