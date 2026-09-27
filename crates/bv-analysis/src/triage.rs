@@ -815,6 +815,20 @@ pub fn build_triage(
     build_triage_inner(issues, g, now, true, time_travelling)
 }
 
+/// Go `--emit-script` (cmd/bv/main.go:4013) calls
+/// `ComputeTriageWithOptions`, whose analyzer never had phase 2 awaited, so its
+/// PageRank and betweenness inputs are EMPTY and the ranking is driven by
+/// staleness, priority, effort and the unblock boost alone. The triage registry
+/// path awaits phase 2 (robot_registry.go:930-932) and does use them — the two
+/// rank the same issues differently, which is why bvr's script disagreed.
+pub fn build_triage_without_graph_metrics(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+) -> TriageOutput {
+    build_triage_inner(issues, g, now, false, false)
+}
+
 /// Go parity variant for `cmd/bv/main.go:4013` (`--emit-script`), the one
 /// triage caller that omits `TriageOptions.WaitForPhase2` (triage.go:400).
 /// The `opts.WaitForPhase2 && hasOpenIssues` guard at triage.go:517-519
