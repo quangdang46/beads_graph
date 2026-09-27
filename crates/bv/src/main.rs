@@ -6678,6 +6678,21 @@ fn run_robot_drift() -> ExitCode {
     ExitCode::from(result.exit_code())
 }
 
+/// The flag a history invocation actually used. `--robot-history` and
+/// `--bead-history` share one handler (main.rs:1943), and Go's dispatcher names
+/// the flag the caller typed — so a repository check that fails has to say
+/// which of the two it was.
+fn history_flag_name(args: &[String]) -> &'static str {
+    if args
+        .iter()
+        .any(|a| a == "--bead-history" || a.starts_with("--bead-history="))
+    {
+        "--bead-history"
+    } else {
+        "--robot-history"
+    }
+}
+
 /// Go `correlation.ValidateRepository` — a `.git` directory plus at least one
 /// of the known beads file names under `.beads/`.
 /// Go's `os.Getwd()`: on Unix it returns `$PWD` when that names the same
@@ -6808,6 +6823,9 @@ fn parse_relative_time(raw: &str) -> Result<Option<String>, String> {
 }
 
 fn run_robot_history() -> ExitCode {
+    // The raw argv is enough: the check is for the literal flag, and Go's
+    // dispatcher names the flag as typed, before any rewriting.
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
         if unresolved_source_probe(&cwd) {
@@ -6815,7 +6833,7 @@ fn run_robot_history() -> ExitCode {
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
-        eprintln!("Error handling --robot-history: {e}");
+        eprintln!("Error handling {}: {e}", history_flag_name(&args));
         return ExitCode::from(1);
     }
     let (issues, _, _as_of_commit) = match load_issues_auto(&cwd, None) {
