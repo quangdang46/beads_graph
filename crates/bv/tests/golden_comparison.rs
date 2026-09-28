@@ -403,39 +403,44 @@ fn canonical(v: &Value) -> String {
 ///   xl_2500____robot_{priority,alerts,label_health}
 ///
 ///
-/// 2026-09-29: the nine remaining are confirmed undecidable without a
-/// recapture, and an experiment to remove them was reverted.
+/// 2026-09-29: the constant drops from 9 to 0, and the corpus is recaptured.
 ///
-/// The nine `selfrepo` cases are the repository reading itself, so their
-/// goldens encode whatever `.beads/issues.jsonl`, `docs/generated/` and the
-/// tree looked on 2026-09-23.
+/// The nine `selfrepo` cases were the repository reading itself, so their
+/// goldens encoded whatever `.beads/issues.jsonl`, `docs/generated/` and the
+/// tree looked on 2026-09-23. Two independent checks agreed they were drift:
 ///
-/// The drift claim is checked, not asserted. Running the oracle and the current
-/// binary against the CURRENT data with the clock pinned gives, for all nine:
+///   1. With the clock pinned, the oracle and the current binary agree on all
+///      nine — byte-identical, or differing only in `generated_at` and `ms`,
+///      which are wall-clock reads that move between any two runs of either
+///      binary (`triage.meta.generated_at` is nanosecond `time.Now()` per
+///      triage.go:712; `status.*.ms` is measured elapsed time).
+///   2. Lowering this constant to 0 without touching the corpus made the gate
+///      fail with "9 divergences > baseline 0" — so the divergence was never
+///      the code, it was the file on disk.
 ///
-///   selfrepo____robot_{triage,next,plan,insights,priority,suggest,alerts,graph,label_health}
+/// `scripts/capture_goldens.sh` was then run and the corpus recaptured from
+/// the Go clone at 18afafa — the same build that produced the original
+/// corpus, and the one `golden/METADATA.txt` names. The gate reports
+/// PASS=65 DIFF_FAILS=0. Nothing here was captured from a Rust build: the
+/// script builds `cmd/bv` from `$BEADS_VIEWER_CLONE` and refuses to run if
+/// that clone is not at the pinned commit, which is the guard that stopped a
+/// previous corpus from being labelled with a Go commit it was never built
+/// from.
 ///
-///   -- byte-identical, or differing only in `generated_at` and the `ms`
-///     timing fields, which change between any two runs of either binary
-///     because they are wall-clock reads rather than computed values
-///     (`triage.meta.generated_at` is nanosecond `time.Now()`, triage.go:712;
-///     `status.*.ms` is measured elapsed time)
+/// 24 of the 26 changed files are `selfrepo` cases — the repository reading
+/// itself, which is exactly what went stale. The other two are
+/// `small_chain____robot_label_attention` and
+/// `xl_2500____robot_label_attention`, and they moved in the LAST FLOAT DIGIT
+/// of `pagerank_sum` (0.9999999999999997 vs ...998) — the oracle summing
+/// the same values in a different order between runs. Nothing Rust does is
+/// involved; the previous corpus froze one of the two answers. The other 44
+/// fixture goldens are byte-identical, which is the check that the recapture
+/// did not quietly widen the tolerance: synthetic fixtures read only their own
+/// `.beads` and could not have moved.
 ///
-/// So the port is clean and the CORPUS is what is stale. The fix is to
-/// recapture these nine at a frozen commit, which would move them to
-/// CORPUS_DEFECTS alongside the two git-drift cases the harness already
-/// detects, and drop this constant to 0.
-///
-/// Lowering the constant to 0 without recapturing was tried and reverted: the
-/// gate immediately reports "9 divergences > baseline 0" and fails, which is
-/// the honest answer. Those nine still differ from the goldens on disk, and a
-/// constant is not a fix for a corpus that no longer describes the tree.
-///
-/// `golden/` is a captured artefact of Go 18afafa. Regenerating it from a Rust
-/// build would stop it being a differential test against the oracle, so the
-/// recapture is a deliberate act and not something to slip in with a parity
-/// fix.
-const GOLDEN_GATE_BASELINE_FAILS: usize = 9;
+/// The stale note that `selfrepo____robot_triage` "carries a real gap — Rust
+/// omits Go's `feedback` object" has not been true since 4015321.
+const GOLDEN_GATE_BASELINE_FAILS: usize = 0;
 
 /// Ratchet baseline: number of goldens this corpus provably cannot decide,
 /// counted by [`classify`] and reported by name in the gate summary.
@@ -607,11 +612,28 @@ fn rust_output_matches_frozen_go_goldens() {
         "Golden-gate harness broke (binary error / invalid JSON):\n{}",
         infra_msgs.join("\n")
     );
-    // Content parity is a ratchet: fail only if worse than baseline.
-    assert!(
-        diff_fails <= GOLDEN_GATE_BASELINE_FAILS,
-        "Parity regressed: {diff_fails} divergences > baseline {}. Fix or lower the baseline:\n{}",
-        GOLDEN_GATE_BASELINE_FAILS,
+    // Content parity: every golden in the corpus must now match byte-for-byte.
+    //
+    // The baseline is 0, which makes the old `diff_fails <= baseline`
+    // ratchet into an absolute requirement. Clippy rejects that form as a
+    // tautologically-false comparison, so the same property is asserted
+    // directly: raising this constant back above zero is what turns the gate
+    // back into a tolerated ratchet, and the message says so, so a future
+    // reader knows the corpus is not being held to full parity.
+    assert_eq!(
+        GOLDEN_GATE_BASELINE_FAILS, 0,
+        "the golden gate is held to full parity; if a tolerance is genuinely \
+         needed, raise this constant deliberately and record why in the \
+         comment above it"
+    );
+    assert_eq!(
+        diff_fails,
+        0,
+        "Parity regressed: {} divergence(s), and the baseline is 0. Every \
+         golden must match the oracle byte-for-byte. If a case cannot be \
+         decided, recapture the corpus from the Go clone at the pinned \
+         commit rather than widening the tolerance:\n{}",
+        diff_fails,
         diff_msgs.join("\n")
     );
     // The corpus-defect bucket is a ratchet too, so undecidable goldens cannot

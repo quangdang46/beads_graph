@@ -1,1 +1,145 @@
-{"generated_at":"2026-08-22T14:06:52Z","data_hash":"d13d26480b8bf16c727d15b64e9d81d9ba60d0f5d3272736ee1b18b3a844ff13","output_format":"json","version":"v0.25.0","source_path":"/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl","source_kind":"jsonl_local","source_authority":{"state":"complete","claim_safe":true,"readiness":"proven","loaded":1,"failed":0,"disabled":0,"valid":46,"errors":0,"skipped":0,"read_errors":0,"visible":46,"tombstones":0,"warning_count":0,"sources":[{"source_path":"/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl","source_kind":"jsonl_local","status":"loaded","data_hash":"d13d26480b8bf16c727d15b64e9d81d9ba60d0f5d3272736ee1b18b3a844ff13","valid":46,"errors":0,"skipped":0,"read_errors":0,"visible":46,"tombstones":0,"stale":false,"warning_count":0}]},"authority_hash":"e51a71e179229b91cdf58344a733180cc4658dd6c4c4b7ae7d7d01b83aa0adab","scope_hash":"044ebfe93bb097d3c7afe4ee1c810c4c989012fbbb4998257bc1227f3968ee7c","triage":{"meta":{"version":"1.0.0","generated_at":"2026-08-22T14:06:52Z","phase2_ready":true,"issue_count":46,"compute_time_ms":0,"history_status":"skipped"},"status":{"PageRank":{"state":"computed"},"Betweenness":{"state":"computed","reason":"approximate"},"Eigenvector":{"state":"skipped"},"HITS":{"state":"skipped"},"Critical":{"state":"skipped"},"Cycles":{"state":"skipped"},"KCore":{"state":"skipped"},"Articulation":{"state":"skipped"},"Slack":{"state":"skipped"}},"quick_ref":{"open_count":3,"actionable_count":3,"blocked_count":0,"in_progress_count":0,"not_closed_count":3,"not_actionable_count":0,"top_picks":[{"id":"beads_viewer_rust-lw1","title":"Port Go self-update (pkg/updater) to bvr update","score":0.10039031661578617,"reasons":["✅ Currently unclaimed - available for work","🚨 High priority (P1) - prioritize this work"],"unblocks":0},{"id":"beads_viewer_rust-tui-history-view-p8n","title":"TUI: implement History/time-travel view","score":0.07914031661578619,"reasons":["✅ Currently unclaimed - available for work"],"unblocks":0},{"id":"beads_viewer_rust-tui-pickers-modals-j5t","title":"TUI: implement remaining pickers/modals (label/recipe/repo picker, search, velocity, update modal)","score":0.05789031661578618,"reasons":["✅ Currently unclaimed - available for work"],"unblocks":0}]},"recommendations":[{"id":"beads_viewer_rust-lw1","title":"Port Go self-update (pkg/updater) to bvr update","type":"task","status":"open","priority":1,"labels":null,"score":0.10039031661578617,"breakdown":{"pagerank":0.014856254842101378,"betweenness":0,"blocker_ratio":0,"staleness":0,"priority_boost":0.07500000000000001,"time_to_impact":0.026250000000000002,"urgency":0,"risk":0.0020000000000000005,"pagerank_norm":0.0675284311004608,"betweenness_norm":0,"blocker_ratio_norm":0,"staleness_norm":0,"priority_boost_norm":0.75,"time_to_impact_norm":0.2625,"urgency_norm":0,"risk_norm":0.020000000000000004,"time_to_impact_explanation":"Leaf node, median estimate 60m","risk_explanation":"Low risk - stable dependency structure","risk_signals":{"fan_variance":0,"activity_churn":0,"cross_repo_risk":0,"status_risk":0.1,"composite_risk":0.020000000000000004,"explanation":"Low risk - stable dependency structure"}},"action":"Start work on this issue","reasons":["✅ Currently unclaimed - available for work","🚨 High priority (P1) - prioritize this work"],"claimable":true,"actions":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","local_id":"beads_viewer_rust-lw1","tracker":"br","show":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","--no-auto-flush","show","--json","--","beads_viewer_rust-lw1"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' '--no-auto-flush' 'show' '--json' '--' 'beads_viewer_rust-lw1'"},"claim":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","update","--json","--claim","--","beads_viewer_rust-lw1"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' 'update' '--json' '--claim' '--' 'beads_viewer_rust-lw1'"}}},{"id":"beads_viewer_rust-tui-history-view-p8n","title":"TUI: implement History/time-travel view","type":"task","status":"open","priority":2,"labels":["tui"],"score":0.07914031661578619,"breakdown":{"pagerank":0.014856254842101378,"betweenness":0,"blocker_ratio":0,"staleness":0,"priority_boost":0.05,"time_to_impact":0.026250000000000002,"urgency":0,"risk":0.0020000000000000005,"pagerank_norm":0.0675284311004608,"betweenness_norm":0,"blocker_ratio_norm":0,"staleness_norm":0,"priority_boost_norm":0.5,"time_to_impact_norm":0.2625,"urgency_norm":0,"risk_norm":0.020000000000000004,"time_to_impact_explanation":"Leaf node, median estimate 60m","risk_explanation":"Low risk - stable dependency structure","risk_signals":{"fan_variance":0,"activity_churn":0,"cross_repo_risk":0,"status_risk":0.1,"composite_risk":0.020000000000000004,"explanation":"Low risk - stable dependency structure"}},"action":"Start work on this issue","reasons":["✅ Currently unclaimed - available for work"],"claimable":true,"actions":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","local_id":"beads_viewer_rust-tui-history-view-p8n","tracker":"br","show":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","--no-auto-flush","show","--json","--","beads_viewer_rust-tui-history-view-p8n"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' '--no-auto-flush' 'show' '--json' '--' 'beads_viewer_rust-tui-history-view-p8n'"},"claim":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","update","--json","--claim","--","beads_viewer_rust-tui-history-view-p8n"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' 'update' '--json' '--claim' '--' 'beads_viewer_rust-tui-history-view-p8n'"}}},{"id":"beads_viewer_rust-tui-pickers-modals-j5t","title":"TUI: implement remaining pickers/modals (label/recipe/repo picker, search, velocity, update modal)","type":"task","status":"open","priority":3,"labels":["tui"],"score":0.05789031661578618,"breakdown":{"pagerank":0.014856254842101378,"betweenness":0,"blocker_ratio":0,"staleness":0,"priority_boost":0.025,"time_to_impact":0.026250000000000002,"urgency":0,"risk":0.0020000000000000005,"pagerank_norm":0.0675284311004608,"betweenness_norm":0,"blocker_ratio_norm":0,"staleness_norm":0,"priority_boost_norm":0.25,"time_to_impact_norm":0.2625,"urgency_norm":0,"risk_norm":0.020000000000000004,"time_to_impact_explanation":"Leaf node, median estimate 60m","risk_explanation":"Low risk - stable dependency structure","risk_signals":{"fan_variance":0,"activity_churn":0,"cross_repo_risk":0,"status_risk":0.1,"composite_risk":0.020000000000000004,"explanation":"Low risk - stable dependency structure"}},"action":"Start work on this issue","reasons":["✅ Currently unclaimed - available for work"],"claimable":true,"actions":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","local_id":"beads_viewer_rust-tui-pickers-modals-j5t","tracker":"br","show":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","--no-auto-flush","show","--json","--","beads_viewer_rust-tui-pickers-modals-j5t"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' '--no-auto-flush' 'show' '--json' '--' 'beads_viewer_rust-tui-pickers-modals-j5t'"},"claim":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","update","--json","--claim","--","beads_viewer_rust-tui-pickers-modals-j5t"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' 'update' '--json' '--claim' '--' 'beads_viewer_rust-tui-pickers-modals-j5t'"}}}],"quick_wins":[{"id":"beads_viewer_rust-lw1","title":"Port Go self-update (pkg/updater) to bvr update","status":"open","score":0.5,"reason":"Low complexity, high priority"},{"id":"beads_viewer_rust-tui-history-view-p8n","title":"TUI: implement History/time-travel view","status":"open","score":0.4,"reason":"Low complexity"},{"id":"beads_viewer_rust-tui-pickers-modals-j5t","title":"TUI: implement remaining pickers/modals (label/recipe/repo picker, search, velocity, update modal)","status":"open","score":0.4,"reason":"Low complexity"}],"blockers_to_clear":[],"project_health":{"counts":{"total":46,"open":3,"closed":43,"blocked":0,"actionable":3,"not_closed":3,"dependency_blocked":0,"by_status":{"closed":43,"open":3},"by_type":{"chore":1,"epic":1,"feature":2,"task":42},"by_priority":{"0":2,"1":22,"2":13,"3":9}},"graph":{"node_count":46,"edge_count":41,"density":0.019806763285024155,"has_cycles":false,"phase2_ready":true},"velocity":{"closed_last_7_days":43,"closed_last_30_days":43,"avg_days_to_close":0.3711663912795274,"weekly":[{"week_start":"2026-08-17T00:00:00Z","closed":33},{"week_start":"2026-08-10T00:00:00Z","closed":0},{"week_start":"2026-08-03T00:00:00Z","closed":0},{"week_start":"2026-07-27T00:00:00Z","closed":0},{"week_start":"2026-07-20T00:00:00Z","closed":0},{"week_start":"2026-07-13T00:00:00Z","closed":0},{"week_start":"2026-07-06T00:00:00Z","closed":0},{"week_start":"2026-06-29T00:00:00Z","closed":0}]}},"commands":{"claim_top":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' 'update' '--json' '--claim' '--' 'beads_viewer_rust-lw1'","show_top":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' '--no-auto-flush' 'show' '--json' '--' 'beads_viewer_rust-lw1'","list_ready":"","list_blocked":"","refresh_triage":"bv --robot-triage"}},"usage_hints":["jq '.triage.quick_ref.top_picks[:3]' - Top 3 picks for immediate work","jq '.triage.recommendations[3:10] | map({id,title,score})' - Next candidates after top picks","jq '.triage.blockers_to_clear | map(.id)' - High-impact blockers to clear","jq '.triage.recommendations[] | select(.type == \"bug\")' - Bug-focused recommendations","jq '.triage.quick_ref.top_picks[] | select(.unblocks \u003e 2)' - High-impact picks","jq '.triage.quick_wins' - Low-effort, high-impact items","--robot-next - Get only the single top recommendation","--brief - Compact output: only id/title/status/assignee/blockers/unblocks (#183)","--robot-triage-by-track - Group by execution track for multi-agent coordination","--robot-triage-by-label - Group by label for area-focused agents","jq '.triage.recommendations_by_track[].top_pick' - Top pick per track","jq '.triage.recommendations_by_label[].claim_command' - Claim commands per label","jq '.feedback.weight_adjustments' - View feedback-adjusted weights (bv-90)","--graph-root \u003cid\u003e - Scope triage to subgraph rooted at a specific epic (bv-140)"]}
+generated_at: "2026-08-22T14:06:52Z"
+data_hash: 518893b896f53b49cd10197961e42a8353c51bb822dad9933b8ce5740f44c460
+output_format: toon
+version: v0.25.0
+source_path: /Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl
+source_kind: jsonl_local
+source_authority:
+  state: complete
+  claim_safe: true
+  readiness: proven
+  loaded: 1
+  failed: 0
+  disabled: 0
+  valid: 46
+  errors: 0
+  skipped: 0
+  read_errors: 0
+  visible: 46
+  tombstones: 0
+  warning_count: 0
+  sources[1]{source_path,source_kind,status,data_hash,valid,errors,skipped,read_errors,visible,tombstones,stale,warning_count}:
+    /Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl,jsonl_local,loaded,518893b896f53b49cd10197961e42a8353c51bb822dad9933b8ce5740f44c460,46,0,0,0,46,0,false,0
+authority_hash: d8088267ecb6690ef43eeee90852c062ce37852e4e84d93825395314b9b2e05a
+scope_hash: 31eda85c16ff4af6a0af1d06700d940dd4256667344aa858dc93a34aff0b4aa2
+triage:
+  meta:
+    version: 1.0.0
+    generated_at: "2026-08-22T14:06:52Z"
+    phase2_ready: true
+    issue_count: 46
+    compute_time_ms: 0
+  status:
+    PageRank:
+      state: skipped
+      reason: all phase 2 disabled
+    Betweenness:
+      state: skipped
+      reason: all phase 2 disabled
+    Eigenvector:
+      state: skipped
+      reason: all phase 2 disabled
+    HITS:
+      state: skipped
+      reason: all phase 2 disabled
+    Critical:
+      state: skipped
+      reason: all phase 2 disabled
+    Cycles:
+      state: skipped
+      reason: all phase 2 disabled
+    KCore:
+      state: skipped
+      reason: all phase 2 disabled
+    Articulation:
+      state: skipped
+      reason: all phase 2 disabled
+    Slack:
+      state: skipped
+      reason: all phase 2 disabled
+  quick_ref:
+    open_count: 0
+    actionable_count: 0
+    blocked_count: 0
+    in_progress_count: 0
+    not_closed_count: 0
+    not_actionable_count: 0
+    top_picks[0]:
+  recommendations[0]:
+  quick_wins[0]:
+  blockers_to_clear[0]:
+  project_health:
+    counts:
+      total: 46
+      open: 0
+      closed: 46
+      blocked: 0
+      actionable: 0
+      not_closed: 0
+      dependency_blocked: 0
+      by_status:
+        closed: 46
+      by_type:
+        chore: 1
+        epic: 1
+        feature: 2
+        task: 42
+      by_priority:
+        "0": 2
+        "1": 22
+        "2": 13
+        "3": 9
+    graph:
+      node_count: 46
+      edge_count: 41
+      density: 0.019806763285024155
+      has_cycles: false
+      phase2_ready: true
+    velocity:
+      closed_last_7_days: 46
+      closed_last_30_days: 46
+      avg_days_to_close: 1.4987001717224488
+      weekly[8]{week_start,closed}:
+        "2026-08-17T00:00:00Z",33
+        "2026-08-10T00:00:00Z",0
+        "2026-08-03T00:00:00Z",0
+        "2026-07-27T00:00:00Z",0
+        "2026-07-20T00:00:00Z",0
+        "2026-07-13T00:00:00Z",0
+        "2026-07-06T00:00:00Z",0
+        "2026-06-29T00:00:00Z",0
+  commands:
+    claim_top: ""
+    show_top: ""
+    list_ready: ""
+    list_blocked: ""
+    refresh_triage: bv --robot-triage
+feedback:
+  enabled: true
+  applied: false
+  min_samples: 3
+  total_events: 2
+  accepted_count: 2
+  ignored_count: 0
+  avg_accept_score: 0.15575376866825674
+  avg_ignore_score: 0
+  weight_adjustments:
+    Betweenness: 1
+    BlockerRatio: 1
+    PageRank: 1.0027011372440184
+    PriorityBoost: 1.0300000000000002
+    Risk: 1.0071048987856197
+    Staleness: 1.0004990101696605
+    TimeToImpact: 1.0133
+    Urgency: 1.0057046016600124
+  effective_weights:
+    Betweenness: 0.1987616847413871
+    BlockerRatio: 0.1291950950819016
+    PageRank: 0.2192284240637985
+    PriorityBoost: 0.10236226764181439
+    Risk: 0.10008693319696696
+    Staleness: 0.04971521721085298
+    TimeToImpact: 0.10070260757422379
+    Urgency: 0.09994777048905484
+  updated_at: "2026-09-26T20:00:07.367773+07:00"
+usage_hints[14]: "jq '.triage.quick_ref.top_picks[:3]' - Top 3 picks for immediate work","jq '.triage.recommendations[3:10] | map({id,title,score})' - Next candidates after top picks",jq '.triage.blockers_to_clear | map(.id)' - High-impact blockers to clear,"jq '.triage.recommendations[] | select(.type == \"bug\")' - Bug-focused recommendations","jq '.triage.quick_ref.top_picks[] | select(.unblocks > 2)' - High-impact picks","jq '.triage.quick_wins' - Low-effort, high-impact items","--robot-next - Get only the single top recommendation","--brief - Compact output: only id/title/status/assignee/blockers/unblocks (#183)","--robot-triage-by-track - Group by execution track for multi-agent coordination","--robot-triage-by-label - Group by label for area-focused agents","jq '.triage.recommendations_by_track[].top_pick' - Top pick per track","jq '.triage.recommendations_by_label[].claim_command' - Claim commands per label",jq '.feedback.weight_adjustments' - View feedback-adjusted weights (bv-90),"--graph-root <id> - Scope triage to subgraph rooted at a specific epic (bv-140)"

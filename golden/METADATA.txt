@@ -1,4 +1,6 @@
-captured_at: 2026-09-23T22:17:41Z
+captured_at: 2026-09-28T22:54:50Z
+producer: go-bv-oracle
 go_commit: 18afafaefbcfd7fbb2ed4f55b49e7141da6513d2
-expected_commit: 9ace029f1b141c4843a1fbd2c4a365888ef734a5
+expected_commit: 18afafaefbcfd7fbb2ed4f55b49e7141da6513d2
 source_date_epoch: 1787407612
+captured_files: 70

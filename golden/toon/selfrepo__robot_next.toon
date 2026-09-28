@@ -1,1 +1,58 @@
-{"generated_at":"2026-08-22T14:06:52Z","data_hash":"d13d26480b8bf16c727d15b64e9d81d9ba60d0f5d3272736ee1b18b3a844ff13","output_format":"json","version":"v0.25.0","source_path":"/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl","source_kind":"jsonl_local","source_authority":{"state":"complete","claim_safe":true,"readiness":"proven","loaded":1,"failed":0,"disabled":0,"valid":46,"errors":0,"skipped":0,"read_errors":0,"visible":46,"tombstones":0,"warning_count":0,"sources":[{"source_path":"/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl","source_kind":"jsonl_local","status":"loaded","data_hash":"d13d26480b8bf16c727d15b64e9d81d9ba60d0f5d3272736ee1b18b3a844ff13","valid":46,"errors":0,"skipped":0,"read_errors":0,"visible":46,"tombstones":0,"stale":false,"warning_count":0}]},"authority_hash":"e51a71e179229b91cdf58344a733180cc4658dd6c4c4b7ae7d7d01b83aa0adab","scope_hash":"044ebfe93bb097d3c7afe4ee1c810c4c989012fbbb4998257bc1227f3968ee7c","actionable":true,"phase2_ready":true,"status":{"PageRank":{"state":"computed"},"Betweenness":{"state":"computed","reason":"approximate"},"Eigenvector":{"state":"skipped"},"HITS":{"state":"skipped"},"Critical":{"state":"skipped"},"Cycles":{"state":"skipped"},"KCore":{"state":"skipped"},"Articulation":{"state":"skipped"},"Slack":{"state":"skipped"}},"id":"beads_viewer_rust-lw1","title":"Port Go self-update (pkg/updater) to bvr update","score":0.10039031661578617,"reasons":["✅ Currently unclaimed - available for work","🚨 High priority (P1) - prioritize this work"],"claim_command":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' 'update' '--json' '--claim' '--' 'beads_viewer_rust-lw1'","show_command":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' '--no-auto-flush' 'show' '--json' '--' 'beads_viewer_rust-lw1'","actions":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","local_id":"beads_viewer_rust-lw1","tracker":"br","show":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","--no-auto-flush","show","--json","--","beads_viewer_rust-lw1"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' '--no-auto-flush' 'show' '--json' '--' 'beads_viewer_rust-lw1'"},"claim":{"working_directory":"/Users/tranquangdang21/Projects/beads_viewer_rust","argv":["env","BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads","BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","/Users/tranquangdang21/.local/bin/br","--db","/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db","--no-auto-import","update","--json","--claim","--","beads_viewer_rust-lw1"],"shell":"cd -- '/Users/tranquangdang21/Projects/beads_viewer_rust' \u0026\u0026 'env' 'BEADS_DIR=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads' 'BEADS_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' 'BD_DB=/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '/Users/tranquangdang21/.local/bin/br' '--db' '/Users/tranquangdang21/Projects/beads_viewer_rust/.beads/beads.db' '--no-auto-import' 'update' '--json' '--claim' '--' 'beads_viewer_rust-lw1'"}},"usage_hints":["Use scripts/br_retry.sh actionable --json plus the claim gate before mutating Beads state in crowded swarms.","No claim_command is emitted unless the item is open, unblocked, unassigned, and triage metrics are ready.","Inspect .status for skipped, timeout, or pending graph phases."]}
+generated_at: "2026-08-22T14:06:52Z"
+data_hash: 518893b896f53b49cd10197961e42a8353c51bb822dad9933b8ce5740f44c460
+output_format: toon
+version: v0.25.0
+source_path: /Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl
+source_kind: jsonl_local
+source_authority:
+  state: complete
+  claim_safe: true
+  readiness: proven
+  loaded: 1
+  failed: 0
+  disabled: 0
+  valid: 46
+  errors: 0
+  skipped: 0
+  read_errors: 0
+  visible: 46
+  tombstones: 0
+  warning_count: 0
+  sources[1]{source_path,source_kind,status,data_hash,valid,errors,skipped,read_errors,visible,tombstones,stale,warning_count}:
+    /Users/tranquangdang21/Projects/beads_viewer_rust/.beads/issues.jsonl,jsonl_local,loaded,518893b896f53b49cd10197961e42a8353c51bb822dad9933b8ce5740f44c460,46,0,0,0,46,0,false,0
+authority_hash: d8088267ecb6690ef43eeee90852c062ce37852e4e84d93825395314b9b2e05a
+scope_hash: 31eda85c16ff4af6a0af1d06700d940dd4256667344aa858dc93a34aff0b4aa2
+actionable: false
+phase2_ready: true
+status:
+  PageRank:
+    state: skipped
+    reason: all phase 2 disabled
+  Betweenness:
+    state: skipped
+    reason: all phase 2 disabled
+  Eigenvector:
+    state: skipped
+    reason: all phase 2 disabled
+  HITS:
+    state: skipped
+    reason: all phase 2 disabled
+  Critical:
+    state: skipped
+    reason: all phase 2 disabled
+  Cycles:
+    state: skipped
+    reason: all phase 2 disabled
+  KCore:
+    state: skipped
+    reason: all phase 2 disabled
+  Articulation:
+    state: skipped
+    reason: all phase 2 disabled
+  Slack:
+    state: skipped
+    reason: all phase 2 disabled
+message: No proven actionable item available
+degraded[1]{code,severity,message,repair}:
+  no_actionable_recommendation,info,"No open, unblocked, unassigned non-epic recommendation passed the robot-next claimability filter.",Use br ready --json or scripts/br_retry.sh actionable --json for authoritative claim candidates.
+usage_hints[3]: Use scripts/br_retry.sh actionable --json plus the claim gate before mutating Beads state in crowded swarms.,"No claim_command is emitted unless the item is open, unblocked, unassigned, and triage metrics are ready.","Inspect .status for skipped, timeout, or pending graph phases."
