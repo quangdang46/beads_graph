@@ -82,3 +82,23 @@ tests/fixtures/small_chain/.beads/.bv.lock
 
 # Output of `--generate-docs`; a build product, never committed.
 docs/generated/
+
+# Local export/preview output from a `--pages`, `--export-pages`,
+# `--export-graph` or `--preview-pages` run. These are build products of a
+# test, not sources; several land in the repository root because the flags
+# take a bare path.
+bv-pages/
+bvr-ev-real/
+bvr-sym/
+out/
+iso/
+filt/
+dot.svg
+json.svg
+mermaid.svg
+beads_graph.json
+html
+# An `--export-graph` run with no path derives this filename from the project
+# and an --as-of stamp, so it cannot be matched by a fixed name.
+beads_viewer_rust_graph_export__*.html
+report.md
