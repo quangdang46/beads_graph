@@ -812,7 +812,23 @@ pub fn build_triage(
     // per-metric timing at all.
     time_travelling: bool,
 ) -> TriageOutput {
-    build_triage_inner(issues, g, now, true, time_travelling)
+    build_triage_inner(issues, g, now, true, time_travelling, None)
+}
+
+/// Go parity for the three triage entrypoints that pass
+/// `TriageOptions.Weights` from `loadRobotFeedback()`
+/// (robot_registry.go:920, :2208, :2470). The weights reach scoring exactly
+/// as Go's `analyzer.SetWeights` does — before the composite is built, not
+/// after — so the ranking and the `feedback.applied` report agree with each
+/// other.
+pub fn build_triage_with_weights(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+    time_travelling: bool,
+    weights: Option<crate::scoring::Weights>,
+) -> TriageOutput {
+    build_triage_inner(issues, g, now, true, time_travelling, weights)
 }
 
 /// Go parity variant for `cmd/bv/main.go:4013` (`--emit-script`), the one
@@ -837,7 +853,7 @@ pub fn build_triage_phase2_pending(
     g: &DiGraph,
     now: jiff::Timestamp,
 ) -> TriageOutput {
-    build_triage_inner(issues, g, now, false, false)
+    build_triage_inner(issues, g, now, false, false, None)
 }
 
 fn build_triage_inner(
@@ -846,6 +862,7 @@ fn build_triage_inner(
     now: jiff::Timestamp,
     phase2_awaited: bool,
     time_travelling: bool,
+    weights: Option<crate::scoring::Weights>,
 ) -> TriageOutput {
     // Go TriageConfig (fast config) parity: PageRank exact, Betweenness
     // approximate with sample 50 (falling back to exact inside the
@@ -957,7 +974,14 @@ fn build_triage_inner(
         g,
         now,
     };
-    let mut recommendations = compute_impact_scores(&inputs);
+    // Go `TriageOptions.Weights` (triage.go:413-415, :483-484) hands the
+    // feedback-adjusted factor weights to the analyzer before scoring, so the
+    // composite is built with them. `None` is Go's nil and scores with
+    // `DefaultWeights`.
+    let mut recommendations = match weights {
+        Some(w) => crate::impact::compute_impact_scores_with_weights(&inputs, w),
+        None => compute_impact_scores(&inputs),
+    };
 
     // === Go triage scoring (triage.go:1267-1311) ===
     // triageScore = baseScore * 0.70 + unblockBoost + quickwinBoost

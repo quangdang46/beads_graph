@@ -4410,6 +4410,31 @@ fn generate_triage_history_bounded(
     }
 }
 
+/// Go `loadRobotFeedback` (cmd/bv/robot_registry.go:2447-2461): read
+/// `.beads/feedback.json` for the current workspace and return the data plus
+/// the weights to score with. The weights are non-nil only once
+/// `Applies()` holds — `Events >= MinFeedbackSamples` — which is the same
+/// condition that sets `FeedbackJSON.Applied`, so a payload can never claim
+/// tuning that did not happen. Any failure (no beads dir, no file, bad JSON)
+/// is `(None, None)`, exactly as Go's error returns.
+fn load_robot_feedback() -> (
+    Option<bv_analysis::feedback::FeedbackData>,
+    Option<bv_analysis::scoring::Weights>,
+) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let Ok(beads_dir) = bv_core::discovery::get_beads_dir(&cwd) else {
+        return (None, None);
+    };
+    let Ok(fb) = bv_analysis::feedback::load_feedback(&beads_dir) else {
+        return (None, None);
+    };
+    if !fb.applies() {
+        return (Some(fb), None);
+    }
+    let w = fb.weights();
+    (Some(fb), Some(w))
+}
+
 fn run_robot_triage() -> ExitCode {
     let cwd = go_working_dir();
     let as_of = extract_as_of();
@@ -4448,7 +4473,17 @@ fn run_robot_triage() -> ExitCode {
     // from (main.go:4890-4900).
     let data_hash = loaded_hash;
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    let mut out = bv_analysis::triage::build_triage(&issues, &g, robot_now(), as_of.is_some());
+    // Go passes the feedback-adjusted weights into `TriageOptions.Weights`
+    // (robot_registry.go:2208-2220), so they are installed before scoring
+    // rather than applied to the finished ranking.
+    let (feedback_data, feedback_weights) = load_robot_feedback();
+    let mut out = bv_analysis::triage::build_triage_with_weights(
+        &issues,
+        &g,
+        robot_now(),
+        as_of.is_some(),
+        feedback_weights,
+    );
     // Go stamps every recommendation with `issue.Actions(claimable)`
     // (triage.go:658). The tracker route needs the loaded source path, which
     // only the CLI layer has, so it is resolved here rather than in the
@@ -4970,6 +5005,17 @@ fn run_robot_triage() -> ExitCode {
         "jq '.feedback.weight_adjustments' - View feedback-adjusted weights (bv-90)",
         "--graph-root <id> - Scope triage to subgraph rooted at a specific epic (bv-140)",
     ]);
+    // Go's output struct (robot_registry.go:2243-2248) declares `Feedback` as
+    // `*analysis.FeedbackJSON` with `json:"feedback,omitempty"`, and only
+    // populates the pointer when the store loaded AND holds at least one event
+    // (:2237-2241). So a workspace with no `.beads/feedback.json`, or one with
+    // the file but no recorded events, emits no `feedback` key at all — which
+    // is what a `nil` pointer plus `omitempty` produces. `loadRobotFeedback`
+    // already returns `None` for the unreadable cases; this is the second
+    // condition Go applies here.
+    if let Some(fb) = feedback_data.as_ref().filter(|f| !f.events.is_empty()) {
+        payload["feedback"] = serde_json::to_value(fb.to_json()).unwrap_or(serde_json::Value::Null);
+    }
     // `emit_json`, not `serde_json::to_string`: the Go encoder writes whole
     // float64 values without a trailing ".0", so an empty graph's density
     // renders as `0` and not `0.0`. Bypassing it made every zero in this

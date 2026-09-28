@@ -88,10 +88,16 @@ impl ScoreContributions {
 }
 
 /// A Go `time.Time` on the wire: RFC3339 with nanosecond precision and trailing
-/// zeros removed, `"Z"` for UTC. The zero value is `0001-01-01T00:00:00Z`, which
-/// is what Go emits for a `time.Time` that was never assigned.
+/// zeros removed. The zero value is `0001-01-01T00:00:00Z`, which is what Go
+/// emits for a `time.Time` that was never assigned.
+///
+/// A Go `time.Time` carries the zone it was parsed in, and Go marshals that
+/// offset back out — a value stored as `2026-09-26T20:00:07.367773+07:00`
+/// reads back and re-emits with `+07:00`, not normalized to `Z`. A bare
+/// `jiff::Timestamp` keeps only the instant and would print UTC, so the offset
+/// is retained here and re-applied on the way out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GoTime(pub jiff::Timestamp);
+pub struct GoTime(pub jiff::Timestamp, pub Option<i64>);
 
 /// Go's zero `time.Time` (Go `time.Time{}`).
 pub const GO_ZERO_TIME: &str = "0001-01-01T00:00:00Z";
@@ -103,37 +109,92 @@ impl GoTime {
             GO_ZERO_TIME
                 .parse()
                 .expect("GO_ZERO_TIME is a valid RFC3339 stamp"),
+            None,
         )
+    }
+
+    /// Go's `time.Now()` on this machine: the local zone, not UTC, so the
+    /// offset Go writes is the one the wall clock is actually in.
+    pub fn now() -> Self {
+        let ts = jiff::Timestamp::now();
+        let offset = Some(
+            ts.to_zoned(jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC))
+                .offset()
+                .seconds() as i64,
+        );
+        Self(ts, offset)
     }
 
     /// Whether this is Go's zero `time.Time` — Go's `t.IsZero()`.
     pub fn is_zero(&self) -> bool {
-        *self == Self::zero()
+        self.0 == Self::zero().0
     }
+
+    /// Render as Go's `RFC3339Nano`: the wall clock in the stored offset, with
+    /// that offset appended. `"Z"` when the stamp was parsed as UTC.
+    ///
+    /// Go's `time.Time` renders the *local* wall clock for the zone it holds,
+    /// not the UTC instant with a suffix — so 13:00:07Z in a +07:00 zone
+    /// prints as 20:00:07+07:00. Applying the offset to the instant here is
+    /// what reproduces that; appending it to the UTC form would print
+    /// 13:00:07+07:00, the same instant under a label it never had.
+    fn to_rfc3339(self) -> String {
+        let base = match self.1 {
+            Some(secs) => (self.0 + jiff::Span::new().seconds(secs))
+                .to_string()
+                .trim_end_matches('Z')
+                .to_string(),
+            None => self.0.to_string(),
+        };
+        match self.1 {
+            Some(secs) if secs != 0 => {
+                let (sign, abs) = if secs < 0 { ('-', -secs) } else { ('+', secs) };
+                format!("{base}{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60)
+            }
+            _ => base,
+        }
+    }
+}
+
+/// The seconds east of UTC in an RFC3339 stamp's trailing `±HH:MM`, or `None`
+/// for a `Z` stamp and for anything that is not one. Go's `time.Parse`
+/// (RFC3339) accepts only those two forms, so nothing else needs a case.
+fn parse_offset_suffix(raw: &str) -> Option<i64> {
+    let tail = raw.get(raw.len().checked_sub(6)?..)?;
+    let (sign, digits) = match tail.as_bytes().first()? {
+        b'+' => (1i64, &tail[1..]),
+        b'-' => (-1i64, &tail[1..]),
+        _ => return None,
+    };
+    let (h, m) = digits.split_once(':')?;
+    let (h, m) = (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?);
+    Some(sign * (h * 3600 + m * 60))
 }
 
 impl fmt::Display for GoTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // jiff prints the shortest subsecond form with a `Z` suffix, which is
-        // exactly Go's RFC3339Nano layout (`bv_core::data_hash::normalize_rfc3339_nano`
-        // relies on the same property).
-        f.write_str(&self.0.to_string())
+        // jiff prints the shortest subsecond form, which is exactly Go's
+        // RFC3339Nano layout; the offset Go kept is re-appended.
+        f.write_str(&self.to_rfc3339())
     }
 }
 
 impl Serialize for GoTime {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0.to_string())
+        s.serialize_str(&self.to_rfc3339())
     }
 }
 
 impl<'de> Deserialize<'de> for GoTime {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(d)?;
+        // `jiff::Timestamp` normalizes an offset away, so it is read from the
+        // trailing `±HH:MM` to survive the round trip the way Go's
+        // `time.Time` does.
         let ts = raw
             .parse::<jiff::Timestamp>()
             .map_err(serde::de::Error::custom)?;
-        Ok(Self(ts))
+        Ok(Self(ts, parse_offset_suffix(&raw)))
     }
 }
 
@@ -214,7 +275,7 @@ impl std::error::Error for FeedbackError {}
 /// The initial weight adjustments (all 1.0 = no adjustment) — Go
 /// `defaultWeightAdjustments` (feedback.go:65-80).
 pub fn default_weight_adjustments() -> Vec<WeightAdjustment> {
-    let now = GoTime(jiff::Timestamp::now());
+    let now = GoTime::now();
     ADJUSTMENT_NAMES
         .iter()
         .map(|name| WeightAdjustment {
@@ -228,7 +289,7 @@ pub fn default_weight_adjustments() -> Vec<WeightAdjustment> {
 
 /// Initialized feedback data — Go `DefaultFeedbackData` (feedback.go:53-62).
 pub fn default_feedback_data() -> FeedbackData {
-    let now = GoTime(jiff::Timestamp::now());
+    let now = GoTime::now();
     FeedbackData {
         version: "1.0".to_string(),
         created_at: now,
@@ -271,7 +332,7 @@ fn calculate_feedback_stats(events: &[FeedbackEvent]) -> FeedbackStats {
 /// the eight known factor names, and recompute the stats from the events —
 /// Go `normalizeLoaded` (feedback.go:105-150).
 fn normalize_loaded(loaded: FeedbackData) -> FeedbackData {
-    let now = GoTime(jiff::Timestamp::now());
+    let now = GoTime::now();
     let version = if loaded.version.is_empty() {
         "1.0".to_string()
     } else {
@@ -351,7 +412,7 @@ impl FeedbackData {
     /// mode — Go `FeedbackData.Save` (feedback.go:178-195). Go stamps
     /// `UpdatedAt` under the same lock that guards the write, so do it here.
     pub fn save(&mut self, beads_dir: &Path) -> Result<(), FeedbackError> {
-        self.updated_at = GoTime(jiff::Timestamp::now());
+        self.updated_at = GoTime::now();
         let data = serde_json::to_string_pretty(self).map_err(FeedbackError::Marshal)?;
         let path = beads_dir.join(FEEDBACK_FILE);
         std::fs::write(&path, data).map_err(FeedbackError::Write)?;
@@ -380,7 +441,7 @@ impl FeedbackData {
             issue_id: issue_id.to_string(),
             action: action.to_string(),
             score,
-            timestamp: GoTime(jiff::Timestamp::now()),
+            timestamp: GoTime::now(),
         });
 
         if action == "accept" {
@@ -464,7 +525,7 @@ impl FeedbackData {
         self.events = Vec::new();
         self.adjustments = default_weight_adjustments();
         self.stats = FeedbackStats::default();
-        self.updated_at = GoTime(jiff::Timestamp::now());
+        self.updated_at = GoTime::now();
     }
 
     /// A human-readable summary of the feedback state — Go
@@ -510,7 +571,7 @@ impl FeedbackData {
     /// part of the stored value.
     fn update_weight_adjustments(&mut self, action: &str, contributions: ScoreContributions) {
         let direction = if action == "ignore" { -1.0 } else { 1.0 };
-        let now = GoTime(jiff::Timestamp::now());
+        let now = GoTime::now();
         for adj in self.adjustments.iter_mut() {
             let Some(contribution) = contributions.contribution(&adj.name) else {
                 continue;
@@ -871,7 +932,7 @@ mod tests {
         let back: GoTime = serde_json::from_str(&raw).unwrap();
         assert_eq!(back, zero);
 
-        let now = GoTime(jiff::Timestamp::now());
+        let now = GoTime::now();
         let raw = serde_json::to_string(&now).unwrap();
         assert!(raw.ends_with("Z\""), "{raw}");
         let back: GoTime = serde_json::from_str(&raw).unwrap();
