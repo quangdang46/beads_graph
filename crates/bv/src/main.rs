@@ -941,19 +941,40 @@ fn update_generated_markers(repo_root: &std::path::Path, tables: &[(&str, String
     ExitCode::from(0)
 }
 
+/// Walk up from the working directory to the repository root — the nearest
+/// ancestor holding `.git`.
+///
+/// Go's docgen resolves its own root rather than assuming the process started
+/// there, and so must this: `cargo test` runs a test binary with the PACKAGE
+/// directory as its working directory, so a bare cwd lands in `crates/bv` and
+/// the README lookup fails even though the repository has one. Returns the
+/// working directory itself when nothing above it looks like a repository.
+fn repo_root() -> std::path::PathBuf {
+    let start = go_working_dir();
+    let mut dir = start.as_path();
+    loop {
+        if dir.join(".git").exists() {
+            return dir.to_path_buf();
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return start,
+        }
+    }
+}
+
 fn run_generate_docs() -> ExitCode {
     let out_dir = std::path::Path::new("docs/generated");
     if let Err(e) = std::fs::create_dir_all(out_dir) {
         eprintln!("Error: generating docs: {e}");
         return ExitCode::from(1);
     }
-    // `$PWD`, not `current_dir()`: on macOS the latter reports the resolved
-    // physical path, so every path Go names in its errors would read
-    // /private/tmp where Go says /tmp.
-    let cwd = std::env::var("PWD")
-        .map(std::path::PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .unwrap_or_default();
+    // `go_working_dir`, not a bare `$PWD` read: this used to take the
+    // environment variable unchecked, so a stale PWD sent the README lookup
+    // into an unrelated directory and the command failed with a path error
+    // naming somewhere the caller never ran. `go_working_dir` applies Go's
+    // rule and only trusts PWD when it names the current directory.
+    let cwd = repo_root();
     // Go's docgen never loads issues: it renders the flag, env, alerts, recipe
     // and key-binding registries and rewrites the README/AGENTS markers. Rust
     // loaded the issue set to put a count in a JSON file Go does not produce,
@@ -6809,28 +6830,33 @@ fn history_flag_name(args: &[String]) -> &'static str {
         "--robot-history"
     }
 }
-
-/// Go `correlation.ValidateRepository` — a `.git` directory plus at least one
-/// of the known beads file names under `.beads/`.
-/// Go's `os.Getwd()`: on Unix it returns `$PWD` when that names the same
+/// Go's `os.Getwd()`: on Unix it returns `$PWD` when that names the current
 /// directory, so a run under a symlinked path is reported the way the user
-/// typed it. `std::env::current_dir()` always resolves, so on macOS every path
-/// Go would print read `/private/tmp/...` instead of `/tmp/...` — and these
-/// paths end up verbatim in error messages, a baseline file's `source_path`,
-/// and the saved `created_at`.
+/// typed it. `std::env::current_dir()` always resolves, so every path Go
+/// would print would read `/private/tmp/...` instead of `/tmp/...`.
+///
+/// The check is load-bearing. Skipping it lets a stale `$PWD` win over the real
+/// working directory, and comparing the two `canonicalize` Results directly is
+/// not enough either: when both sides fail, `None == None` reads as "they
+/// match" and the stale path is returned. That is how `--generate-docs` came
+/// to look for README.md under a fixture while running from the repository
+/// root. Both sides must resolve, and then be equal.
+
 fn go_working_dir() -> std::path::PathBuf {
     let physical = std::env::current_dir().unwrap_or_default();
-    // Go checks that `$PWD` names the *current* directory before trusting it
-    // (os/getwd.go: "If the operating system provides a Getwd call that uses
-    // the PWD environment variable, and the PWD variable names the current
-    // directory, use it"). Skipping that check makes a stale PWD win over the
-    // real cwd: running `bvr` from a fixture while the shell's PWD is the
-    // repository root would then read the repository's issues instead of the
-    // fixture's, and report success where Go reports the fixture's error.
+    // Both sides must RESOLVE and then match. Comparing the two Results
+    // directly is not enough: when both canonicalize calls fail,
+    // None == None reads as "they match" and a stale $PWD is returned.
+    // That is how --generate-docs came to look for README.md under a
+    // fixture while running from the repository root.
     if let Ok(pwd) = std::env::var("PWD") {
         let pwd = std::path::PathBuf::from(pwd);
-        if std::fs::canonicalize(&pwd).ok() == std::fs::canonicalize(&physical).ok() {
-            return pwd;
+        match (
+            std::fs::canonicalize(&pwd),
+            std::fs::canonicalize(&physical),
+        ) {
+            (Ok(a), Ok(b)) if a == b => return pwd,
+            _ => {}
         }
     }
     physical
