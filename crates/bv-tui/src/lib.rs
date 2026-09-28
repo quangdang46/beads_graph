@@ -2775,35 +2775,18 @@ impl App {
         }
     }
 
-    /// Per-sprint velocity points for the comparison overlay (Go
-    /// `velocity_comparison.go`): planned = sprint bead count, completed =
-    /// closed beads, velocity = completed count.
-    fn velocity_points(&self) -> Vec<crate::views::velocity_comparison::VelocityPoint> {
-        let Some(sprint) = &self.sprint else {
-            return Vec::new();
-        };
-        sprint
-            .sprints
-            .iter()
-            .map(|s| {
-                let planned = s.bead_ids.len();
-                let completed = s
-                    .bead_ids
-                    .iter()
-                    .filter(|id| {
-                        self.issue_map
-                            .get(*id)
-                            .is_some_and(|i| i.status.is_closed())
-                    })
-                    .count();
-                crate::views::velocity_comparison::VelocityPoint {
-                    sprint_name: s.name.clone(),
-                    completed,
-                    planned,
-                    velocity: completed as f64,
-                }
-            })
-            .collect()
+    /// Go's `velocityComparison` model (model.go:770, :1736, :1923). Go
+    /// computes it from `analysis.ComputeAllHistoricalVelocity(issues, 4, now)`
+    /// and holds it on the model, refreshing it in `SetData`; Rust rebuilds it
+    /// from the live issue set each time the view is opened, which is the same
+    /// data without a stale cache to invalidate.
+    fn velocity_comparison(&self) -> crate::views::velocity_comparison::VelocityComparisonModel {
+        let mut model =
+            crate::views::velocity_comparison::VelocityComparisonModel::new(self.theme.clone());
+        let issues: Vec<bv_core::model::Issue> = self.issue_map.values().cloned().collect();
+        model.set_size(self.width as usize, self.height as usize);
+        model.set_data(&issues);
+        model
     }
 
     /// The two modal regions of Go's `handleHistoryKeys` — the search input
@@ -3603,8 +3586,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 f.render_widget(msg, f.area());
             }
             if app.show_velocity {
-                let points = app.velocity_points();
-                crate::views::velocity_comparison::render_velocity_comparison(f, &points, f.area());
+                let model = app.velocity_comparison();
+                crate::views::velocity_comparison::render_velocity_comparison(f, &model, f.area());
             }
             render_status_bar(f, app);
             render_overlays(f, app);
@@ -6568,6 +6551,60 @@ mod tests {
             app.handle_key(KeyCode::Esc);
             assert_eq!(app.current_view, ViewMode::List);
             assert!(!app.quit_requested, "esc in a view must not quit");
+        }
+
+        /// The velocity overlay is Go's per-LABEL table, not the per-sprint
+        /// one it replaced. `v` must therefore yield rows keyed by label, with
+        /// the four weekly columns and the trend word Go's
+        /// `GetVelocityTrend` returns.
+        #[test]
+        fn velocity_overlay_renders_per_label_rows() {
+            // A minimal closed issue per (label, weeks-ago) pair. Built by
+            // hand because `make_app` produces unlabeled issues and this test
+            // needs the labels the view groups by.
+            let mut issues: Vec<bv_core::model::Issue> = Vec::new();
+            // Two labels so the sort is observable, and closed_at values so
+            // the weekly buckets are not all empty.
+            let base = jiff::Timestamp::now();
+            for (i, (label, days_ago)) in [("alpha", 1i64), ("alpha", 8), ("beta", 3), ("beta", 20)]
+                .iter()
+                .enumerate()
+            {
+                let mut iss = make_app(1).issue_map.remove("T-0").unwrap();
+                iss.id = format!("V-{i}");
+                iss.labels = vec![label.to_string()];
+                iss.status = Status::Closed;
+                // Hours, not days: jiff will not subtract calendar units from
+                // a Timestamp, and a week is 168h either way.
+                iss.closed_at = Some((base - jiff::Span::new().hours(days_ago * 24)).to_string());
+                issues.push(iss);
+            }
+
+            let mut app = App::new(issues);
+            app.handle_key(KeyCode::Char('P'));
+            app.handle_key(KeyCode::Char('v'));
+            assert!(app.show_velocity);
+
+            let model = app.velocity_comparison();
+            assert!(
+                model.data_count() >= 2,
+                "expected one row per label, got {}",
+                model.data_count()
+            );
+
+            let text: String = model.view().iter().map(|l| l.to_string()).collect();
+            for header in ["Label", "W-4", "W-3", "W-2", "W-1", "Avg", "Trend", "Spark"] {
+                assert!(text.contains(header), "missing column {header}");
+            }
+            assert!(
+                text.contains("alpha") && text.contains("beta"),
+                "rows must be per label:\n{text}"
+            );
+            // The sprint table's columns must be gone.
+            assert!(
+                !text.contains("Planned"),
+                "sprint view still present:\n{text}"
+            );
         }
 
         #[test]
