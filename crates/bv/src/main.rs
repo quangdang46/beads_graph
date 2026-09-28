@@ -4050,6 +4050,92 @@ fn run_pages_steps_5_to_7(
     }
 }
 
+/// Go `InitAndPush`'s first half (github.go:278-303): the local git sequence
+/// that turns the bundle into a repository. Split out so it can be exercised
+/// against a local bare remote — the network half is the only part that needs
+/// GitHub, and testing this against a real repository is not something to do
+/// from a test run.
+fn git_init_and_push(
+    bundle: &std::path::Path,
+    remote_url: &str,
+    progress: bool,
+) -> Result<(), String> {
+    // Go removes an existing `origin` before re-adding it, so a re-run on a
+    // bundle that was already deployed does not fail on the duplicate.
+    if std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(bundle)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        let _ = std::process::Command::new("git")
+            .args(["remote", "remove", "origin"])
+            .current_dir(bundle)
+            .output();
+    }
+
+    for (desc, args) in [
+        ("Initializing git repository", vec!["init"]),
+        ("Staging files", vec!["add", "."]),
+        (
+            "Creating commit",
+            vec!["commit", "-m", "Deploy static site via bv --pages"],
+        ),
+        ("Setting main branch", vec!["branch", "-M", "main"]),
+        ("Adding remote", vec!["remote", "add", "origin", remote_url]),
+    ] {
+        if progress {
+            println!("  -> {desc}...");
+        }
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(bundle)
+            .output()
+            .map_err(|e| format!("git {} failed: {e}", args[0]))?;
+        if out.status.success() {
+            continue;
+        }
+        // Go tolerates a failing `commit` on an unchanged bundle
+        // (github.go:318-330) rather than aborting the deploy.
+        if args[0] == "commit" {
+            // "nothing to commit" lands on stderr on some git versions and on
+            // stdout on others; checking one stream aborted the deploy on the
+            // versions that use the other, which is the exact case Go tolerates
+            // (github.go:318-330).
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            if combined.contains("nothing to commit") {
+                continue;
+            }
+            return Err(format!("git {} failed: {}", args[0], combined.trim()));
+        }
+        return Err(format!(
+            "git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Go's `git push -u origin main`, the last step of `InitAndPush`.
+fn git_push_main(bundle: &std::path::Path) -> Result<(), String> {
+    if std::process::Command::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(bundle)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    Err("git push failed".into())
+}
+
 /// Go `DeployToGitHubPages` as the wizard drives it (github.go:447-540,
 /// `InitAndPush` at :278-330).
 ///
@@ -4091,83 +4177,13 @@ fn deploy_to_github(
     }
 
     let remote_url = format!("https://github.com/{repo_full_name}.git");
-    // Go removes an existing `origin` before re-adding it, so a re-run on a
-    // bundle that was already deployed does not fail on the duplicate.
-    if std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(bundle)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        let _ = std::process::Command::new("git")
-            .args(["remote", "remove", "origin"])
-            .current_dir(bundle)
-            .output();
+    if let Err(step) = git_init_and_push(bundle, &remote_url, true) {
+        eprintln!("Error: {step}");
+        return ExitCode::from(1);
     }
-
-    for (desc, args) in [
-        ("Initializing git repository", vec!["init"]),
-        ("Staging files", vec!["add", "."]),
-        (
-            "Creating commit",
-            vec!["commit", "-m", "Deploy static site via bv --pages"],
-        ),
-        ("Setting main branch", vec!["branch", "-M", "main"]),
-        (
-            "Adding remote",
-            vec!["remote", "add", "origin", &remote_url],
-        ),
-    ] {
-        println!("  -> {desc}...");
-        let out = std::process::Command::new("git")
-            .args(&args)
-            .current_dir(bundle)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {}
-            // Go tolerates a failing `commit` on an unchanged bundle
-            // (github.go:318-330) rather than aborting the deploy.
-            Ok(o) if args[0] == "commit" => {
-                let err = String::from_utf8_lossy(&o.stderr);
-                if !err.contains("nothing to commit") {
-                    eprintln!("Error: git {} failed: {}", args[0], err.trim());
-                    return ExitCode::from(1);
-                }
-            }
-            Ok(o) => {
-                eprintln!(
-                    "Error: git {} failed: {}",
-                    args[0],
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-                return ExitCode::from(1);
-            }
-            Err(e) => {
-                eprintln!("Error: git {} failed: {e}", args[0]);
-                return ExitCode::from(1);
-            }
-        }
-    }
-
-    println!("  -> Pushing to GitHub...");
-    let push = std::process::Command::new("git")
-        .args(["push", "-u", "origin", "main"])
-        .current_dir(bundle)
-        .output();
-    match push {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            eprintln!(
-                "Error: git push failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-            return ExitCode::from(1);
-        }
-        Err(e) => {
-            eprintln!("Error: git push failed: {e}");
-            return ExitCode::from(1);
-        }
+    if let Err(step) = git_push_main(bundle) {
+        eprintln!("Error: {step}");
+        return ExitCode::from(1);
     }
 
     println!("  -> Enabling GitHub Pages...");
@@ -8969,6 +8985,132 @@ fn go_format_f64(f: f64) -> String {
     }
     // 'f' shortest: Rust Display matches Go 'f' -1 (no trailing .0).
     format!("{f}")
+}
+
+#[cfg(test)]
+mod pages_deploy_git_tests {
+    use super::{git_init_and_push, git_push_main};
+    use std::path::{Path, PathBuf};
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bvr-deploy-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The wizard's Step 7 against a LOCAL bare remote.
+    ///
+    /// `gh api` and the Pages enablement cannot be exercised without creating a
+    /// real public repository, which is not something a test run should do. The
+    /// local half — `InitAndPush`'s five commands and the push — is the part
+    /// that touches the bundle on disk, and it runs here against a bare repo so
+    /// the assertions are about real git state rather than a mock.
+    #[test]
+    fn the_bundle_becomes_a_main_branch_commit_on_the_remote() {
+        let root = scratch("sequence");
+        let remote = root.join("remote");
+        let bundle = root.join("bundle");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&bundle).unwrap();
+        git(&remote, &["init", "--bare", "-q", "."]);
+        std::fs::write(bundle.join("index.html"), "<html>bundle</html>").unwrap();
+
+        let remote_url = remote.to_string_lossy().into_owned();
+        git_init_and_push(&bundle, &remote_url, false).expect("init and push");
+        git_push_main(&bundle).expect("push");
+
+        // The commit message is part of the contract — it is what a reader of
+        // the deployed repository's history sees.
+        let log = git(&remote, &["log", "--format=%s", "-1", "main"]);
+        assert_eq!(log, "Deploy static site via bv --pages");
+
+        // The bundle's files, not just an empty commit.
+        let tree = git(&remote, &["ls-tree", "--name-only", "main"]);
+        assert!(
+            tree.contains("index.html"),
+            "bundle content missing: {tree}"
+        );
+
+        // `branch -M main` is what makes the push land on `main`; without it a
+        // fresh `git init` would push whatever the default branch is and the
+        // Pages source branch would not exist. A bare repo's own HEAD stays on
+        // its init default, so this reads the branch the push created rather
+        // than HEAD.
+        assert!(
+            git(&remote, &["branch", "--list", "main"]).contains("main"),
+            "push must create main"
+        );
+        let head = git(&remote, &["rev-parse", "main"]);
+        assert!(!head.is_empty(), "main must resolve to a commit");
+    }
+
+    /// A re-run over an unchanged bundle must not abort: Go tolerates the
+    /// failing commit (github.go:318-330) because an unchanged bundle is
+    /// already deployed and the push that matters is the next one.
+    #[test]
+    fn an_unchanged_bundle_tolerates_the_failing_commit() {
+        let root = scratch("rerun");
+        let remote = root.join("remote");
+        let bundle = root.join("bundle");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&bundle).unwrap();
+        git(&remote, &["init", "--bare", "-q", "."]);
+        std::fs::write(bundle.join("index.html"), "<html>bundle</html>").unwrap();
+
+        let remote_url = remote.to_string_lossy().into_owned();
+        git_init_and_push(&bundle, &remote_url, false).expect("first run");
+        git_push_main(&bundle).expect("first push");
+
+        // Second pass with nothing changed: `git commit` has nothing staged and
+        // exits non-zero. Some git versions report that on stdout rather than
+        // stderr, so `git_init_and_push` accepts the tolerance in either
+        // stream — the deploy must not abort, which is Go's behaviour at
+        // github.go:318-330.
+        git_init_and_push(&bundle, &remote_url, false).expect("re-run must not abort");
+        git_push_main(&bundle).expect("re-push");
+
+        let count = git(&remote, &["rev-list", "--count", "main"]);
+        assert_eq!(count, "1", "an unchanged bundle must not add a commit");
+    }
+
+    /// A stale `origin` from a previous deploy is removed before being re-added,
+    /// so `git remote add` does not fail on the duplicate (github.go:303-311).
+    #[test]
+    fn a_stale_origin_is_replaced_rather_than_duplicated() {
+        let root = scratch("stale");
+        let remote_a = root.join("remote-a");
+        let remote_b = root.join("remote-b");
+        let bundle = root.join("bundle");
+        for d in [&remote_a, &remote_b] {
+            std::fs::create_dir_all(d).unwrap();
+            git(d, &["init", "--bare", "-q", "."]);
+        }
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("index.html"), "<html>bundle</html>").unwrap();
+
+        let a = remote_a.to_string_lossy().into_owned();
+        let b = remote_b.to_string_lossy().into_owned();
+        git_init_and_push(&bundle, &a, false).expect("first remote");
+        git_init_and_push(&bundle, &b, false).expect("second remote");
+
+        let origin = git(&bundle, &["remote", "get-url", "origin"]);
+        assert_eq!(origin, b, "origin must point at the new remote, not both");
+    }
 }
 
 #[cfg(test)]

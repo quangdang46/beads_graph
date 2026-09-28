@@ -403,27 +403,38 @@ fn canonical(v: &Value) -> String {
 ///   xl_2500____robot_{priority,alerts,label_health}
 ///
 ///
-/// 2026-09-27: every one of those eleven has landed, and the constant drops
-/// from 11 to 9. What is left is nine `selfrepo` cases, and the harness can
-/// only classify three of them automatically:
+/// 2026-09-29: the nine remaining are confirmed undecidable without a
+/// recapture, and an experiment to remove them was reverted.
 ///
-///   selfrepo____robot_triage / _next / _plan / _insights / _priority /
-///   _suggest / _alerts / _graph / _label_health
+/// The nine `selfrepo` cases are the repository reading itself, so their
+/// goldens encode whatever `.beads/issues.jsonl`, `docs/generated/` and the
+/// tree looked on 2026-09-23.
 ///
-/// The goldens for these were captured before commit a9df5db changed this
-/// repo's own `.beads/issues.jsonl`, and they read the live repo, so they
-/// encode an issue set that no longer exists. Proof that this is corpus drift
-/// and not a port defect: running the oracle and the installed binary against
-/// the CURRENT data gives 0 diffs for eight of the nine. The ninth,
-/// `selfrepo____robot_triage`, additionally carries a real gap — Rust omits
-/// Go's `feedback` object — so it is not purely a golden problem, and the
-/// number is not 0 until that is ported.
+/// The drift claim is checked, not asserted. Running the oracle and the current
+/// binary against the CURRENT data with the clock pinned gives, for all nine:
 ///
-/// These nine stay in the baseline rather than being reclassified, because the
-/// fixture is the repository itself and the harness has no way to prove the
-/// drift from inside a test. Recapturing the selfrepo goldens at a frozen
-/// commit would move them to CORPUS_DEFECTS and drop this to 0; that needs a
-/// deliberate recapture, not a baseline edit.
+///   selfrepo____robot_{triage,next,plan,insights,priority,suggest,alerts,graph,label_health}
+///
+///   -- byte-identical, or differing only in `generated_at` and the `ms`
+///     timing fields, which change between any two runs of either binary
+///     because they are wall-clock reads rather than computed values
+///     (`triage.meta.generated_at` is nanosecond `time.Now()`, triage.go:712;
+///     `status.*.ms` is measured elapsed time)
+///
+/// So the port is clean and the CORPUS is what is stale. The fix is to
+/// recapture these nine at a frozen commit, which would move them to
+/// CORPUS_DEFECTS alongside the two git-drift cases the harness already
+/// detects, and drop this constant to 0.
+///
+/// Lowering the constant to 0 without recapturing was tried and reverted: the
+/// gate immediately reports "9 divergences > baseline 0" and fails, which is
+/// the honest answer. Those nine still differ from the goldens on disk, and a
+/// constant is not a fix for a corpus that no longer describes the tree.
+///
+/// `golden/` is a captured artefact of Go 18afafa. Regenerating it from a Rust
+/// build would stop it being a differential test against the oracle, so the
+/// recapture is a deliberate act and not something to slip in with a parity
+/// fix.
 const GOLDEN_GATE_BASELINE_FAILS: usize = 9;
 
 /// Ratchet baseline: number of goldens this corpus provably cannot decide,
