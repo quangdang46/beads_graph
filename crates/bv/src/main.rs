@@ -2340,6 +2340,21 @@ fn main() -> ExitCode {
     if presence.has("robot-not-ready-labels") {
         return run_robot_not_ready_labels(&args);
     }
+    // Handle --pages wizard (Go main.go:3040-3048). Placed ahead of BOTH
+    // static-site flags on purpose: Go checks it after the robot dispatch and
+    // before --preview-pages, and the Rust tree has those two in the opposite
+    // order from Go (--export-pages here, --preview-pages at ~:2919). Measured
+    // against the oracle: `bv --pages --export-pages /tmp/x` prints the wizard
+    // banner, so --pages wins over --export-pages there. Putting the branch
+    // between the two would invert that.
+    //
+    // Before this branch, `--pages` matched no dispatch arm at all and fell
+    // through to the TUI launcher — which exits 1 with the launcher's own
+    // `/dev/tty` message on a host without a controlling terminal, and enters
+    // an event loop no CI or agent caller can drive on one that has it.
+    if presence.has("pages") {
+        return run_pages_wizard(&args);
+    }
     // Export pages (static site bundle, Go --export-pages).
     if let Some(idx) = args.iter().position(|a| a == "--export-pages") {
         let out_dir = args
@@ -3740,6 +3755,549 @@ fn install_stop_handler() {
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }
+}
+
+/// Go `runPagesWizard` (cmd/bv/main.go:5799-6026), the `--pages` wizard.
+///
+/// Go's shape is a wrapper: `wizard.Run()` collects the configuration, and
+/// everything after that — source resolution, the export, the preview server,
+/// the deploy, the persistence — happens in this function. This port covers
+/// the wizard half only, so `--pages` today collects and validates a
+/// configuration and stops.
+///
+/// The persistence is deliberately **not** done here. Go saves the config
+/// (main.go:5966-5979) *after* the export, and the fields it writes
+/// (`source_beads_dir`, `source_repo_root`, `source_path`, `last_issue_count`,
+/// `last_data_hash`) are all products of the export. Writing the form answers
+/// now would put a config on disk that Go's `offerSavedConfig` would later
+/// offer back with those five fields empty, which is worse than writing
+/// nothing until the export half lands.
+///
+/// Exit codes: 0 on success, 1 on any wizard error. Never 2 — Go declares
+/// `--pages` as a plain `flag.Bool` with no `requires` clause
+/// (main.go:1628), so there is no usage error to report.
+fn run_pages_wizard(args: &[String]) -> ExitCode {
+    // Go main.go:1937-1944 puts `--db` at the top of the discovery chain and
+    // `main` has already published it as BEADS_DB by the time any dispatch
+    // arm runs, so reading the same chain the loader reads is how this gets
+    // the same path Go's `beadsPath` variable holds. The wizard only uses it
+    // to suggest a Cloudflare project name, so an unresolved path is not
+    // worth failing over.
+    let beads_path = flag_value(args, "db")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(bv_core::discovery::BEADS_DB_ENV).map(std::path::PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os(bv_core::discovery::BEADS_DIR_ENV).map(std::path::PathBuf::from)
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(".beads"));
+
+    let mut wizard = bv_export::pages_wizard::Wizard::new(&beads_path);
+    match wizard.run() {
+        Ok(_) => run_pages_steps_5_to_7(&mut wizard, &beads_path),
+        // Go main.go:3043 — `fmt.Fprintf(os.Stderr, "Error: %v\n", err)`.
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Go `runPagesWizard`'s Steps 5-7 (`cmd/bv/main.go:5831-5900`).
+///
+/// Split out of [`run_pages_wizard`] because these steps re-enter the CLI's
+/// own export and preview code rather than reimplementing them: Go's Step 5
+/// calls `wizard.PerformExport` (main.go:5856) and Step 6 the same preview
+/// server `--preview-pages` starts (main.go:5880). The step framing and the
+/// progress lines are reproduced so the transcript matches the oracle.
+///
+/// A `local` target stops after Step 5 — Go's `case "local"` writes the
+/// bundle and prints a completion block without previewing or deploying.
+fn run_pages_steps_5_to_7(
+    wizard: &mut bv_export::pages_wizard::Wizard,
+    beads_path: &std::path::Path,
+) -> ExitCode {
+    let cfg = wizard.config().clone();
+
+    println!("Step 5: Export");
+    println!("────────────────────────────");
+    let bundle_path = if cfg.output_path.is_empty() {
+        match temp_bundle_dir() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: failed to create temp directory: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        std::path::PathBuf::from(&cfg.output_path)
+    };
+
+    // Go resolves the source and prints where it came from before exporting
+    // (main.go:5845-5847).
+    let source_dir = if cfg.source_beads_dir.is_empty() {
+        beads_dir_of(beads_path)
+    } else {
+        cfg.source_beads_dir.clone()
+    };
+    if !source_dir.is_empty() {
+        // `--db` on the command line is the explicit form; anything Go's
+        // `resolvePagesSource` found by walking is "discovered"
+        // (main.go:5845-5847).
+        let explicit = flag_value(&std::env::args().collect::<Vec<String>>(), "db").is_some();
+        println!(
+            "  -> Using beads source: {source_dir} ({})",
+            if explicit {
+                "explicit BEADS_DB file"
+            } else {
+                "discovered"
+            }
+        );
+    }
+    println!("Exporting static site...");
+
+    let issues = match load_issues_auto(&std::env::current_dir().unwrap_or_default(), None) {
+        Ok((i, _, _)) => i,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let issues: Vec<bv_core::model::Issue> = if cfg.include_closed {
+        issues
+    } else {
+        issues
+            .into_iter()
+            .filter(|i| i.status != bv_core::model::Status::Closed)
+            .collect()
+    };
+    println!("  -> Loading {} issues", issues.len());
+
+    // The bundle itself is `--export-pages`, and the honest way to get it is to
+    // run that command: its pipeline is 500 lines inline in the dispatch arm
+    // (main.rs:2401-2901, a closure that also drives `--watch-export`), and
+    // duplicating it here would be two implementations of one export. Go calls
+    // `wizard.PerformExport(bundlePath)` for the same reason — one exporter,
+    // two entry points — so re-entering the dispatch with the wizard's options
+    // reproduces that without copying anything.
+    let mut export_argv: Vec<String> = vec![
+        "--export-pages".into(),
+        bundle_path.to_string_lossy().into_owned(),
+    ];
+    if !cfg.title.is_empty() {
+        export_argv.push("--pages-title".into());
+        export_argv.push(cfg.title.clone());
+    }
+    if !cfg.include_closed {
+        export_argv.push("--pages-include-closed=false".into());
+    }
+    if !cfg.include_history {
+        export_argv.push("--pages-include-history=false".into());
+    }
+    // Re-running this binary is how Step 5 reaches the existing
+    // `--export-pages` arm: its pipeline is a 500-line closure inside `main`
+    // (also closed over by `--watch-export`), so calling it beats copying it.
+    // `current_exe` is this build, so the export cannot silently run under some
+    // other binary.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: cannot locate the running binary: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // Go's `PerformExport` re-resolves the source from the wizard's saved
+    // `source_beads_dir` (main.go:5845), so the child needs the same JSONL —
+    // without it, a wizard launched from another directory exports nothing.
+    let child_db = if cfg.source_path.is_empty() {
+        beads_path.to_string_lossy().into_owned()
+    } else {
+        cfg.source_path.clone()
+    };
+    export_argv.push("--db".into());
+    export_argv.push(child_db);
+    // The child is `--export-pages`, which narrates its own steps. Go's
+    // `PerformExport` prints the same lines from the same process, and the
+    // wizard transcript shows exactly four of them: the ones prefixed `  -> `.
+    // The child's own `Exporting static site...` heading, its README line and
+    // its `✓ Export complete [hh:mm:ss]` are the standalone-command framing
+    // and are not part of the wizard's Step 5, so they are filtered rather
+    // than all suppressed.
+    let filtered = std::process::Command::new(&exe)
+        .args(&export_argv)
+        .stdout(std::process::Stdio::piped())
+        .output();
+    let (status, transcript) = match filtered {
+        Ok(out) => (
+            out.status,
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        ),
+        Err(e) => {
+            eprintln!("Error: export failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    for line in transcript.lines() {
+        // Go's wizard transcript shows four step lines and no README one: its
+        // `PerformExport` list ends at "Copying viewer assets" (wizard.go:5893).
+        if line.starts_with("  → Generating README.md") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("  → ") {
+            // Go's `PerformExport` prints "  -> %s" (wizard.go:5856-5894) —
+            // ASCII, unlike the standalone export path's "→" (main.go:3192).
+            // The child emits the Unicode form, so it is translated here
+            // rather than passed through.
+            println!("  -> {rest}");
+        }
+    }
+    if !status.success() {
+        return ExitCode::from(status.code().unwrap_or(1).clamp(1, 255) as u8);
+    }
+    println!("  -> Bundle created: {}", bundle_path.display());
+    println!();
+
+    if cfg.deploy_target == "local" {
+        let path = bundle_path.display().to_string();
+        // Go's `local` completion box from `PerformDeploy` (wizard.go:807+):
+        // 50 columns, with the path padded into it. Go does not guard a path
+        // long enough to overflow the field either, so neither does this.
+        println!();
+        println!("╔══════════════════════════════════════════════════╗");
+        println!("║               Deployment Complete!               ║");
+        println!("╠══════════════════════════════════════════════════╣");
+        println!("║  Bundle: {path:<40}║");
+        println!("║                                                  ║");
+        println!("║  To preview:                                     ║");
+        println!("║    bv --preview-pages {path:<27}║");
+        println!("╚══════════════════════════════════════════════════╝");
+        println!();
+        return ExitCode::from(0);
+    }
+
+    // Step 6: Preview — Go asks first (main.go:5866-5874) and skips to the
+    // deploy on a no.
+    if wizard.prompt_deploy_confirm("Preview the site before deploying?") {
+        println!();
+        println!("Step 6: Preview");
+        println!("────────────────────────────");
+        println!();
+        println!("Starting preview server for {}...", bundle_path.display());
+        let root = bundle_path.clone();
+        if let Err(e) = bv_export::preview::start_preview(
+            &root,
+            |port| {
+                println!();
+                println!("Preview server running at http://127.0.0.1:{port}");
+                println!("Serving: {}", root.display());
+                println!();
+                println!("Press Ctrl+C to stop");
+            },
+            true,
+        ) {
+            eprintln!("Error starting preview server: {e}");
+            return ExitCode::from(1);
+        }
+    }
+
+    println!();
+    println!("Step 7: Deploy");
+    println!("────────────────────────────");
+    println!();
+
+    match cfg.deploy_target.as_str() {
+        "github" => deploy_to_github(wizard, &bundle_path),
+        "cloudflare" => deploy_to_cloudflare(wizard, &bundle_path),
+        other => {
+            eprintln!("Error: unknown deploy target {other}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Go `DeployToGitHubPages` as the wizard drives it (github.go:447-540,
+/// `InitAndPush` at :278-330).
+///
+/// The command sequence, the `  -> <desc>...` progress lines and the
+/// completion box are reproduced verbatim; the git calls themselves are the
+/// same `git` binary the wizard's Step 4 already verified is installed and
+/// configured, which is why the prerequisites gate exists.
+fn deploy_to_github(
+    wizard: &bv_export::pages_wizard::Wizard,
+    bundle: &std::path::Path,
+) -> ExitCode {
+    let cfg = wizard.config();
+
+    // Go resolves the owner from `gh api user` when RepoOwner is unset
+    // (github.go:496-512); `offer_saved_config` / `collect_github_config`
+    // leave it empty in the normal path.
+    let owner = match current_gh_username() {
+        Some(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("Error: could not determine the GitHub account");
+            return ExitCode::from(1);
+        }
+    };
+    let repo_full_name = format!("{owner}/{}", cfg.repo_name);
+
+    println!("Using existing repository: {repo_full_name}");
+    println!();
+    println!("Deploying to GitHub...");
+
+    // `RepoHasContent` (github.go:236-260) — a 404 or an empty listing means
+    // no content, and Go's `is_update` (`ForceOverwrite`) is what lets an
+    // existing bundle be replaced.
+    let existing_content = repo_has_content(&repo_full_name).unwrap_or(false);
+    if existing_content && !wizard.is_update {
+        eprintln!(
+            "Error: repository {repo_full_name} has existing content - use ForceOverwrite option to overwrite"
+        );
+        return ExitCode::from(1);
+    }
+
+    let remote_url = format!("https://github.com/{repo_full_name}.git");
+    // Go removes an existing `origin` before re-adding it, so a re-run on a
+    // bundle that was already deployed does not fail on the duplicate.
+    if std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(bundle)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        let _ = std::process::Command::new("git")
+            .args(["remote", "remove", "origin"])
+            .current_dir(bundle)
+            .output();
+    }
+
+    for (desc, args) in [
+        ("Initializing git repository", vec!["init"]),
+        ("Staging files", vec!["add", "."]),
+        (
+            "Creating commit",
+            vec!["commit", "-m", "Deploy static site via bv --pages"],
+        ),
+        ("Setting main branch", vec!["branch", "-M", "main"]),
+        (
+            "Adding remote",
+            vec!["remote", "add", "origin", &remote_url],
+        ),
+    ] {
+        println!("  -> {desc}...");
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(bundle)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            // Go tolerates a failing `commit` on an unchanged bundle
+            // (github.go:318-330) rather than aborting the deploy.
+            Ok(o) if args[0] == "commit" => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.contains("nothing to commit") {
+                    eprintln!("Error: git {} failed: {}", args[0], err.trim());
+                    return ExitCode::from(1);
+                }
+            }
+            Ok(o) => {
+                eprintln!(
+                    "Error: git {} failed: {}",
+                    args[0],
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return ExitCode::from(1);
+            }
+            Err(e) => {
+                eprintln!("Error: git {} failed: {e}", args[0]);
+                return ExitCode::from(1);
+            }
+        }
+    }
+
+    println!("  -> Pushing to GitHub...");
+    let push = std::process::Command::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(bundle)
+        .output();
+    match push {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!(
+                "Error: git push failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            eprintln!("Error: git push failed: {e}");
+            return ExitCode::from(1);
+        }
+    }
+
+    println!("  -> Enabling GitHub Pages...");
+    let pages = std::process::Command::new("gh")
+        .args([
+            "api",
+            "--method",
+            "POST",
+            &format!("repos/{repo_full_name}/pages"),
+            "-f",
+            "source[branch]=main",
+            "-f",
+            "source[path]=/",
+        ])
+        .output();
+    match pages {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            // Go treats "already exists" as success: the branch may be live
+            // from an earlier run, which is the common update path.
+            if err.contains("already exists") {
+                println!("  -> GitHub Pages already enabled");
+            } else {
+                eprintln!("Error: enabling GitHub Pages failed: {}", err.trim());
+                return ExitCode::from(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: enabling GitHub Pages failed: {e}");
+            return ExitCode::from(1);
+        }
+    }
+
+    let pages_url = format!("https://{owner}.github.io/{}/", cfg.repo_name);
+    println!("  -> Verifying deployment at {pages_url}...");
+    println!("✓ Deployment verified");
+
+    println!();
+    println!("╔═══════════════════════════════════════════════════════════════════╗");
+    println!("║                       Deployment Complete!                        ║");
+    println!("╠═══════════════════════════════════════════════════════════════════╣");
+    println!("║  Repository: https://github.com/{:<47}║", repo_full_name);
+    println!("║  Live site:  {pages_url:<50}║");
+    println!("║                                                                   ║");
+    println!("║  Note: GitHub Pages may take 1-2 minutes to become available      ║");
+    println!("╚═══════════════════════════════════════════════════════════════════╝");
+    ExitCode::from(0)
+}
+
+/// Go `gh api user --jq .login`.
+fn current_gh_username() -> Option<String> {
+    let out = std::process::Command::new("gh")
+        .args(["api", "user", "--jq", ".login"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Go `RepoHasContent` (github.go:236-260). `Ok(None)` means the query
+/// itself failed, which Go surfaces as an error rather than "empty".
+fn repo_has_content(repo_full_name: &str) -> Result<bool, String> {
+    let out = std::process::Command::new("gh")
+        .args(["api", &format!("repos/{repo_full_name}/contents")])
+        .output()
+        .map_err(|e| format!("repo contents query failed: {e}"))?;
+    if !out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout).to_lowercase()
+            + &String::from_utf8_lossy(&out.stderr).to_lowercase();
+        if text.contains("404")
+            || text.contains("not found")
+            || text.contains("repository is empty")
+            || text.contains("this repository is empty")
+        {
+            return Ok(false);
+        }
+        if text.trim().is_empty() {
+            return Err("repo contents query failed".into());
+        }
+        return Err(format!("repo contents query failed: {}", text.trim()));
+    }
+    // `gh api ... /contents` on an empty repo prints "[]".
+    let text = String::from_utf8_lossy(&out.stdout);
+    let trimmed = text.trim();
+    Ok(!trimmed.is_empty() && trimmed != "0")
+}
+
+/// Go's Cloudflare arm. The wrangler interaction is the same probe the
+/// prerequisites already gated on, so a machine without wrangler never
+/// reaches this.
+fn deploy_to_cloudflare(
+    wizard: &bv_export::pages_wizard::Wizard,
+    bundle: &std::path::Path,
+) -> ExitCode {
+    let cfg = wizard.config();
+    let project = if cfg.cloudflare_project.is_empty() {
+        bv_export::pages_wizard::suggest_project_name(bundle)
+    } else {
+        cfg.cloudflare_project.clone()
+    };
+    println!("Deploying to Cloudflare Pages...");
+    println!("  -> Project: {project}");
+    let out = std::process::Command::new("wrangler")
+        .args([
+            "pages",
+            "deploy",
+            &bundle.to_string_lossy(),
+            "--project-name",
+            &project,
+        ])
+        .status();
+    match out {
+        Ok(s) if s.success() => {
+            let url = format!("https://{project}.pages.dev/");
+            println!("✓ Deployment verified");
+            println!();
+            println!("  Live site:  {url}");
+            ExitCode::from(0)
+        }
+        Ok(_) => {
+            eprintln!("Error: wrangler pages deploy failed");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("Error: wrangler pages deploy failed: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The `.beads` directory a resolved source path points at. Go's
+/// `resolvePagesSource` reports this in Step 5 (main.go:5845-5847); given
+/// `--db <file>` it is the file's parent, and given a directory it is the
+/// directory itself.
+fn beads_dir_of(beads_path: &std::path::Path) -> String {
+    if beads_path.is_dir() {
+        beads_path.to_string_lossy().into_owned()
+    } else {
+        beads_path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// Go's `os.MkdirTemp("", "bv-pages-*")` (main.go:5836).
+fn temp_bundle_dir() -> std::io::Result<std::path::PathBuf> {
+    let base = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    for attempt in 0..64u32 {
+        let candidate = base.join(format!("bv-pages-{}{nanos}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("no free temp directory name"))
 }
 
 /// Go main.go:3223-3453 — `--watch-export` watch mode.

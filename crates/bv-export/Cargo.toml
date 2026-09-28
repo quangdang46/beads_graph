@@ -22,3 +22,10 @@ serde_json = { workspace = true, features = ["raw_value"] }
 serde = { workspace = true }
 serde_yaml_ng = "0.10"
 sha2 = { workspace = true }
+# The wizard's non-TTY guard needs the raw stdin file mode (`fstat` on fd 0) to
+# tell a pipe from /dev/null, and a bounded read to tell a silent-but-open pipe
+# from a closed one. AGENTS.md bans tokio and prescribes std threads plus
+# crossbeam-channel as the mirror of Go's goroutine + `select`, which is exactly
+# Go's `readWizardInputBlocking` shape (wizard.go:172-191).
+libc = "0.2"
+crossbeam-channel = { workspace = true }
