@@ -33,7 +33,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  # Differential gate: goldens are frozen from Go bv @ 9ace029; the Rust
+  # Differential gate: goldens are frozen from Go bv @ 18afafa (v0.25.0); the Rust
   # binary is run against every fixture/command pair and compared after
   # normalizing nondeterministic fields. Content parity is a RATCHET
   # (GOLDEN_GATE_BASELINE_FAILS in the test): regressions fail CI, parity
@@ -58,6 +58,11 @@ jobs:
           count=$(find golden -type f | wc -l)
           echo "golden files: $count"
           [ "$count" -ge 70 ] || { echo "::error::Golden corpus missing/thin ($count < 70)"; exit 1; }
-          grep -q "go_commit: 9ace029" golden/METADATA.txt
+          # The corpus was re-captured against Go v0.25.0 (18afafa); the
+          # previous 9ace029 was the v0.20.0 pin and no longer matches what
+          # METADATA.txt records, so this grep failed on every run and the
+          # whole differential job was permanently red. `expected_commit` in
+          # METADATA.txt is written by capture_goldens.sh and read by nothing.
+          grep -q "go_commit: 18afafa" golden/METADATA.txt
       - name: Golden byte-comparison gate (ratchet)
         run: cargo test -p bv --test golden_comparison -- --nocapture

@@ -244,10 +244,17 @@ impl Dependency {
 
 /// A comment on an issue. `id` tolerates JSON numbers (legacy integer IDs)
 /// by stringifying the raw literal verbatim (#145 semantics).
+///
+/// The serialized name is `issue_id`, matching Go's `Comment.IssueID`
+/// (pkg/model/types.go:452). Emitting `issueId` instead made every JSON
+/// export carry a key the oracle never writes, so `--export-format json`
+/// differed from Go by one key per comment — invisible in a size check
+/// (2 bytes per comment) and fatal to any consumer reading the documented
+/// field. The camelCase spelling is still accepted on *input*, since that
+/// is what some br versions write.
 #[derive(Debug, Clone, Serialize)]
 pub struct Comment {
     pub id: String,
-    #[serde(rename = "issueId", alias = "issue_id")]
     pub issue_id: String,
     pub author: String,
     pub text: String,

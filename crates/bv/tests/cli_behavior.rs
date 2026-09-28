@@ -189,16 +189,21 @@ fn robot_schema_unknown_command_exits_one_with_suggestions() {
 
 #[test]
 fn robot_docs_unknown_topic_emits_error_json() {
-    // Go parity: unknown topics emit JSON with error+available_topics and exit 0.
+    // Unknown topics emit JSON with error+available_topics, and exit 2.
+    // The exit code was asserted as 0 here until the oracle was measured
+    // directly: `bv --robot-docs=bogus-topic` writes that JSON to *stdout* and
+    // returns 2 (cmd/bv/main.go:8922 sets ErrorTopic and the handler
+    // propagates it), which is contract #4's usage-error code.
+    //
     // `did_you_mean` only appears when the topic is close enough (Levenshtein);
     // "bogus-topic" is too far from any valid topic.
     let (code, stdout, _) = run(&["--robot-docs", "bogus-topic"]);
-    assert_eq!(code, 0);
+    assert_eq!(code, 2, "oracle exits 2 on an unknown topic");
     assert!(stdout.contains("\"error\""), "{stdout}");
     assert!(stdout.contains("\"available_topics\""), "{stdout}");
     // Close miss should get did_you_mean (Go: suggestClosest ≤3 for len≤10).
     let (code2, stdout2, _) = run(&["--robot-docs", "guied"]);
-    assert_eq!(code2, 0);
+    assert_eq!(code2, 2, "a near-miss topic is still an unknown topic");
     assert!(stdout2.contains("\"did_you_mean\""), "{stdout2}");
 }
 
