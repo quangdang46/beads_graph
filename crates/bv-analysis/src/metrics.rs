@@ -182,36 +182,105 @@ pub fn record_cache_miss(metric: &'static CacheMetric) {
     }
 }
 
-/// Memory stats — Go `MemoryStats` shape. Reports `null` values when the
-/// platform cannot provide them (never fabricated).
+/// Memory stats — Go `MemoryStats` shape (cache.go:135-145).
+///
+/// The values are Go runtime counters (`runtime.ReadMemStats`), so they can
+/// never equal a Rust build's — a differential harness has to exempt this
+/// block the way it exempts timings. What *is* required is the shape: Go's
+/// schema declares all six keys `"type": "number"` and lists `memory` as
+/// required (main.go:9131-9138), so `null` is a schema violation rather than
+/// a graceful degradation. The old `/proc/self/statm` read meant every macOS
+/// build emitted six nulls and no consumer validating against Go's own schema
+/// could accept the document.
+///
+/// The closest real quantity per platform is resident set size. RSS is not
+/// Go's heap, so it is reported only where that is honest, and the counters
+/// with no Rust analogue (`gc_cycles`, `gc_pause_ms`, `goroutine_count`)
+/// remain null — a caller can then distinguish "this runtime does not report
+/// GC" from a real zero.
 fn memory_stats() -> Value {
-    let read_statm = || -> Option<(f64, f64)> {
-        // Linux: /proc/self/statm gives RSS in pages (field 2).
-        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-        let mut fields = statm.split_whitespace();
-        fields.next()?;
-        let rss_pages: f64 = fields.next()?.parse().ok()?;
-        let page_size = 4096.0; // standard on Linux
-        Some((rss_pages * page_size / 1_048_576.0, 0.0))
-    };
-    match read_statm() {
-        Some((heap_alloc_mb, heap_sys_mb)) => json!({
-            "heap_alloc_mb": heap_alloc_mb,
-            "heap_sys_mb": heap_sys_mb,
-            "heap_objects_k": null,
-            "gc_cycles": null,
-            "gc_pause_ms": null,
-            "goroutine_count": null,
+    match resident_set_mb() {
+        Some(rss) => json!({
+            "heap_alloc_mb": rss,
+            "heap_sys_mb": rss,
+            "heap_objects_k": Value::Null,
+            "gc_cycles": Value::Null,
+            "gc_pause_ms": Value::Null,
+            "goroutine_count": Value::Null,
         }),
         None => json!({
-            "heap_alloc_mb": null,
-            "heap_sys_mb": null,
-            "heap_objects_k": null,
-            "gc_cycles": null,
-            "gc_pause_ms": null,
-            "goroutine_count": null,
+            "heap_alloc_mb": Value::Null,
+            "heap_sys_mb": Value::Null,
+            "heap_objects_k": Value::Null,
+            "gc_cycles": Value::Null,
+            "gc_pause_ms": Value::Null,
+            "goroutine_count": Value::Null,
         }),
     }
+}
+
+/// Resident set size in MiB, or `None` where the platform exposes no way to
+/// read it. Never a guess.
+#[cfg(target_os = "macos")]
+fn resident_set_mb() -> Option<f64> {
+    // `struct mach_task_basic_info` from <mach/task_info.h> — the always-64-bit
+    // variant behind `MACH_TASK_BASIC_INFO` (flavor 20), 48 bytes / 12 words.
+    //
+    // Both the struct choice and the field order were read off the SDK header,
+    // and the sizes confirmed against a C program built with the same clang:
+    // `task_basic_info` (the legacy flavor-20 struct) is 40 bytes and returns
+    // KERN_INVALID_ARGUMENT, while `mach_task_basic_info` is 48 and returns 0.
+    // The header's own comment on the older struct says as much.
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: [u32; 2],
+        system_time: [u32; 2],
+        policy: i32,
+        suspend_count: i32,
+    }
+    extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(task: u32, flavor: i32, info: *mut MachTaskBasicInfo, count: *mut u32) -> i32;
+    }
+    const MACH_TASK_BASIC_INFO: i32 = 20;
+
+    let mut info = MachTaskBasicInfo::default();
+    // `count` is in 32-bit words, not bytes.
+    let mut count = std::mem::size_of::<MachTaskBasicInfo>() as u32 / 4;
+    // SAFETY: `info` and `count` are valid, correctly sized out-parameters and
+    // the flavor matches the struct passed. A non-zero return means the query
+    // failed, leaving `info` untouched, and we report None rather than reading
+    // an uninitialized value.
+    let kr = unsafe {
+        task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            &mut info,
+            &mut count,
+        )
+    };
+    if kr != 0 {
+        return None;
+    }
+    Some(info.resident_size as f64 / 1_048_576.0)
+}
+
+#[cfg(target_os = "linux")]
+fn resident_set_mb() -> Option<f64> {
+    // `/proc/self/statm`: field 2 is resident pages. Assuming a 4 KiB page is
+    // safe for every Linux target this ships to.
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let rss_pages: f64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    Some(rss_pages * 4096.0 / 1_048_576.0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn resident_set_mb() -> Option<f64> {
+    None
 }
 
 /// Go `GetAllMetrics` — the full `--robot-metrics` payload body.
