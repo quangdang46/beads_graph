@@ -384,6 +384,18 @@ pub fn compute_risk_signals(
     // FMADDD the Go binary actually emits. Same principle as the HITS
     // normalisation in bv-graph-core, applied in the other direction: there Go
     // fused and Rust did not, and here Go fuses and Rust did not.
+    // Go writes this as `FanVariance*w + ActivityChurn*w + CrossRepoRisk*w +
+    // StatusRisk*w`, and the Go compiler FUSES each product into the
+    // following add, so the expression rounds once per fused step rather than
+    // once per product and once per sum. `mul_add` reproduces that.
+    //
+    // I briefly replaced this with a plain left-to-right sum, reasoning from the
+    // source text that every operation rounded separately. Measurement
+    // contradicts that, decisively: with the four components identical on both
+    // sides, the plain sum yields 0.06002140519983835 and the oracle publishes
+    // 0.060021405199838354. Both fused association orders -- left and right --
+    // reproduce the oracle's value exactly, and no plain ordering does. The
+    // fused form is correct; the source text is not the whole story.
     let composite = status_risk.mul_add(
         0.20,
         cross_repo.mul_add(0.20, churn.mul_add(0.30, fan_variance.mul_add(0.30, 0.0))),
