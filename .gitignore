@@ -79,3 +79,6 @@ tests/fixtures/small_chain/.beads/.bv.lock
 # with that name. Guarded so one can never be committed.
 /--*/
 /-*/
+
+# Output of `--generate-docs`; a build product, never committed.
+docs/generated/
