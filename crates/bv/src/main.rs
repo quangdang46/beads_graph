@@ -5,6 +5,7 @@
 
 mod argv;
 #[allow(dead_code)] // flag inventory is declarative data; consumed by dispatch phase
+mod docgen;
 mod flags;
 mod validation;
 
@@ -836,13 +837,6 @@ use std::process::ExitCode;
 // gzips it. The trait supplies `Profile::encode_to_vec`.
 use pprof::protos::Message as _;
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 /// Go `strconv.ParseBool` — the exact set `flag.Bool` accepts.
 fn parse_go_bool(value: &str) -> Option<bool> {
     match value {
@@ -964,74 +958,81 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 fn run_generate_docs() -> ExitCode {
-    let out_dir = std::path::Path::new("docs/generated");
-    if let Err(e) = std::fs::create_dir_all(out_dir) {
-        eprintln!("Error: generating docs: {e}");
-        return ExitCode::from(1);
-    }
-    // `go_working_dir`, not a bare `$PWD` read: this used to take the
-    // environment variable unchecked, so a stale PWD sent the README lookup
-    // into an unrelated directory and the command failed with a path error
-    // naming somewhere the caller never ran. `go_working_dir` applies Go's
-    // rule and only trusts PWD when it names the current directory.
     let cwd = repo_root();
-    // Go's docgen never loads issues: it renders the flag, env, alerts, recipe
-    // and key-binding registries and rewrites the README/AGENTS markers. Rust
-    // loaded the issue set to put a count in a JSON file Go does not produce,
-    // which made the command fail in any repository without a `.beads` — the
-    // one place a README is most likely to need regenerating.
-    let doc = serde_json::json!({
-        "generated_by": "bvr",
-        "version": GO_APP_VERSION,
-        "contract_version": bv_robot::ROBOT_CONTRACT_VERSION,
-        "flags": flags::flag_names(),
-    });
-    let json_path = out_dir.join("bvr-docs.json");
-    if let Err(e) = std::fs::write(&json_path, go_json_string(&doc)) {
+    let out_dir = cwd.join("docs").join("generated");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
         eprintln!("Error: generating docs: {e}");
         return ExitCode::from(1);
     }
-    let md = format!(
-        "# bv generated docs\n\n- version: {}\n- contract: {}\n- flags: {}\n",
-        GO_APP_VERSION,
-        bv_robot::ROBOT_CONTRACT_VERSION,
-        flags::flag_names().len()
-    );
-    let md_path = out_dir.join("bvr-docs.md");
-    if let Err(e) = std::fs::write(&md_path, md) {
-        eprintln!("Error: generating docs: {e}");
-        return ExitCode::from(1);
-    }
-    println!(
-        "Generated docs: {} and {}",
-        md_path.display(),
-        json_path.display()
-    );
-    // The `flags` marker is the one this port has a real table for; the others
-    // Go fills from the recipes, env and drift registries, which are separate
-    // ports. A marker with no table is left as it is, exactly as Go's `ok`
-    // flag does.
-    let flags_table = render_generated_flags_table();
-    update_generated_markers(&cwd, &[("flags", flags_table)])
-}
 
-/// The `flags` table body written between the README markers. A definition per
-/// line, in registry order.
-fn render_generated_flags_table() -> String {
-    let mut out = String::from("| Flag | Type |\n| --- | --- |\n");
-    for f in flags::ROBOT_PRIMARIES
-        .iter()
-        .chain(flags::MODIFIER_FLAGS.iter())
-    {
-        let kind = match f.kind {
-            flags::FlagKind::Bool => "bool",
-            flags::FlagKind::Str | flags::FlagKind::RepeatableStr => "string",
-            flags::FlagKind::Int => "int",
-            flags::FlagKind::Float => "float",
-        };
-        out.push_str(&format!("| `--{}` | {} |\n", f.name, kind));
+    // Go `docgen.Generate` (internal/docgen/docgen.go:583-660) renders seven
+    // Markdown tables from the live registries, writes each to its own file
+    // under docs/generated/, writes constants.json, and then rewrites the
+    // marker blocks in README.md and AGENTS.md.
+    //
+    // This handler wrote two invented files instead — a bvr-docs.md stub with
+    // a version line and a flag count, and a bvr-docs.json that Go never
+    // produces — so `bv --generate-docs` and `bvr --generate-docs` produced
+    // disjoint output trees under the same directory. Anyone regenerating
+    // docs got neither side's content.
+    let flags_table = docgen::render_flags_table();
+    let env_table = docgen::render_env_table();
+    let alerts_table = docgen::render_alerts_tables();
+    let recipes_table = docgen::render_recipes_table();
+    let presets_table = docgen::render_presets_table();
+    let keys_table = docgen::render_keys_table();
+    let sort_modes_table = docgen::render_sort_modes_table();
+    let constants_json = docgen::generate_constants_json();
+
+    // Go writes a map literal, so its iteration order is not defined; the
+    // contents are what matter and each file is independent.
+    let files: [(&str, String); 8] = [
+        ("flags.md", format!("# CLI Flags\n\n{flags_table}\n")),
+        (
+            "env.md",
+            format!("# Environment Variables\n\n{env_table}\n"),
+        ),
+        ("alerts.md", format!("# Alert Checks\n\n{alerts_table}\n")),
+        (
+            "recipes.md",
+            format!("# Built-in Recipes\n\n{recipes_table}\n"),
+        ),
+        (
+            "presets.md",
+            format!("# Hybrid Search Presets\n\n{presets_table}\n"),
+        ),
+        ("keys.md", format!("# Keyboard Shortcuts\n\n{keys_table}\n")),
+        (
+            "sort_modes.md",
+            format!("# Sort Modes\n\n{sort_modes_table}\n"),
+        ),
+        ("constants.json", constants_json),
+    ];
+    for (name, body) in &files {
+        if let Err(e) = std::fs::write(out_dir.join(name), body) {
+            eprintln!("Error: generating docs: writing {name}: {e}");
+            return ExitCode::from(1);
+        }
     }
-    out
+
+    // Go rewrites the marker blocks, and leaves a marker untouched when the
+    // file has no pair around it — the same rule `update_generated_markers`
+    // already applies.
+    let tables = [
+        ("flags", flags_table),
+        ("env", env_table),
+        ("alerts", alerts_table),
+        ("recipes", recipes_table),
+        ("presets", presets_table),
+        ("keys", keys_table),
+        ("sort-modes", sort_modes_table),
+    ];
+    let code = update_generated_markers(&cwd, &tables);
+    if code != ExitCode::SUCCESS {
+        return code;
+    }
+    println!("generating docs: wrote {}", files.len());
+    ExitCode::SUCCESS
 }
 
 /// `--export` (Go cmd/bv/main.go:4372). Writes a report using recipe defaults
@@ -2345,13 +2346,35 @@ fn main() -> ExitCode {
             .get(idx + 1)
             .cloned()
             .unwrap_or_else(|| "./bv-pages".to_string());
+        // Go main.go:1622 registers `--pages-title` with an empty default, and
+        // the emptiness is load-bearing twice over: `replaceTitle` is skipped
+        // entirely (viewer_embed.go:69), leaving index.html's own
+        // `<title>Beads Viewer</title>`, and `generateREADME` falls back to
+        // "Project Dashboard" (main.go:5532). A non-empty default here would
+        // rewrite both, so a plain `--export-pages` would ship a retitled
+        // document that the oracle never produces.
         let title = args
             .iter()
             .position(|a| a == "--pages-title")
             .and_then(|i| args.get(i + 1))
             .cloned()
-            .unwrap_or_else(|| "Beads Dashboard".to_string());
-        let include_closed = args.iter().any(|a| a == "--pages-include-closed");
+            .unwrap_or_default();
+        // Go main.go:1623 registers `--pages-include-closed` with pflag default
+        // TRUE, so a plain `--export-pages` ships closed issues too. Reading the
+        // flag as "present means on" made the DEFAULT invocation drop every
+        // closed bead — which on an all-closed workspace is all of them, leaving
+        // `data/graph_layout.json` with zero nodes while printing a success line.
+        // Go parses booleans during flag parsing, so a value
+        // `strconv.ParseBool` rejects is a usage error and exits 1
+        // (main.go:4548-4550); this read happens after parsing, so the same
+        // message and status are reproduced here.
+        let include_closed = match argv::go_bool_flag(&args, "pages-include-closed", true) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("{msg}");
+                return ExitCode::from(1);
+            }
+        };
         let cwd = std::env::current_dir().unwrap_or_default();
 
         // Go main.go:3061-3214 wraps the export in a `doExport` closure with an
@@ -2374,77 +2397,411 @@ fn main() -> ExitCode {
                 println!("Exporting static site...");
             }
 
-            let (issues, hash, _as_of_commit) = load_issues_auto(&cwd, None)?;
+            // Go main.go:3064 hands `doExport` the already-loaded
+            // `exportContext`, whose `Envelope()` describes the LOADED file —
+            // not the closed-filtered set the exporter narrows to at :3079.
+            // Reading the SourceMeta off the loader rather than re-deriving it
+            // with `source_meta_for` is what keeps the envelope's
+            // `source_authority` counts (errors / skipped / read_errors) honest
+            // instead of hard-coded to zero.
+            let (issues, _hash, _as_of_commit, loaded_source) =
+                load_issues_auto_meta_raw(&cwd, None)?;
 
-            let visible: Vec<&bv_core::model::Issue> = issues
+            // Go main.go:3079-3088 drops closed issues from `exportIssues`
+            // before anything downstream, and every later step — the analyzer
+            // at :3110, the triage at :3120, the database exporter at :3158 and
+            // `generateREADME` at :3173 — reads that filtered set rather than
+            // the loaded one. Owned rather than borrowed because the analysis
+            // entry points all take `&[Issue]`.
+            let visible: Vec<bv_core::model::Issue> = issues
                 .iter()
                 .filter(|i| include_closed || !i.status.is_closed())
+                .cloned()
                 .collect();
 
-            let open = visible
-                .iter()
-                .filter(|i| matches!(i.status, bv_core::model::Status::Open))
-                .count();
-            let in_prog = visible
-                .iter()
-                .filter(|i| matches!(i.status, bv_core::model::Status::InProgress))
-                .count();
-            let blocked = visible
-                .iter()
-                .filter(|i| matches!(i.status, bv_core::model::Status::Blocked))
-                .count();
-            let closed = issues.iter().filter(|i| i.status.is_closed()).count();
+            std::fs::create_dir_all(&out_dir).ok();
 
-            let mermaid = bv_export::graph_export::generate_mermaid_graph(&issues);
-            let rows: String = visible
+            // Go main.go:3110-3116 runs the analyzer over the exported set and
+            // awaits phase 2, then :3120-3122 computes the triage from the same
+            // set. `generateREADME` is handed those two results verbatim
+            // (:3173), so the README below is rendered from them rather than
+            // from a second, independent pass over the issues.
+            println!("  → Running graph analysis...");
+            let export_graph = bv_analysis::analyzer::build_graph(&visible);
+            let export_stats = bv_analysis::analyzer::analyze_phase1(&export_graph);
+            println!("  → Generating triage data...");
+            let mut export_triage =
+                bv_analysis::triage::build_triage(&visible, &export_graph, robot_now(), false);
+            // Go stamps every recommendation with `issue.Actions(claimable)`
+            // (triage.go:658) on the export path exactly as it does for
+            // `--robot-triage`; `ComputeTriageWithOptions` builds them with the
+            // same analyzer, so the route is the same one. `build_triage` alone
+            // leaves the field unset, which serialized as `"actions": null`
+            // where the oracle publishes the object (or the unavailable
+            // reason, when the source carries no tracker metadata).
+            for rec in export_triage.recommendations.iter_mut() {
+                rec.actions = Some(
+                    serde_json::to_value(actions_for_source(
+                        &loaded_source,
+                        &rec.id,
+                        rec.claimable,
+                    ))
+                    .unwrap_or(serde_json::Value::Null),
+                );
+                restate_unblock_reason(&mut rec.reasons, &rec.unblocks_ids);
+            }
+            // `stats.Cycles()` — the same `enumerate_cycles` representatives the
+            // analyzer keeps (analyzer.rs:1371), mapped back to issue ids. The
+            // README prints at most three.
+            let export_cycles: Vec<Vec<String>> =
+                bv_analysis::algorithms::cycles::enumerate_cycles(&export_graph, 100)
+                    .into_iter()
+                    .map(|cycle| {
+                        cycle
+                            .into_iter()
+                            .map(|node| export_graph.node_id(node).unwrap_or_default().to_string())
+                            .collect()
+                    })
+                    .collect();
+            let export_views = triage_views(&export_triage, &visible, export_graph.edge_count());
+
+            // Go main.go:3110-3113: `analyzer.AnalyzeAsync(ctx)` +
+            // `WaitForPhase2()`. `NewAnalyzer` leaves `a.config` nil, so the
+            // size-based tier is what runs (graph.go:1681-1690) — not the full
+            // analysis config `--force-full-analysis` installs. This is a
+            // DIFFERENT analysis from the one feeding the README above, and from
+            // the one `graphCentrality` runs inside the layout file; all three
+            // read off `e.Stats` in Go and each has to be reproduced separately.
+            let export_node_count = visible.len();
+            let export_cfg = {
+                let density = if export_node_count > 1 {
+                    export_graph.edge_count() as f64
+                        / (export_node_count as f64 * (export_node_count as f64 - 1.0))
+                } else {
+                    0.0
+                };
+                bv_analysis::analyzer::config_for_size(
+                    export_node_count,
+                    export_graph.edge_count(),
+                    density,
+                )
+            };
+            let (export_full_stats, _) = bv_analysis::analyzer::analyze_with_profile(
+                std::sync::Arc::new(export_graph),
+                &export_cfg,
+            );
+
+            // Go main.go:3124-3138 collects the blocking dependency edges the
+            // exporter stores, in issue order and then dependency order. The
+            // layout file's `links` are this list, one entry per edge.
+            let export_deps: Vec<bv_export::pages_data::BlockingDep> = visible
                 .iter()
-                .map(|i| {
-                    format!(
-                        "<tr><td>{}</td><td>{}</td><td>{}</td><td>P{}</td><td>{}</td></tr>\n",
-                        i.id,
-                        html_escape(&i.title),
-                        i.status.as_str(),
-                        i.priority,
-                        i.issue_type
-                    )
+                .flat_map(|i| i.dependencies.iter().map(move |d| (i, d)))
+                .filter(|(_, d)| d.r#type.is_blocking())
+                .map(|(i, d)| bv_export::pages_data::BlockingDep {
+                    issue_id: i.id.clone(),
+                    depends_on_id: d.effective_depends_on().to_string(),
+                    dep_type: d.r#type,
                 })
                 .collect();
 
-            let html = format!(
-                r#"<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>{title}</title>
-<style>
-body {{ font-family: -apple-system, sans-serif; margin: 2rem; background: #282a36; color: #f8f8f2; }}
-h1 {{ color: #bd93f9; }}
-.stats span {{ margin-right: 1rem; padding: 0.2rem 0.6rem; border-radius: 4px; background: #44475a; }}
-table {{ border-collapse: collapse; width: 100%; margin-top: 1rem; }}
-td, th {{ border: 1px solid #44475a; padding: 0.4rem 0.6rem; text-align: left; }}
-th {{ background: #44475a; }}
-.mermaid {{ background: #f8f8f2; padding: 1rem; border-radius: 8px; margin-top: 1rem; }}
-</style>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-<script>mermaid.initialize({{startOnLoad:true, theme:'dark'}});</script>
-</head>
-<body>
-<h1>{title}</h1>
-<p class="stats">
-<span>○ Open: {open}</span><span>◐ In-Progress: {in_prog}</span><span>◈ Blocked: {blocked}</span><span>● Closed: {closed}</span>
-</p>
-<table>
-<tr><th>ID</th><th>Title</th><th>Status</th><th>Priority</th><th>Type</th></tr>
-{rows}</table>
-<div class="mermaid">
-{mermaid}</div>
-<p><small>data_hash: {hash} | Generated by bvr</small></p>
-</body>
-</html>
-"#
+            // `data/*.json` (Go's `exporter.Export` → `writeRobotOutputs` +
+            // `writeGraphLayout`, main.go:3141-3162). Every one of these files
+            // is the payload with the RobotEnvelope merged over it, written
+            // through Go's `writeJSON` — sorted top-level keys, 2-space indent,
+            // trailing newline, Go float rendering. The three shapes that bites:
+            //
+            //   * `version` is the ENVELOPE's, so the payload's own "1.0.0" is
+            //     never seen (triage.json's NESTED meta.version keeps it).
+            //   * `data_hash` in meta.json is the envelope's; `ExportMeta` never
+            //     assigns one.
+            //   * `generated_at` is payload-owned when the payload has one —
+            //     meta.json's nanosecond stamp and graph_layout.json's
+            //     second-precision one both survive; project_health.json has
+            //     none and inherits the envelope's.
+            // The scope hash's id list comes from the LOADED set, not the
+            // closed-filtered one: Go builds it from `exportContext.Issues`
+            // (robot_registry.go:250-254), which is captured before
+            // `doExport` narrows to `exportIssues` at main.go:3079. Verified —
+            // an export with and without `--pages-include-closed` produces the
+            // same `scope_hash` on the wire, so it cannot be describing the
+            // filtered set.
+            let export_envelope: serde_json::Map<String, serde_json::Value> =
+                match full_envelope_json_with_source_and_authority(
+                    &_hash,
+                    &_hash,
+                    Some(&loaded_source),
+                    &issues,
+                ) {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+            let data_dir = std::path::Path::new(&out_dir).join("data");
+            let write_data = |name: &str, payload: &serde_json::Value| {
+                let path = data_dir.join(name);
+                if let Err(e) =
+                    bv_export::pages_data::write_robot_json(&path, payload, &export_envelope)
+                {
+                    println!("  → Warning: failed to write {name}: {e}");
+                }
+            };
+
+            // `meta` — Go `ExportMeta` (sqlite_types.go:63-71), written by
+            // `writeRobotOutputs` (sqlite_export.go:631-639). `GeneratedAt` is a
+            // `time.Time`, so `encoding/json` renders it RFC3339Nano in UTC —
+            // NOT the envelope's second-precision stamp, which the payload's own
+            // value suppresses. `Title` is `omitempty` and Go only sets it from
+            // a non-empty `--pages-title`, so the key is absent by default.
+            write_data(
+                "meta.json",
+                &bv_export::pages_data::export_meta_payload(
+                    &go_rfc3339_nano_utc(),
+                    visible.len(),
+                    export_deps.len(),
+                    // Go passes `e.gitHash`, which is only ever set by
+                    // `SetGitHash` — the export path never calls it.
+                    "",
+                    &title,
+                ),
             );
 
-            std::fs::create_dir_all(&out_dir).ok();
+            // `triage.json` — the `analysis.TriageResult` FLATTENED at the top
+            // level (not nested under a `triage` key, unlike `--robot-triage`),
+            // plus the envelope. `Alerts` is `omitempty` and `ComputeTriageWithOptions`
+            // never populates it, and both grouping fields are absent without
+            // `--robot-triage-by-track` / `--by-label`.
+            let export_top_id = export_triage
+                .recommendations
+                .first()
+                .map(|r| r.id.as_str())
+                .unwrap_or("");
+            let export_top_actions = actions_for_source(&loaded_source, export_top_id, true);
+            let export_commands = serde_json::json!({
+                "claim_top": export_top_actions.claim.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
+                "show_top": export_top_actions.show.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
+                "list_ready": "",
+                "list_blocked": "",
+                "refresh_triage": "bv --robot-triage",
+            });
+            // Which analysis the export's TRIAGE ran under — the same branch
+            // `ComputeTriageWithOptions` takes (triage.go:503-512). Both the
+            // `status` block and `project_health.graph`'s cycle information are
+            // read off that analysis, NOT off `export_full_stats` (which is
+            // `e.Stats`, the layout's input, and always the full config).
+            let export_triage_has_open = visible.iter().any(|i| !i.status.is_closed());
+            let export_triage_status = if export_triage_has_open {
+                export_full_stats.status.to_json_map()
+            } else {
+                export_triage.metric_status.to_json_map()
+            };
+            // `NoPhase2Config` leaves `ComputeCycles` off, so a finished
+            // workspace has no cycle list to report even when the graph has one.
+            let export_triage_cycle_count = if export_triage_has_open {
+                export_full_stats.cycles.as_ref().map_or(0, Vec::len)
+            } else {
+                0
+            };
+
+            // Go's `buildGraphHealth` (pkg/analysis/triage.go:1224-1240) reads
+            // `stats.Cycles()` off the same full analysis, so the export's
+            // `project_health.graph` reports real cycle information where
+            // `triage_views` — which only ever sees the fast-config triage
+            // status — hard-codes `has_cycles: false`. `CycleCount` is
+            // `omitempty`, so an acyclic graph must not gain the key at all;
+            // the other four fields already match the analyzer and are left
+            // alone.
+            let mut export_project_health = export_views["project_health"].clone();
+            let export_cycle_count = export_triage_cycle_count;
+            if let Some(old) = export_project_health
+                .get("graph")
+                .and_then(|g| g.as_object())
+                .cloned()
+            {
+                // Go `GraphHealth` (pkg/analysis/triage.go:220-227) declares
+                // node_count, edge_count, density, has_cycles, cycle_count,
+                // phase2_ready, and `encoding/json` emits a struct in that
+                // order — so the two rewritten keys are rebuilt in place rather
+                // than appended, which would move `cycle_count` behind
+                // `phase2_ready`.
+                let mut graph = serde_json::Map::new();
+                for key in ["node_count", "edge_count", "density", "has_cycles"] {
+                    if let Some(v) = old.get(key) {
+                        graph.insert(key.into(), v.clone());
+                    }
+                }
+                graph.insert(
+                    "has_cycles".into(),
+                    serde_json::json!(export_cycle_count > 0),
+                );
+                if export_cycle_count > 0 {
+                    graph.insert("cycle_count".into(), serde_json::json!(export_cycle_count));
+                }
+                if let Some(v) = old.get("phase2_ready") {
+                    graph.insert("phase2_ready".into(), v.clone());
+                }
+                export_project_health["graph"] = serde_json::Value::Object(graph);
+            }
+
+            // `project_health.json` — literally `e.Triage.ProjectHealth`
+            // (sqlite_export.go:623-627), the same sub-object triage.json
+            // carries under `project_health`. It has no `version` field of its
+            // own: the observed "v0.25.0" is purely the envelope overlay.
+            write_data("project_health.json", &export_project_health);
+
+            let export_triage_payload = serde_json::json!({
+                // Go's `TriageMeta.GeneratedAt` is a `time.Time` filled from
+                // `time.Now()` in the LOCAL zone, so this one carries a numeric
+                // offset where the envelope above carries `Z`. `ComputeTimeMs` is
+                // Go's measured elapsed milliseconds; the Rust triage is
+                // synchronous and cheap enough that the oracle records 0.
+                "meta": {
+                    "version": "1.0.0",
+                    "generated_at": go_rfc3339_nano_local(),
+                    // Go's `stats.IsPhase2Ready()` reads the bit the analyzer
+                    // sets once its Phase-2 worker has settled, which is true
+                    // even when every metric came back "skipped" — the
+                    // all-issues-closed export reports `true` on the wire.
+                    "phase2_ready": true,
+                    "issue_count": export_triage.counts.total,
+                    "compute_time_ms": 0,
+                },
+                // Go's `TriageResult.Status` is `stats.Status()` of the
+                // TRIAGE's own analyzer, which is a different analysis from the
+                // `e.Stats` the layout reads: `ComputeTriageWithOptions` picks
+                // `NoPhase2Config` when nothing is open, the fast triage config
+                // under `UseFastConfig`, and `AnalyzeAsync` (the full
+                // `ConfigForSize`) otherwise (triage.go:503-512). main.go:3121
+                // leaves `UseFastConfig` false, so an export with open work
+                // publishes the FULL status — eigenvector, HITS, cycles, k-core
+                // and articulation all "computed" — while a finished workspace
+                // publishes `build_triage`'s "all phase 2 disabled" for all
+                // nine. `build_triage` already models the second branch; the
+                // full analysis above models the first.
+                "status": export_triage_status.clone(),
+                "quick_ref": {
+                    "open_count": export_triage.quick_ref.open_count,
+                    "actionable_count": export_triage.quick_ref.actionable_count,
+                    "blocked_count": export_triage.quick_ref.blocked_count,
+                    "in_progress_count": export_triage.quick_ref.in_progress_count,
+                    "not_closed_count": export_triage.quick_ref.not_closed_count,
+                    "not_actionable_count": export_triage.quick_ref.not_actionable_count,
+                    "top_picks": export_views["top_picks"],
+                },
+                "recommendations": recommendations_top_n(&export_triage.recommendations),
+                "quick_wins": export_views["quick_wins"],
+                "blockers_to_clear": export_views["blockers_to_clear"],
+                "project_health": export_project_health,
+                "commands": export_commands,
+            });
+            write_data("triage.json", &export_triage_payload);
+
+            // `graph_layout.json` — the pre-computed layered DAG embed plus the
+            // separately-derived centrality block. This one is genuinely computed
+            // at export time; the browser's force-graph is a second, independent
+            // simulation that starts from these coordinates.
+            let export_issue_ids: Vec<String> = visible.iter().map(|i| i.id.clone()).collect();
+            let export_layout = bv_export::pages_data::build_graph_layout_document(
+                &bv_export::pages_data::GraphLayoutInput {
+                    issue_ids: &export_issue_ids,
+                    deps: &export_deps,
+                    topological_order: export_full_stats.phase1.topological_order.as_deref(),
+                    page_rank: export_full_stats.page_rank.as_ref(),
+                    betweenness: export_full_stats.betweenness.as_ref(),
+                    cycles: export_full_stats.cycles.as_ref(),
+                    generated_at: jiff_now(),
+                },
+                bv_export::pages_data::build_graph_centrality(&export_issue_ids, &export_deps),
+            );
+            write_data("graph_layout.json", &export_layout);
+
+            // Go main.go:3160-3165 writes the SQLite database before any
+            // asset is copied. This step was missing entirely, so the bundle
+            // shipped without `beads.sqlite3` and its chunk config — 305 KB
+            // plus the index the viewer fetches on load. `viewer.js` requests
+            // them with no working fallback, so `loadDatabase()` reached its
+            // "Database not found at any known path" throw and the page
+            // rendered a fatal modal instead of the dashboard. Both binaries
+            // exited 0 and printed a success line.
+            println!("  → Writing database and JSON files...");
+            {
+                use bv_export::sqlite_export as sqlite;
+                // Go stores the full dependency set, not the blocking-only
+                // subset the layout file uses, so the rows are rebuilt here
+                // rather than reusing `export_deps`.
+                let all_deps: Vec<bv_core::Dependency> = visible
+                    .iter()
+                    .flat_map(|i| i.dependencies.iter().cloned())
+                    .collect();
+                let metrics = sqlite::MetricTables::default();
+                sqlite::SqliteExporter::new(&visible, &all_deps)
+                    .with_title(&title)
+                    .with_metrics(&metrics)
+                    .export(std::path::Path::new(&out_dir))
+                    .map_err(|e| format!("exporting: {e}"))?;
+                // Go's `SQLiteExporter.Export` copies the vendored viewer
+                // libraries as part of the same call (sqlite_export.go:72);
+                // Rust splits it out, so the second half is invoked here.
+                // Without it `index.html` referenced 14 assets that 404'd —
+                // tailwind, mermaid, d3, force-graph, sql-wasm, the webfonts —
+                // so the page rendered completely unstyled and the graph and
+                // database never initialised.
+                sqlite::copy_vendor_assets(std::path::Path::new(&out_dir))
+                    .map_err(|e| format!("copying vendor assets: {e}"))?;
+            }
+
+            // Go main.go:3168 reaches `pkg/export/viewer_embed.go:67` for
+            // index.html: `replaceTitle` when `--pages-title` is set, then
+            // `AddScriptCacheBusting` unconditionally. Written here rather than
+            // by the sibling asset module because it is the only file in Go's
+            // embed walk that is transformed, and the offline manifest below
+            // hashes its output — so it has to exist before that runs.
+            println!("  → Copying viewer assets...");
+            let export_now = robot_now();
+            bv_export::viewer_shell::copy_viewer_shell(
+                std::path::Path::new(&out_dir),
+                &title,
+                export_now,
+            )
+            .map_err(|e| format!("copying viewer shell: {e}"))?;
+            // Go main.go:3168 → pkg/export/viewer_embed.go:29 CopyEmbeddedAssets:
+            // copy the embedded viewer assets, then bind the service worker's
+            // offline manifest to the bundle as it now stands.
+            bv_export::viewer_assets::copy_viewer_assets(std::path::Path::new(&out_dir))
+                .map_err(|e| format!("copying viewer assets: {e}"))?;
+
+            // Go main.go:3173 `generateREADME(*exportPages, *pagesTitle, "",
+            // exportIssues, &triage, stats)` — note the literal `""` for
+            // `pagesURL`, which is why the "View Live Dashboard" link can never
+            // appear from `--export-pages`. A failure is a warning, not an
+            // error (:3174), so the bundle still ships.
+            println!("  → Generating README.md...");
+            {
+                use bv_export::pages_readme as readme;
+                let readme_views = readme::TriageViews::from_robot_payload(&export_views);
+                let input = readme::ReadmeInput {
+                    title: &title,
+                    pages_url: "",
+                    counts: Some(&export_triage.counts),
+                    top_picks: &readme_views.top_picks,
+                    blockers_to_clear: &readme_views.blockers_to_clear,
+                    quick_wins: &readme_views.quick_wins,
+                    // Go's `TriageResult.Alerts` is only ever populated on the
+                    // drift route (robot_registry.go:1222), never by
+                    // `ComputeTriageWithOptions` — the struct literal at
+                    // triage.go:715 sets no such field. The section is ported in
+                    // bv-export and stays empty here for the same reason.
+                    alerts: &[],
+                    node_count: export_stats.node_count,
+                    edge_count: export_stats.edge_count,
+                    density: export_stats.density,
+                    cycles: &export_cycles,
+                    now: export_now,
+                };
+                if let Err(e) = readme::generate_readme(std::path::Path::new(&out_dir), &input) {
+                    println!("  → Warning: failed to generate README: {e}");
+                }
+            }
+
             // Go main.go:1624 registers `--pages-include-history` with default
             // TRUE, and main.go:3178-3190 writes `data/history.json` for the
             // time-travel scrubber whenever it is on. Rust wrote only index.html,
@@ -2522,8 +2879,6 @@ th {{ background: #44475a; }}
                     }
                 }
             }
-            std::fs::write(format!("{out_dir}/index.html"), html)
-                .map_err(|e| format!("Error writing {out_dir}/index.html: {e}"))?;
             // Go main.go:3212 closes every doExport with a wall-clock completion
             // stamp, including the initial run — the watch banner follows it.
             println!("✓ Export complete [{}]", hhmmss_now());
@@ -4488,74 +4843,24 @@ fn load_robot_feedback() -> (
     (Some(fb), Some(w))
 }
 
-fn run_robot_triage() -> ExitCode {
-    let cwd = go_working_dir();
-    let as_of = extract_as_of();
-    // Use load_issues_auto_meta, not load_issues_auto: the latter discards the
-    // SourceMeta, and re-deriving it via source_meta_for() is what hard-codes
-    // errors/skipped to zero — making claim_safe unconditionally true.
-    let (loaded, _hash, as_of_commit, loaded_source) =
-        match load_issues_auto_meta_raw(&cwd, as_of.as_deref()) {
-            Ok(x) => x,
-            Err(e) => {
-                if is_unresolved_source_error(&e.to_string()) {
-                    return emit_unresolved_source();
-                }
-                eprintln!("Error: {e}");
-                return ExitCode::from(1);
-            }
-        };
-    // `--repo` then `--label` narrow the analysis at the same point Go does
-    // (scopeLoadedIssues, main.go:2786 / :4870-4902), while the envelope keeps
-    // describing the loaded file.
-    let (issues, hash_override) = apply_scope(&loaded);
-    let loaded_hash = hash_override.unwrap_or_else(|| _hash.clone());
-    // An empty set is NOT a reason to stop. A `--repo` that matches nothing, or
-    // a `--label` nothing carries, still has to produce the full envelope with
-    // every metric marked "skipped", the counts zeroed and the lists empty —
-    // that document is how a caller tells "nothing matched the filter" from
-    // "the command failed". bvr emitted a three-key stub instead, so an agent
-    // parsing it found no `triage.quick_ref` at all and had no way to tell the
-    // two apart. The analysis below is defined for an empty graph.
-    set_as_of(
-        as_of.clone().unwrap_or_default(),
-        as_of_commit.clone().unwrap_or_default(),
-    );
-    // Go keeps the loader's data_hash: scopeLoadedIssues sets
-    // DataHashMatchesIssues=false so the payload still names the file it came
-    // from (main.go:4890-4900).
-    let data_hash = loaded_hash;
-    let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    // Go passes the feedback-adjusted weights into `TriageOptions.Weights`
-    // (robot_registry.go:2208-2220), so they are installed before scoring
-    // rather than applied to the finished ranking.
-    let (feedback_data, feedback_weights) = load_robot_feedback();
-    let mut out = bv_analysis::triage::build_triage_with_weights(
-        &issues,
-        &g,
-        robot_now(),
-        as_of.is_some(),
-        feedback_weights,
-    );
-    // Go stamps every recommendation with `issue.Actions(claimable)`
-    // (triage.go:658). The tracker route needs the loaded source path, which
-    // only the CLI layer has, so it is resolved here rather than in the
-    // analysis layer.
-    // Describe the loaded file, not the scoped analysis set.
-    let source = loaded_source.clone();
-    for rec in out.recommendations.iter_mut() {
-        // Go attaches a tracker Origin to issues it loaded from the working
-        // tree; the time-travel loader does not, so a `--as-of` issue reaches
-        // `Issue.Actions` with a nil origin (types.go:165-167) and the payload
-        // carries only the unavailable reason. Resolving one anyway named a
-        // metadata-file failure that had not happened.
-        rec.actions = Some(
-            serde_json::to_value(actions_for_source(&source, &rec.id, rec.claimable))
-                .unwrap_or(serde_json::Value::Null),
-        );
-        restate_unblock_reason(&mut rec.reasons, &rec.unblocks_ids);
-    }
-
+/// The four derived triage views that Go's `ComputeTriageFromAnalyzer`
+/// assembles (`pkg/analysis/triage.go:661-679`).
+///
+/// Split out of `run_robot_triage` because the exported bundle's `README.md`
+/// reads the same four: Go's `generateREADME` (`cmd/bv/main.go:5527`) is handed
+/// the same `*TriageResult` that `--robot-triage` prints, so re-deriving them
+/// for the second caller would be a second implementation of the same ranking
+/// rather than a second rendering of it. `out` must already have had
+/// `restate_unblock_reason` applied, because `top_picks` renders `reasons`.
+///
+/// The `json!` shapes here are the robot payload and are load-bearing — key
+/// order, and the conditional `unblocks_ids`/`blocked_by` keys, are part of the
+/// differential gate. Moving this code must not change any of it.
+fn triage_views(
+    out: &bv_analysis::triage::TriageOutput,
+    issues: &[bv_core::model::Issue],
+    edge_count: usize,
+) -> serde_json::Value {
     // Build top_picks: Go `buildTopPicks` — only claimable recommendations
     // (open, not epic, unassigned, no open blockers, not a parent with open
     // children). Use original issue data for assignee/blocker checks.
@@ -4702,15 +5007,22 @@ fn run_robot_triage() -> ExitCode {
                 .find(|r| r.id == id)
                 .map(|r| !r.blocked_by.is_empty())
                 .unwrap_or(true);
+            // Go `BlockerItem` (pkg/analysis/triage.go:164-171) declares
+            // id, title, unblocks_count, unblocks_ids, actionable, blocked_by —
+            // and `encoding/json` emits a struct in declaration order. The
+            // optional keys are appended in that same order here, because
+            // `serde_json`'s Map preserves insertion and this object's key
+            // order is a byte-level part of `--robot-triage`, `triage.json` and
+            // the README alike.
             let mut item = serde_json::json!({
                 "id": id,
                 "title": issue_index.get(id).map(|i| i.title.clone()).unwrap_or_default(),
                 "unblocks_count": unblocks_count,
-                "actionable": actionable,
             });
             if !unblocks_ids.is_empty() {
                 item["unblocks_ids"] = serde_json::json!(unblocks_ids);
             }
+            item["actionable"] = serde_json::json!(actionable);
             if !actionable {
                 item["blocked_by"] =
                     serde_json::json!(bv_analysis::blocker_chain::open_blockers(&issue_index, id));
@@ -4721,7 +5033,7 @@ fn run_robot_triage() -> ExitCode {
 
     // Project health overview.
     let graph_density = if out.counts.total > 1 {
-        g.edge_count() as f64 / (out.counts.total as f64 * (out.counts.total as f64 - 1.0))
+        edge_count as f64 / (out.counts.total as f64 * (out.counts.total as f64 - 1.0))
     } else {
         0.0
     };
@@ -4740,13 +5052,105 @@ fn run_robot_triage() -> ExitCode {
         },
         "graph": {
             "node_count": out.counts.total,
-            "edge_count": g.edge_count(),
+            "edge_count": edge_count,
             "density": graph_density,
             "has_cycles": false,
             "phase2_ready": true,
         },
         "velocity": out.velocity,
     });
+    serde_json::json!({
+        "top_picks": top_picks,
+        "quick_wins": quick_wins,
+        "blockers_to_clear": blockers_to_clear,
+        "project_health": project_health,
+    })
+}
+
+fn run_robot_triage() -> ExitCode {
+    let cwd = go_working_dir();
+    let as_of = extract_as_of();
+    // Use load_issues_auto_meta, not load_issues_auto: the latter discards the
+    // SourceMeta, and re-deriving it via source_meta_for() is what hard-codes
+    // errors/skipped to zero — making claim_safe unconditionally true.
+    let (loaded, _hash, as_of_commit, loaded_source) =
+        match load_issues_auto_meta_raw(&cwd, as_of.as_deref()) {
+            Ok(x) => x,
+            Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source();
+                }
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
+            }
+        };
+    // `--repo` then `--label` narrow the analysis at the same point Go does
+    // (scopeLoadedIssues, main.go:2786 / :4870-4902), while the envelope keeps
+    // describing the loaded file.
+    let (issues, hash_override) = apply_scope(&loaded);
+    let loaded_hash = hash_override.unwrap_or_else(|| _hash.clone());
+    // An empty set is NOT a reason to stop. A `--repo` that matches nothing, or
+    // a `--label` nothing carries, still has to produce the full envelope with
+    // every metric marked "skipped", the counts zeroed and the lists empty —
+    // that document is how a caller tells "nothing matched the filter" from
+    // "the command failed". bvr emitted a three-key stub instead, so an agent
+    // parsing it found no `triage.quick_ref` at all and had no way to tell the
+    // two apart. The analysis below is defined for an empty graph.
+    set_as_of(
+        as_of.clone().unwrap_or_default(),
+        as_of_commit.clone().unwrap_or_default(),
+    );
+    // Go keeps the loader's data_hash: scopeLoadedIssues sets
+    // DataHashMatchesIssues=false so the payload still names the file it came
+    // from (main.go:4890-4900).
+    let data_hash = loaded_hash;
+    let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
+    // Go passes the feedback-adjusted weights into `TriageOptions.Weights`
+    // (robot_registry.go:2208-2220), so they are installed before scoring
+    // rather than applied to the finished ranking.
+    let (feedback_data, feedback_weights) = load_robot_feedback();
+    let mut out = bv_analysis::triage::build_triage_with_weights(
+        &issues,
+        &g,
+        robot_now(),
+        as_of.is_some(),
+        feedback_weights,
+    );
+    // Go stamps every recommendation with `issue.Actions(claimable)`
+    // (triage.go:658). The tracker route needs the loaded source path, which
+    // only the CLI layer has, so it is resolved here rather than in the
+    // analysis layer.
+    // Describe the loaded file, not the scoped analysis set.
+    let source = loaded_source.clone();
+    for rec in out.recommendations.iter_mut() {
+        // Go attaches a tracker Origin to issues it loaded from the working
+        // tree; the time-travel loader does not, so a `--as-of` issue reaches
+        // `Issue.Actions` with a nil origin (types.go:165-167) and the payload
+        // carries only the unavailable reason. Resolving one anyway named a
+        // metadata-file failure that had not happened.
+        rec.actions = Some(
+            serde_json::to_value(actions_for_source(&source, &rec.id, rec.claimable))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        restate_unblock_reason(&mut rec.reasons, &rec.unblocks_ids);
+    }
+
+    let views = triage_views(&out, &issues, g.edge_count());
+    // Unwrapped back to lists: the payload below inserts them as JSON arrays and
+    // emptiness-gates two of them, and `json!(vec)` is not the same value as
+    // `json!(array_value)` once it has been through `Value` twice.
+    let top_picks = views["top_picks"].as_array().cloned().unwrap_or_default();
+    let quick_wins = views["quick_wins"].as_array().cloned().unwrap_or_default();
+    let blockers_to_clear = views["blockers_to_clear"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let project_health = views["project_health"].clone();
+    // `triage_views` builds its own index for the ranking; the track/label
+    // groupings below need one keyed the same way, and rebuilding it is what
+    // they did before the split.
+    let issue_by_id: std::collections::HashMap<&str, &bv_core::model::Issue> =
+        issues.iter().map(|i| (i.id.as_str(), i)).collect();
 
     // Go `buildCommands` (pkg/analysis/triage.go:1243): helper commands come
     // from the live tracker route's `actions`. `show_top`/`claim_top` are the
@@ -4871,7 +5275,23 @@ fn run_robot_triage() -> ExitCode {
     };
     let mut meta = serde_json::json!({
         "version": bv_robot::ROBOT_CONTRACT_VERSION,
-        "generated_at": env.generated_at,
+        // Go stamps `TriageMeta.GeneratedAt` from the `now` passed into
+        // `ComputeTriageWithOptionsAndTime`, which is `time.Now().UTC()` with
+        // full nanosecond precision (triage.go:712). The envelope's
+        // `generated_at` is a separate field and does truncate — reusing
+        // `env.generated_at` for both made this one lose its sub-second part
+        // that Go carries.
+        // `time.Now().UTC()` — Go's TriageMeta stamp is UTC regardless of the
+        // machine zone, so the local-zone helper used by the export path would
+        // print `+07:00` where Go prints `Z`.
+        // A pinned clock must win here too: Go's `robotNow()` returns the
+        // epoch when SOURCE_DATE_EPOCH is set, so the reproducible run has to
+        // read the same instant or the golden cannot match.
+        "generated_at": if bv_analysis::analyzer::source_date_epoch_active() {
+            jiff_now()
+        } else {
+            jiff::Timestamp::now().to_string()
+        },
         "phase2_ready": true,
         "issue_count": out.counts.total,
         "compute_time_ms": 0,
@@ -5067,6 +5487,14 @@ fn run_robot_triage() -> ExitCode {
     // key the oracle never emits. The bindings are still read for that
     // builder via the `AS_OF` global set at load time.
     let _ = (&as_of, &as_of_commit);
+    // Key order follows Go's output struct, which declares Triage, Feedback,
+    // UsageHints in that order (robot_registry.go:2243-2248); encoding/json
+    // writes fields in declaration order. Assigning this after `usage_hints`
+    // emitted `triage, usage_hints, feedback` against the oracle's
+    // `triage, feedback, usage_hints`.
+    if let Some(fb) = feedback_data.as_ref().filter(|f| !f.events.is_empty()) {
+        payload["feedback"] = serde_json::to_value(fb.to_json()).unwrap_or(serde_json::Value::Null);
+    }
     payload["usage_hints"] = serde_json::json!([
         "jq '.triage.quick_ref.top_picks[:3]' - Top 3 picks for immediate work",
         "jq '.triage.recommendations[3:10] | map({id,title,score})' - Next candidates after top picks",
@@ -5091,9 +5519,6 @@ fn run_robot_triage() -> ExitCode {
     // is what a `nil` pointer plus `omitempty` produces. `loadRobotFeedback`
     // already returns `None` for the unreadable cases; this is the second
     // condition Go applies here.
-    if let Some(fb) = feedback_data.as_ref().filter(|f| !f.events.is_empty()) {
-        payload["feedback"] = serde_json::to_value(fb.to_json()).unwrap_or(serde_json::Value::Null);
-    }
     // `emit_json`, not `serde_json::to_string`: the Go encoder writes whole
     // float64 values without a trailing ".0", so an empty graph's density
     // renders as `0` and not `0.0`. Bypassing it made every zero in this
@@ -17238,6 +17663,35 @@ fn jiff_now() -> String {
     } else {
         s
     }
+}
+
+/// Go `time.Now().UTC()` rendered by `encoding/json`, i.e. RFC3339Nano in UTC.
+///
+/// `data/meta.json`'s `generated_at` is an `ExportMeta.GeneratedAt time.Time`,
+/// and `encoding/json` marshals a `time.Time` with `RFC3339Nano` — sub-second
+/// digits, trailing zeros trimmed, `Z` because the value was `.UTC()`-ed. It is
+/// NOT the envelope's second-precision stamp: `writeRobotJSON` keeps a payload's
+/// own `generated_at` (sqlite_export.go:652-660), and this payload has one.
+fn go_rfc3339_nano_utc() -> String {
+    robot_now().to_string()
+}
+
+/// The same rendering in the LOCAL zone, for `TriageMeta.GeneratedAt`.
+///
+/// Go fills it from `time.Now()` with no `.UTC()`, so the zone offset is
+/// whatever the exporter's clock is set to and the string carries `+07:00`
+/// rather than `Z` (pkg/analysis/triage.go:712). `jiff`'s `%.f` prints the
+/// smallest fraction it has, and `%:z` prints the numeric offset — Go's
+/// `RFC3339Nano` layout, minus Go's trailing-zero trim.
+fn go_rfc3339_nano_local() -> String {
+    // A pinned clock (Go main.go:1174-1181) resolves every timestamp in UTC, so
+    // a reproducible export must not pick up the machine's zone here either.
+    if bv_analysis::analyzer::source_date_epoch_active() {
+        return go_rfc3339_nano_utc();
+    }
+    jiff::Zoned::now()
+        .strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
+        .to_string()
 }
 
 /// Go `handleRobotImpact` — `--robot-impact <file1,file2,...>`.

@@ -23,7 +23,14 @@ pub enum FlagKind {
     Str,
     Int,
     Float,
-    RepeatableStr,
+    /// pflag's `float64` (vendor/.../float64.go:20). Distinct from `Float`
+    /// only in the string Go prints in `--generate-docs`; parsing is the same.
+    Float64,
+    /// Go's `percentOrFraction` (cmd/bv/flag_types.go:60).
+    PercentOrFraction,
+    /// pflag's `stringArray` (vendor/.../string_array.go) — repeatable, and
+    /// pflag renders its nil default as the literal `[]`.
+    StringArray,
 }
 
 const fn b(name: &'static str) -> FlagDef {
@@ -1152,28 +1159,6 @@ pub const HELP_FLAGS: &[HelpFlag] = &[
     },
 ];
 
-impl FlagDef {
-    /// The `--help` row for this flag, if Go advertises it.
-    pub fn help_row(&self) -> Option<&'static HelpFlag> {
-        HELP_FLAGS.iter().find(|h| h.name == self.name)
-    }
-
-    /// Single-letter alias, or `None` when the flag has no short form.
-    pub fn short(&self) -> Option<char> {
-        self.help_row().and_then(|h| h.short)
-    }
-
-    /// `--help` section header this flag is listed under.
-    pub fn section(&self) -> &'static str {
-        self.help_row().map(|h| h.section).unwrap_or("")
-    }
-
-    /// Description column text Go prints for this flag.
-    pub fn help(&self) -> &'static str {
-        self.help_row().map(|h| h.help).unwrap_or("")
-    }
-}
-
 /// Byte-for-byte port of pflag `wrapN` (vendor/github.com/spf13/pflag/flag.go:639).
 /// Byte-indexed like the original, which is why [`HELP_FLAGS`] is ASCII-only
 /// (enforced by `help_table_is_ascii`).
@@ -1245,9 +1230,8 @@ fn wrap(indent: usize, cols: usize, s: &str) -> String {
 /// not active) from `--diff-since HEAD~5`.
 pub fn flag_is_string(name: &str) -> bool {
     let target = name.trim_start_matches('-');
-    let is_str = |f: &&FlagDef| {
-        f.name == target && matches!(f.kind, FlagKind::Str | FlagKind::RepeatableStr)
-    };
+    let is_str =
+        |f: &&FlagDef| f.name == target && matches!(f.kind, FlagKind::Str | FlagKind::StringArray);
     ROBOT_PRIMARIES.iter().find(is_str).is_some() || MODIFIER_FLAGS.iter().find(is_str).is_some()
 }
 
@@ -2680,9 +2664,11 @@ mod tests {
                 rendered.contains(&row),
                 "flag {row} is registered but missing from `--help`"
             );
-            assert_eq!(
-                f.help_row().map(|h| h.name),
-                Some(f.name),
+            // Look the row up directly rather than through a `FlagDef`
+            // accessor: the test is about the two tables agreeing, and the
+            // accessor had no production caller.
+            assert!(
+                HELP_FLAGS.iter().any(|h| h.name == f.name),
                 "flag --{} has no HELP_FLAGS row",
                 f.name
             );
@@ -3451,3 +3437,772 @@ mod tests {
         assert_eq!(go_quote("naïve café"), "\"naïve café\"");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Go-side registries, used by --generate-docs.
+//
+// `FlagDef` above is the dispatch registry: it answers "is this flag
+// registered and what kind of value does it take", which is all the parser
+// and the validators need. `docgen` needs three more fields — the default
+// and the one-line usage string — so this table carries them. The values are
+// transcribed from cmd/bv/main.go's flag declarations, not hand-invented;
+// a flag missing here simply does not appear in the generated docs, which is
+// the same failure Go's own `fs.VisitAll` would produce for an unregistered
+// name.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct GoFlag {
+    pub name: &'static str,
+    pub kind: FlagKind,
+    /// Go's `DefValue`, as `pflag` would render it. Empty means the doc
+    /// generator writes `(empty)` — see `docgen::render_flags_table`.
+    pub default: &'static str,
+    pub description: &'static str,
+}
+pub const GO_FLAGS: &[GoFlag] = &[
+    GoFlag { name: "agent-brief", kind: FlagKind::Str, default: "", description: "Export agent brief bundle to directory (includes triage.json, insights.json, brief.md, helpers.md)" },
+    GoFlag { name: "agents", kind: FlagKind::Int, default: "1", description: "Number of parallel agents for capacity simulation" },
+    GoFlag { name: "agents-add", kind: FlagKind::Bool, default: "false", description: "Add beads workflow instructions to AGENTS.md (creates file if needed)" },
+    GoFlag { name: "agents-check", kind: FlagKind::Bool, default: "false", description: "Check AGENTS.md blurb status (default if no --agents-* action)" },
+    GoFlag { name: "agents-dry-run", kind: FlagKind::Bool, default: "false", description: "Show what would happen without executing (use with --agents-*)" },
+    GoFlag { name: "agents-force", kind: FlagKind::Bool, default: "false", description: "Skip confirmation prompts (use with --agents-*)" },
+    GoFlag { name: "agents-remove", kind: FlagKind::Bool, default: "false", description: "Remove beads workflow instructions from AGENTS.md" },
+    GoFlag { name: "agents-update", kind: FlagKind::Bool, default: "false", description: "Update beads workflow instructions to latest version" },
+    GoFlag { name: "alert-label", kind: FlagKind::Str, default: "", description: "Filter robot alerts by label match" },
+    GoFlag { name: "alert-type", kind: FlagKind::Str, default: "", description: "Filter robot alerts by alert type (e.g., stale_issue)" },
+    GoFlag { name: "as-of", kind: FlagKind::Str, default: "", description: "View state at point in time (commit SHA, branch, tag, or date)" },
+    GoFlag { name: "attention-limit", kind: FlagKind::Int, default: "5", description: "Limit number of labels in --robot-label-attention output" },
+    GoFlag { name: "background-mode", kind: FlagKind::Bool, default: "false", description: "Enable experimental background snapshot loading (TUI only)" },
+    GoFlag { name: "baseline-info", kind: FlagKind::Bool, default: "false", description: "Show information about the current baseline" },
+    GoFlag { name: "bead-history", kind: FlagKind::Str, default: "", description: "Show history for specific bead ID" },
+    GoFlag { name: "brief", kind: FlagKind::Bool, default: "false", description: "Compact --robot-triage output: only decision-relevant fields (id, title, status, assignee, blockers, unblocks) (#183)" },
+    GoFlag { name: "capacity-label", kind: FlagKind::Str, default: "", description: "Filter capacity simulation by label" },
+    GoFlag { name: "check-drift", kind: FlagKind::Bool, default: "false", description: "Check for drift from baseline (exit codes: 0=OK, 1=critical, 2=warning)" },
+    GoFlag { name: "check-update", kind: FlagKind::Bool, default: "false", description: "Check if a new version is available" },
+    GoFlag { name: "correlation-by", kind: FlagKind::Str, default: "", description: "Agent/user identifier for correlation feedback" },
+    GoFlag { name: "correlation-reason", kind: FlagKind::Str, default: "", description: "Reason for correlation feedback" },
+    GoFlag { name: "cpu-profile", kind: FlagKind::Str, default: "", description: "Write CPU profile to file" },
+    GoFlag { name: "db", kind: FlagKind::Str, default: "", description: "Path to beads database file or .beads directory (overrides BEADS_DB and BEADS_DIR env vars)" },
+    GoFlag { name: "debug-height", kind: FlagKind::Int, default: "50", description: "Height for debug render" },
+    GoFlag { name: "debug-render", kind: FlagKind::Str, default: "", description: "Render a view and output to file (views: insights, board)" },
+    GoFlag { name: "debug-width", kind: FlagKind::Int, default: "180", description: "Width for debug render" },
+    GoFlag { name: "diff-since", kind: FlagKind::Str, default: "", description: "Show changes since historical point (commit SHA, branch, tag, or date)" },
+    GoFlag { name: "emit-script", kind: FlagKind::Bool, default: "false", description: "Emit shell script for top-N recommendations (agent workflows)" },
+    GoFlag { name: "export", kind: FlagKind::Str, default: "", description: "Export a report using recipe defaults or explicit export options" },
+    GoFlag { name: "export-format", kind: FlagKind::Str, default: "", description: "Report format: markdown, json, csv or mermaid" },
+    GoFlag { name: "export-graph", kind: FlagKind::Str, default: "", description: "Export graph: .html for interactive, .png/.svg for static (auto-names if empty)" },
+    GoFlag { name: "export-include-graph", kind: FlagKind::Bool, default: "true", description: "Include dependency context in the report (explicit false overrides recipe)" },
+    GoFlag { name: "export-md", kind: FlagKind::Str, default: "", description: "Export issues to a Markdown file (e.g., report.md)" },
+    GoFlag { name: "export-pages", kind: FlagKind::Str, default: "", description: "Export static site to directory (e.g., ./bv-pages)" },
+    GoFlag { name: "export-template", kind: FlagKind::Str, default: "", description: "Markdown template path; explicit empty disables a recipe template" },
+    GoFlag { name: "feedback-accept", kind: FlagKind::Str, default: "", description: "Record accept feedback for issue ID (tunes recommendation weights)" },
+    GoFlag { name: "feedback-ignore", kind: FlagKind::Str, default: "", description: "Record ignore feedback for issue ID (tunes recommendation weights)" },
+    GoFlag { name: "feedback-reset", kind: FlagKind::Bool, default: "false", description: "Reset all feedback data to defaults" },
+    GoFlag { name: "feedback-show", kind: FlagKind::Bool, default: "false", description: "Show current feedback status and weight adjustments" },
+    GoFlag { name: "file-beads-limit", kind: FlagKind::Int, default: "20", description: "Max closed beads to show (use with --robot-file-beads)" },
+    GoFlag { name: "force-full-analysis", kind: FlagKind::Bool, default: "false", description: "Compute all metrics regardless of graph size (may be slow for large graphs)" },
+    GoFlag { name: "forecast-agents", kind: FlagKind::Int, default: "1", description: "Number of parallel agents for capacity calculation" },
+    GoFlag { name: "forecast-label", kind: FlagKind::Str, default: "", description: "Filter forecast by label" },
+    GoFlag { name: "forecast-sprint", kind: FlagKind::Str, default: "", description: "Filter forecast by sprint ID" },
+    GoFlag { name: "format", kind: FlagKind::Str, default: "", description: "Structured output format for --robot-* commands: json or toon (env: BV_OUTPUT_FORMAT, TOON_DEFAULT_FORMAT)" },
+    GoFlag { name: "generate-docs", kind: FlagKind::Bool, default: "false", description: "Generate documentation markdown and JSON artifacts" },
+    GoFlag { name: "graph-depth", kind: FlagKind::Int, default: "0", description: "Max depth for subgraph (0 = unlimited)" },
+    GoFlag { name: "graph-format", kind: FlagKind::Str, default: "json", description: "Graph output format: json, dot, mermaid" },
+    GoFlag { name: "graph-preset", kind: FlagKind::Str, default: "compact", description: "Graph layout preset: compact (default) or roomy" },
+    GoFlag { name: "graph-root", kind: FlagKind::Str, default: "", description: "Subgraph from specific root issue ID" },
+    GoFlag { name: "graph-title", kind: FlagKind::Str, default: "", description: "Title for graph export (default: project name)" },
+    GoFlag { name: "history-limit", kind: FlagKind::Int, default: "500", description: "Max commits to analyze (0 = unlimited)" },
+    GoFlag { name: "history-since", kind: FlagKind::Str, default: "", description: "Limit history to commits after this date/ref (e.g., '30 days ago', '2024-01-01')" },
+    GoFlag { name: "hotspots-limit", kind: FlagKind::Int, default: "10", description: "Max hotspots to show (use with --robot-file-hotspots)" },
+    GoFlag { name: "id-pattern", kind: FlagKind::StringArray, default: "[]", description: "Custom bead ID regex for commit-message matching, e.g. 'bh-[a-z0-9]{5}' (repeatable; capture group 1 is the ID, else the whole match) (#188)" },
+    GoFlag { name: "label", kind: FlagKind::Str, default: "", description: "Scope analysis to label's subgraph (applies to every --robot-* command that loads issues, e.g. --robot-insights, --robot-plan, --robot-priority, --robot-orphans)" },
+    GoFlag { name: "min-confidence", kind: FlagKind::Float64, default: "0", description: "Filter correlations by minimum confidence (0.0-1.0)" },
+    GoFlag { name: "network-depth", kind: FlagKind::Int, default: "2", description: "Depth of subnetwork when querying specific bead (1-3)" },
+    GoFlag { name: "no-background-mode", kind: FlagKind::Bool, default: "false", description: "Disable experimental background snapshot loading (TUI only)" },
+    GoFlag { name: "no-cache", kind: FlagKind::Bool, default: "false", description: "Bypass disk cache for robot triage (also: BV_NO_CACHE=1)" },
+    GoFlag { name: "no-hooks", kind: FlagKind::Bool, default: "false", description: "Skip running hooks during export" },
+    GoFlag { name: "no-live-reload", kind: FlagKind::Bool, default: "false", description: "Disable live-reload in preview mode" },
+    GoFlag { name: "orphans-min-score", kind: FlagKind::Int, default: "30", description: "Minimum suspicion score for orphan candidates (0-100)" },
+    GoFlag { name: "pages", kind: FlagKind::Bool, default: "false", description: "Launch interactive Pages deployment wizard" },
+    GoFlag { name: "pages-include-closed", kind: FlagKind::Bool, default: "true", description: "Include closed issues in export (default: true)" },
+    GoFlag { name: "pages-include-history", kind: FlagKind::Bool, default: "true", description: "Include git history for time-travel (default: true)" },
+    GoFlag { name: "pages-title", kind: FlagKind::Str, default: "", description: "Custom title for static site" },
+    GoFlag { name: "preview-pages", kind: FlagKind::Str, default: "", description: "Preview existing static site bundle" },
+    GoFlag { name: "priority-brief", kind: FlagKind::Str, default: "", description: "Export priority brief to Markdown file (e.g., brief.md)" },
+    GoFlag { name: "profile-json", kind: FlagKind::Bool, default: "false", description: "Output profile in JSON format (use with --profile-startup)" },
+    GoFlag { name: "profile-startup", kind: FlagKind::Bool, default: "false", description: "Output detailed startup timing profile for diagnostics" },
+    GoFlag { name: "recipe", kind: FlagKind::Str, default: "", description: "Apply a recipe by name (e.g., triage, actionable, high-impact) or by .yaml/.yml file path (e.g., .beads/recipes/sprint.yaml)" },
+    GoFlag { name: "related-include-closed", kind: FlagKind::Bool, default: "false", description: "Include closed beads in related work results" },
+    GoFlag { name: "related-min-relevance", kind: FlagKind::PercentOrFraction, default: "20", description: "Minimum relevance score for related work (int 0-100 percent OR float 0.0-1.0 fraction)" },
+    GoFlag { name: "related-max-results", kind: FlagKind::Int, default: "10", description: "Max results per category for related work" },
+    GoFlag { name: "relations-limit", kind: FlagKind::Int, default: "10", description: "Max related files to show" },
+    GoFlag { name: "relations-threshold", kind: FlagKind::Float64, default: "0.5", description: "Minimum correlation threshold (0.0-1.0) for related files" },
+    GoFlag { name: "repo", kind: FlagKind::Str, default: "", description: "Filter issues by repository prefix (e.g., 'api-' or 'api')" },
+    GoFlag { name: "robot-alerts", kind: FlagKind::Bool, default: "false", description: "Output alerts (drift + proactive) as JSON for AI agents" },
+    GoFlag { name: "robot-blocker-chain", kind: FlagKind::Str, default: "", description: "Output full blocker chain analysis for issue ID as JSON" },
+    GoFlag { name: "robot-burndown", kind: FlagKind::Str, default: "", description: "Output burndown data for sprint ID, or 'current' for active sprint" },
+    GoFlag { name: "robot-by-assignee", kind: FlagKind::Str, default: "", description: "Filter robot outputs by assignee (exact match)" },
+    GoFlag { name: "robot-by-label", kind: FlagKind::Str, default: "", description: "Filter robot outputs by label (exact match)" },
+    GoFlag { name: "robot-capabilities", kind: FlagKind::Bool, default: "false", description: "Output machine-readable command capabilities for AI agents" },
+    GoFlag { name: "robot-capacity", kind: FlagKind::Bool, default: "false", description: "Output capacity simulation and completion projection as JSON" },
+    GoFlag { name: "robot-causality", kind: FlagKind::Str, default: "", description: "Output causal chain analysis for bead ID as JSON" },
+    GoFlag { name: "robot-confirm-correlation", kind: FlagKind::Str, default: "", description: "Confirm a correlation is correct (format: SHA:beadID)" },
+    GoFlag { name: "robot-correlation-stats", kind: FlagKind::Bool, default: "false", description: "Output correlation feedback statistics as JSON" },
+    GoFlag { name: "robot-diff", kind: FlagKind::Bool, default: "false", description: "Output diff as JSON (use with --diff-since)" },
+    GoFlag { name: "robot-docs", kind: FlagKind::Str, default: "", description: "Machine-readable JSON docs for AI agents. Topics: guide, commands, examples, env, exit-codes, all" },
+    GoFlag { name: "robot-drift", kind: FlagKind::Bool, default: "false", description: "Output drift check as JSON (use with --check-drift)" },
+    GoFlag { name: "robot-explain-correlation", kind: FlagKind::Str, default: "", description: "Explain why a commit is linked to a bead (format: SHA:beadID)" },
+    GoFlag { name: "robot-file-beads", kind: FlagKind::Str, default: "", description: "Output beads that touched a file path as JSON" },
+    GoFlag { name: "robot-file-hotspots", kind: FlagKind::Bool, default: "false", description: "Output files touched by most beads as JSON" },
+    GoFlag { name: "robot-file-relations", kind: FlagKind::Str, default: "", description: "Output files that frequently co-change with the given file path" },
+    GoFlag { name: "robot-forecast", kind: FlagKind::Str, default: "", description: "Output ETA forecast for bead ID, or 'all' for all open issues" },
+    GoFlag { name: "robot-graph", kind: FlagKind::Bool, default: "false", description: "Output dependency graph as JSON/DOT/Mermaid for AI agents" },
+    GoFlag { name: "robot-help", kind: FlagKind::Bool, default: "false", description: "Show AI agent help" },
+    GoFlag { name: "robot-history", kind: FlagKind::Bool, default: "false", description: "Output bead-to-commit correlations as JSON" },
+    GoFlag { name: "robot-history-timeout-ms", kind: FlagKind::Int, default: "-1", description: "Budget in ms for the git-history prologue of robot triage (0 = unbounded; default 10000, env BV_ROBOT_HISTORY_TIMEOUT_MS)" },
+    GoFlag { name: "robot-impact", kind: FlagKind::Str, default: "", description: "Analyze impact of modifying files (comma-separated paths)" },
+    GoFlag { name: "robot-impact-network", kind: FlagKind::Str, default: "", description: "Output bead impact network as JSON (empty for full, or bead ID for subnetwork)" },
+    GoFlag { name: "robot-insights", kind: FlagKind::Bool, default: "false", description: "Output graph analysis and insights as JSON for AI agents" },
+    GoFlag { name: "robot-label-attention", kind: FlagKind::Bool, default: "false", description: "Output attention-ranked labels as JSON for AI agents" },
+    GoFlag { name: "robot-label-flow", kind: FlagKind::Bool, default: "false", description: "Output cross-label dependency flow as JSON for AI agents" },
+    GoFlag { name: "robot-label-health", kind: FlagKind::Bool, default: "false", description: "Output label health metrics as JSON for AI agents" },
+    GoFlag { name: "robot-max-results", kind: FlagKind::Int, default: "0", description: "Limit robot output count (0 = use defaults)" },
+    GoFlag { name: "robot-metrics", kind: FlagKind::Bool, default: "false", description: "Output performance metrics (timing, cache, memory) as JSON" },
+    GoFlag { name: "robot-min-confidence", kind: FlagKind::Float64, default: "0", description: "Filter robot outputs by minimum confidence (0.0-1.0)" },
+    GoFlag { name: "robot-next", kind: FlagKind::Bool, default: "false", description: "Output only the top pick recommendation as JSON (minimal triage)" },
+    GoFlag { name: "robot-not-ready-labels", kind: FlagKind::Str, default: "", description: "Comma-separated labels marking a bead not-ready: excluded from claimable --robot-next/--robot-triage top picks (env: BV_ROBOT_NOT_READY_LABELS; #173)" },
+    GoFlag { name: "robot-orphans", kind: FlagKind::Bool, default: "false", description: "Output orphan commit candidates (commits that should be linked but aren't) as JSON" },
+    GoFlag { name: "robot-plan", kind: FlagKind::Bool, default: "false", description: "Output dependency-respecting execution plan as JSON for AI agents" },
+    GoFlag { name: "robot-priority", kind: FlagKind::Bool, default: "false", description: "Output priority recommendations as JSON for AI agents" },
+    GoFlag { name: "robot-recipes", kind: FlagKind::Bool, default: "false", description: "Output available recipes as JSON for AI agents" },
+    GoFlag { name: "robot-reject-correlation", kind: FlagKind::Str, default: "", description: "Reject an incorrect correlation (format: SHA:beadID)" },
+    GoFlag { name: "robot-related", kind: FlagKind::Str, default: "", description: "Output beads related to a specific bead ID as JSON" },
+    GoFlag { name: "robot-schema", kind: FlagKind::Bool, default: "false", description: "Output JSON Schema definitions for all robot commands" },
+    GoFlag { name: "robot-search", kind: FlagKind::Bool, default: "false", description: "Output keyword or hybrid search results as JSON for AI agents (use with --search)" },
+    GoFlag { name: "robot-sprint-list", kind: FlagKind::Bool, default: "false", description: "Output sprints as JSON" },
+    GoFlag { name: "robot-sprint-show", kind: FlagKind::Str, default: "", description: "Output specific sprint details as JSON" },
+    GoFlag { name: "robot-suggest", kind: FlagKind::Bool, default: "false", description: "Output smart suggestions (duplicates, dependencies, labels, cycles) as JSON" },
+    GoFlag { name: "robot-triage", kind: FlagKind::Bool, default: "false", description: "Output unified triage as JSON (the mega-command for AI agents)" },
+    GoFlag { name: "robot-triage-by-label", kind: FlagKind::Bool, default: "false", description: "Group triage recommendations by label (bv-87)" },
+    GoFlag { name: "robot-triage-by-track", kind: FlagKind::Bool, default: "false", description: "Group triage recommendations by execution track (bv-87)" },
+    GoFlag { name: "rollback", kind: FlagKind::Bool, default: "false", description: "Rollback to the previous version (from backup)" },
+    GoFlag { name: "save-baseline", kind: FlagKind::Str, default: "", description: "Save current metrics as baseline with optional description" },
+    GoFlag { name: "schema-command", kind: FlagKind::Str, default: "", description: "Output schema for specific command only (e.g., robot-triage)" },
+    GoFlag { name: "script-format", kind: FlagKind::Str, default: "bash", description: "Script format: bash, fish, or zsh (use with --emit-script)" },
+    GoFlag { name: "script-limit", kind: FlagKind::Int, default: "5", description: "Limit number of items in emitted script (use with --emit-script)" },
+    GoFlag { name: "search", kind: FlagKind::Str, default: "", description: "Hashed keyword search query (builds/updates index on first run)" },
+    GoFlag { name: "search-limit", kind: FlagKind::Int, default: "10", description: "Max results for --search/--robot-search" },
+    GoFlag { name: "search-min-score", kind: FlagKind::Str, default: "", description: "Minimum text similarity before hybrid ranking (-1..1); exact IDs also obey this threshold" },
+    GoFlag { name: "search-mode", kind: FlagKind::Str, default: "", description: "Search ranking mode: text or hybrid (default: BV_SEARCH_MODE or text)" },
+    GoFlag { name: "search-preset", kind: FlagKind::Str, default: "", description: "Hybrid preset name (default: BV_SEARCH_PRESET or default)" },
+    GoFlag { name: "search-weights", kind: FlagKind::Str, default: "", description: "Hybrid weights JSON (overrides preset; keys: text,pagerank,status,impact,priority,recency)" },
+    GoFlag { name: "severity", kind: FlagKind::Str, default: "", description: "Filter robot alerts by severity (info|warning|critical)" },
+    GoFlag { name: "stats", kind: FlagKind::Bool, default: "false", description: "Show JSON vs TOON token estimates on stderr (env: TOON_STATS=1)" },
+    GoFlag { name: "suggest-bead", kind: FlagKind::Str, default: "", description: "Filter suggestions for specific bead ID" },
+    GoFlag { name: "suggest-confidence", kind: FlagKind::Float64, default: "0", description: "Minimum confidence for suggestions (0.0-1.0)" },
+    GoFlag { name: "suggest-type", kind: FlagKind::Str, default: "", description: "Filter suggestions by type: duplicate, dependency, label, cycle" },
+    GoFlag { name: "theme", kind: FlagKind::Str, default: "", description: "Color theme: light, dark, or auto (default: detect terminal background)" },
+    GoFlag { name: "update", kind: FlagKind::Bool, default: "false", description: "Update bv to the latest version" },
+    GoFlag { name: "update-dry-run", kind: FlagKind::Bool, default: "false", description: "Show what an update would do without installing (use via 'bv upgrade --dry-run')" },
+    GoFlag { name: "version", kind: FlagKind::Bool, default: "false", description: "Show version" },
+    GoFlag { name: "watch-export", kind: FlagKind::Bool, default: "false", description: "Watch for beads changes and auto-regenerate export (use with --export-pages)" },
+    GoFlag { name: "workspace", kind: FlagKind::Str, default: "", description: "Load issues from workspace config file (.bv/workspace.yaml)" },
+    GoFlag { name: "yes", kind: FlagKind::Bool, default: "false", description: "Skip confirmation prompts (use with --update)" },
+];
+pub const ENV_VARS: &[EnvVar] = &[
+    EnvVar { name: "BEADS_DB", description: "Path to a beads database file or `.beads` directory. Overrides `BEADS_DIR`; overridden by `--db`.", default: "(unset)" },
+    EnvVar { name: "BEADS_DIR", description: "Custom beads directory path. When set, overrides the default `.beads` directory lookup.", default: "`.beads` in cwd" },
+    EnvVar { name: "BV_BACKGROUND_MODE", description: "Startup default for the background snapshot worker (`1` on, `0` off). At runtime the TUI promotes itself to the worker after any synchronous reload that takes 1 s or longer; `0` pins synchronous reload and disables that promotion.", default: "sync at startup, auto-promote after a slow reload" },
+    EnvVar { name: "BV_BUILD_HYBRID_WASM", description: "Set to `1` to build the hybrid search WASM scorer during `--export-pages` (requires wasm-pack).", default: "(skip)" },
+    EnvVar { name: "BV_CACHE_DIR", description: "Base directory for the disk caches (`analysis_cache/` and correlation caches live under it).", default: "`<user cache dir>/bv`" },
+    EnvVar { name: "BV_DEBOUNCE_MS", description: "Debounce window (milliseconds) for live reload events in background mode.", default: "`200`" },
+    EnvVar { name: "BV_DEBUG", description: "Any value: write `[BV_DEBUG]` diagnostics to stderr.", default: "(off)" },
+    EnvVar { name: "BV_FORCE_POLL", description: "Alias for `BV_FORCE_POLLING`.", default: "(auto)" },
+    EnvVar { name: "BV_FORCE_POLLING", description: "Force polling-based live reload (useful on NFS/SMB/SSHFS/FUSE or any setup where filesystem events are unreliable) (`1`/`0`).", default: "(auto)" },
+    EnvVar { name: "BV_FRESHNESS_STALE_S", description: "Snapshot staleness critical threshold (seconds).", default: "`120`" },
+    EnvVar { name: "BV_FRESHNESS_WARN_S", description: "Snapshot staleness warning threshold (seconds).", default: "`30`" },
+    EnvVar { name: "BV_HEARTBEAT_INTERVAL_S", description: "Background worker heartbeat interval (seconds).", default: "`5`" },
+    EnvVar { name: "BV_INSIGHTS_MAP_LIMIT", description: "Positive entry limit for each `--robot-insights` metric map; zero or invalid values use the default.", default: "`200`" },
+    EnvVar { name: "BV_MAX_LINE_SIZE_MB", description: "Max JSONL line size in MB (lines larger than this are skipped with a warning). Applies to the TUI, the background worker, and robot loads.", default: "`10`" },
+    EnvVar { name: "BV_METRICS", description: "Set to `0` to disable internal timing metrics collection (`--robot-metrics`).", default: "(enabled)" },
+    EnvVar { name: "BV_NO_BG_QUERY", description: "Any non-empty value skips bv's Windows Terminal background-color query; the existing terminal-color fallback remains in use. No effect on other platforms.", default: "(unset)" },
+    EnvVar { name: "BV_NO_BROWSER", description: "Any value: never open a browser after exports or deployments.", default: "(unset)" },
+    EnvVar { name: "BV_NO_CACHE", description: "Set to `1` to bypass the robot analysis and correlation disk caches (`--no-cache` sets it).", default: "(cache on)" },
+    EnvVar { name: "BV_NO_GITIGNORE", description: "Disable automatic ignore-file management for `.bv/` entirely (any non-empty value). See [Automatic `.bv/` ignore handling](#automatic-bv-ignore-handling).", default: "(enabled)" },
+    EnvVar { name: "BV_NO_SAVED_CONFIG", description: "Any value: the `--pages` wizard ignores the saved deployment configuration.", default: "(unset)" },
+    EnvVar { name: "BV_NO_UPDATE_CHECK", description: "Set to `1` to skip the TUI's startup release check (`updates: {check: false}` in `~/.config/bv/config.yaml` does the same); explicit `--check-update` / `--update` still work.", default: "(check on)" },
+    EnvVar { name: "BV_OUTPUT_FORMAT", description: "Default robot output format: `json` or `toon` (overridden by `--format`).", default: "`json`" },
+    EnvVar { name: "BV_PHASE2_TIMEOUT_S", description: "Override per-metric Phase 2 timeouts (seconds).", default: "(size-based)" },
+    EnvVar { name: "BV_PRETTY_JSON", description: "Set to `1` for indented JSON output.", default: "(compact)" },
+    EnvVar { name: "BV_ROBOT", description: "Set to `1` to force robot mode (clean stdout, JSON logs, disk cache on). Every `--robot-*` flag sets it.", default: "(unset)" },
+    EnvVar { name: "BV_ROBOT_HISTORY_TIMEOUT_MS", description: "Bound on the git-history prologue of `--robot-triage` in milliseconds; `0` = unbounded.", default: "`10000`" },
+    EnvVar { name: "BV_ROBOT_NOT_READY_LABELS", description: "Comma-separated labels marking a bead not-ready; excluded from claimable `--robot-next`/`--robot-triage` top picks (`--robot-not-ready-labels` overrides).", default: "(none)" },
+    EnvVar { name: "BV_SEARCH_MODE", description: "Default search mode: `text` or `hybrid` (`--search-mode` overrides).", default: "`text`" },
+    EnvVar { name: "BV_SEARCH_PRESET", description: "Default hybrid preset: `default`, `bug-hunting`, `sprint-planning`, `impact-first`, `text-only`; setting one implies hybrid mode.", default: "`default`" },
+    EnvVar { name: "BV_SEARCH_WEIGHTS", description: "JSON weight map for hybrid search; overrides the preset.", default: "(preset)" },
+    EnvVar { name: "BV_SEMANTIC_DIM", description: "Embedding dimension for the hashed search index.", default: "`384`" },
+    EnvVar { name: "BV_SEMANTIC_EMBEDDER", description: "Embedding provider for `bv --search` and TUI search. Only `hash` (FNV-1a keyword feature hashing) is implemented; `python-sentence-transformers` and `openai` are reserved names that fail with \"not implemented\".", default: "`hash`" },
+    EnvVar { name: "BV_SEMANTIC_MODEL", description: "Model name for a future non-hash provider; ignored by `hash`.", default: "(empty)" },
+    EnvVar { name: "BV_SKIP_PHASE2", description: "Skip Phase 2 graph metrics (centrality, cycles, critical path) (`1`/`0`).", default: "(disabled)" },
+    EnvVar { name: "BV_TEST_MODE", description: "Any value: test harness mode; suppresses browser opening, terminal capability queries, and the background worker's idle GC tuning.", default: "(unset)" },
+    EnvVar { name: "BV_THEME", description: "Pin the TUI palette: `light` or `dark` (overridden by `--theme`).", default: "(auto-detect)" },
+    EnvVar { name: "BV_TUI_AUTOCLOSE_MS", description: "Quit the TUI automatically after this many milliseconds (for automated tests).", default: "(unset)" },
+    EnvVar { name: "BV_UPDATE_USE_TOKEN", description: "Set to `1` to let the update check and `--update` send the ambient `GITHUB_TOKEN` / `GH_TOKEN` to api.github.com (`updates: {use_token: true}` in config.yaml does the same).", default: "(never sent)" },
+    EnvVar { name: "BV_WATCHDOG_INTERVAL_S", description: "Background worker watchdog interval (seconds).", default: "`10`" },
+    EnvVar { name: "BV_WORKER_LOG_LEVEL", description: "Log level for the background snapshot worker.", default: "(default)" },
+    EnvVar { name: "BV_WORKER_METRICS", description: "Truthy value: the background worker records its own metrics.", default: "(off)" },
+    EnvVar { name: "BV_WORKER_TRACE", description: "Path to a trace file the background worker appends to.", default: "(off)" },
+];
+// env vars: 42
+
+#[derive(Debug, Clone, Copy)]
+pub struct EnvVar {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub default: &'static str,
+}
+
+/// Every flag, in one list, for the doc generator. Go's `fs.VisitAll` walks
+/// the live `pflag.FlagSet`; this is the transcribed equivalent.
+pub fn all_flags() -> impl Iterator<Item = &'static GoFlag> {
+    GO_FLAGS.iter()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Recipe {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// Go `pkg/recipe/defaults/recipes.yaml`, in the declaration order
+/// `docgen.RenderRecipesTable` iterates.
+pub const RECIPES: &[Recipe] = &[
+    Recipe {
+        name: "default",
+        description: "Default view showing all open issues sorted by priority",
+    },
+    Recipe {
+        name: "actionable",
+        description: "Issues ready to work on (no open blockers)",
+    },
+    Recipe {
+        name: "recent",
+        description: "Issues updated in the last 7 days",
+    },
+    Recipe {
+        name: "blocked",
+        description: "Issues waiting on dependencies",
+    },
+    Recipe {
+        name: "high-impact",
+        description: "Issues with highest blocking impact (PageRank)",
+    },
+    Recipe {
+        name: "stale",
+        description: "Open issues not updated in 30+ days",
+    },
+    Recipe {
+        name: "triage",
+        description: "Issues sorted by computed triage score (high impact + unblocking potential)",
+    },
+    Recipe {
+        name: "closed",
+        description: "Recently closed issues",
+    },
+    Recipe {
+        name: "release-cut",
+        description: "Recently closed items for changelog generation",
+    },
+    Recipe {
+        name: "quick-wins",
+        description: "Easy items with no blockers - good for quick progress",
+    },
+    Recipe {
+        name: "bottlenecks",
+        description: "High betweenness nodes - potential project bottlenecks",
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+pub struct SearchPreset {
+    pub name: &'static str,
+    pub text: f64,
+    pub pagerank: f64,
+    pub status: f64,
+    pub impact: f64,
+    pub priority: f64,
+    pub recency: f64,
+    pub description: &'static str,
+}
+
+/// Go `pkg/search/presets.go` — the `presets` map, in `ListPresets` order,
+/// with the descriptions `docgen.RenderPresetsTable` attaches.
+pub const SEARCH_PRESETS: &[SearchPreset] = &[
+    SearchPreset {
+        name: "default",
+        text: 0.40,
+        pagerank: 0.20,
+        status: 0.15,
+        impact: 0.10,
+        priority: 0.10,
+        recency: 0.05,
+        description: "Balanced general-purpose search (text-led with graph context)",
+    },
+    SearchPreset {
+        name: "bug-hunting",
+        text: 0.30,
+        pagerank: 0.15,
+        status: 0.15,
+        impact: 0.15,
+        priority: 0.20,
+        recency: 0.05,
+        description: "Prioritizes open issues with high impact and recency",
+    },
+    SearchPreset {
+        name: "sprint-planning",
+        text: 0.30,
+        pagerank: 0.20,
+        status: 0.25,
+        impact: 0.15,
+        priority: 0.05,
+        recency: 0.05,
+        description: "Heavily weights PageRank and blocker impact for sprint grooming",
+    },
+    SearchPreset {
+        name: "impact-first",
+        text: 0.25,
+        pagerank: 0.30,
+        status: 0.10,
+        impact: 0.20,
+        priority: 0.10,
+        recency: 0.05,
+        description: "Centrality-first: PageRank and graph impact dominate text matches",
+    },
+    SearchPreset {
+        name: "text-only",
+        text: 1.00,
+        pagerank: 0.00,
+        status: 0.00,
+        impact: 0.00,
+        priority: 0.00,
+        recency: 0.00,
+        description: "Hashed keyword similarity with zero graph metric weighting",
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+pub struct KeyBinding {
+    pub context: &'static str,
+    pub key: &'static str,
+    pub action: &'static str,
+}
+
+/// Go `ui.GetKeyBindingDocs()`. Go prints the context cell only on the first
+/// row of each run, so this list is already grouped in display order.
+pub fn key_bindings() -> &'static [KeyBinding] {
+    KEY_BINDINGS
+}
+
+pub const KEY_BINDINGS: &[KeyBinding] = &[
+    KeyBinding {
+        context: "all",
+        key: "j",
+        action: "Move down",
+    },
+    KeyBinding {
+        context: "all",
+        key: "k",
+        action: "Move up",
+    },
+    KeyBinding {
+        context: "all",
+        key: "G",
+        action: "Go to end",
+    },
+    KeyBinding {
+        context: "list",
+        key: "home",
+        action: "Go to start",
+    },
+    KeyBinding {
+        context: "board,tree",
+        key: "gg",
+        action: "Go to start",
+    },
+    KeyBinding {
+        context: "all",
+        key: "ctrl+d",
+        action: "Page down",
+    },
+    KeyBinding {
+        context: "all",
+        key: "ctrl+u",
+        action: "Page up",
+    },
+    KeyBinding {
+        context: "all",
+        key: "enter",
+        action: "Open details",
+    },
+    KeyBinding {
+        context: "all",
+        key: "esc",
+        action: "Back/close (list: clear filters)",
+    },
+    KeyBinding {
+        context: "all",
+        key: "q",
+        action: "Quit",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "a",
+        action: "Actionable view",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "b",
+        action: "Board view",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "g",
+        action: "Graph view",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "h",
+        action: "History view",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "i",
+        action: "Insights panel",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "E",
+        action: "Tree view (parent-child hierarchy)",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "f",
+        action: "Flow matrix (cross-label dependencies)",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "P",
+        action: "Sprint dashboard",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "[",
+        action: "Label dashboard",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "]",
+        action: "Attention view",
+    },
+    KeyBinding {
+        context: "list",
+        key: "!",
+        action: "Alerts panel",
+    },
+    KeyBinding {
+        context: "list",
+        key: "w",
+        action: "Repo picker (workspace mode)",
+    },
+    KeyBinding {
+        context: "all",
+        key: "?",
+        action: "Help overlay",
+    },
+    KeyBinding {
+        context: "all",
+        key: ";",
+        action: "Shortcuts sidebar",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "p",
+        action: "Priority hints",
+    },
+    KeyBinding {
+        context: "list",
+        key: "o",
+        action: "Open issues only",
+    },
+    KeyBinding {
+        context: "list",
+        key: "c",
+        action: "Closed issues only",
+    },
+    KeyBinding {
+        context: "list",
+        key: "r",
+        action: "Ready (unblocked)",
+    },
+    KeyBinding {
+        context: "list",
+        key: "l",
+        action: "Label picker",
+    },
+    KeyBinding {
+        context: "list",
+        key: "/",
+        action: "Search/filter",
+    },
+    KeyBinding {
+        context: "list",
+        key: "s",
+        action: "Cycle sort mode",
+    },
+    KeyBinding {
+        context: "list",
+        key: "S",
+        action: "Sort by triage score (triage recipe)",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "t",
+        action: "Time travel (custom revision)",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "T",
+        action: "Time travel (HEAD~5)",
+    },
+    KeyBinding {
+        context: "list",
+        key: "n",
+        action: "Next changed issue (time travel)",
+    },
+    KeyBinding {
+        context: "list",
+        key: "N",
+        action: "Previous changed issue (time travel)",
+    },
+    KeyBinding {
+        context: "list,detail",
+        key: "x",
+        action: "Export to markdown",
+    },
+    KeyBinding {
+        context: "all",
+        key: "y",
+        action: "Copy issue ID",
+    },
+    KeyBinding {
+        context: "detail",
+        key: "C",
+        action: "Copy full issue",
+    },
+    KeyBinding {
+        context: "detail",
+        key: "O",
+        action: "Open in $EDITOR",
+    },
+    KeyBinding {
+        context: "list",
+        key: "'",
+        action: "Recipe picker",
+    },
+    KeyBinding {
+        context: "all",
+        key: "U",
+        action: "Self-update check",
+    },
+    KeyBinding {
+        context: "list",
+        key: "V",
+        action: "Cass sessions",
+    },
+    KeyBinding {
+        context: "graph",
+        key: "hjkl",
+        action: "Navigate graph",
+    },
+    KeyBinding {
+        context: "graph",
+        key: "H",
+        action: "Scroll left",
+    },
+    KeyBinding {
+        context: "graph",
+        key: "L",
+        action: "Scroll right",
+    },
+    KeyBinding {
+        context: "graph",
+        key: "J/K",
+        action: "Scroll graph vertically",
+    },
+    KeyBinding {
+        context: "graph",
+        key: "space",
+        action: "Expand/collapse dependency paths",
+    },
+    KeyBinding {
+        context: "graph",
+        key: "PgUp",
+        action: "Previous 10 nodes",
+    },
+    KeyBinding {
+        context: "graph",
+        key: "PgDn",
+        action: "Next 10 nodes",
+    },
+    KeyBinding {
+        context: "board",
+        key: "h",
+        action: "Previous column",
+    },
+    KeyBinding {
+        context: "board",
+        key: "l",
+        action: "Next column",
+    },
+    KeyBinding {
+        context: "board",
+        key: "H",
+        action: "First column",
+    },
+    KeyBinding {
+        context: "board",
+        key: "L",
+        action: "Last column",
+    },
+    KeyBinding {
+        context: "board",
+        key: "s",
+        action: "Cycle swimlane mode",
+    },
+    KeyBinding {
+        context: "board",
+        key: "tab",
+        action: "Toggle detail",
+    },
+    KeyBinding {
+        context: "tree",
+        key: "E",
+        action: "Exit tree view",
+    },
+    KeyBinding {
+        context: "board",
+        key: "ctrl+j",
+        action: "Scroll detail down",
+    },
+    KeyBinding {
+        context: "board",
+        key: "ctrl+k",
+        action: "Scroll detail up",
+    },
+    KeyBinding {
+        context: "insights",
+        key: "h",
+        action: "Previous panel",
+    },
+    KeyBinding {
+        context: "insights",
+        key: "l",
+        action: "Next panel",
+    },
+    KeyBinding {
+        context: "insights",
+        key: "tab",
+        action: "Next panel",
+    },
+    KeyBinding {
+        context: "insights",
+        key: "shift+tab",
+        action: "Previous panel",
+    },
+    KeyBinding {
+        context: "insights",
+        key: "e",
+        action: "Toggle explanations",
+    },
+    KeyBinding {
+        context: "insights",
+        key: "x",
+        action: "Calculation proof",
+    },
+    KeyBinding {
+        context: "insights",
+        key: "m",
+        action: "Heatmap toggle",
+    },
+    KeyBinding {
+        context: "history",
+        key: "v",
+        action: "Toggle git/bead mode",
+    },
+    KeyBinding {
+        context: "history",
+        key: "tab",
+        action: "Toggle focus",
+    },
+    KeyBinding {
+        context: "history",
+        key: "t",
+        action: "Toggle timeline pane",
+    },
+    KeyBinding {
+        context: "history",
+        key: "f",
+        action: "Toggle file tree",
+    },
+    KeyBinding {
+        context: "history",
+        key: "J",
+        action: "Detail scroll down",
+    },
+    KeyBinding {
+        context: "history",
+        key: "K",
+        action: "Detail scroll up",
+    },
+    KeyBinding {
+        context: "history",
+        key: "o",
+        action: "Open in browser",
+    },
+    KeyBinding {
+        context: "attention",
+        key: "g",
+        action: "Go to top",
+    },
+    KeyBinding {
+        context: "attention",
+        key: "enter",
+        action: "Label drilldown",
+    },
+    KeyBinding {
+        context: "attention",
+        key: "1-9",
+        action: "Filter list by rank",
+    },
+    KeyBinding {
+        context: "attention",
+        key: "]",
+        action: "Close attention view",
+    },
+    KeyBinding {
+        context: "sprint",
+        key: "P",
+        action: "Close sprint dashboard",
+    },
+    KeyBinding {
+        context: "sprint",
+        key: "j",
+        action: "Next sprint",
+    },
+    KeyBinding {
+        context: "sprint",
+        key: "k",
+        action: "Previous sprint",
+    },
+];

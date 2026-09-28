@@ -11,8 +11,14 @@ bv-analysis = { path = "../bv-analysis" }
 bv-correlation = { path = "../bv-correlation" }
 png = "0.18"
 jiff = { workspace = true }
+# bundled: libsqlite3-sys 0.30.1 compiles SQLite with -DSQLITE_ENABLE_FTS5 and
+# -DSQLITE_ENABLE_STAT4, which the exported `issues_fts` table and the
+# `sqlite_stat4` table both need. Same version bv-core already pins, so the
+# workspace shares one build.
+rusqlite = { version = "0.32", features = ["bundled"] }
 tiny-http = { version = "0.12", package = "tiny_http" }
 thiserror = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde = { workspace = true }
 serde_yaml_ng = "0.10"
+sha2 = { workspace = true }

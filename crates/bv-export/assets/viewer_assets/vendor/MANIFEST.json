@@ -1,0 +1,162 @@
+{
+  "_comment": "Provenance of every vendored viewer asset. scripts/verify_vendor.sh and pkg/export/vendor_manifest_test.go recompute the sha256 of each file and fail on any mismatch or unlisted file. A version of \"unknown\" means the artifact carries no version marker; the hash still pins the exact bytes shipped. Update this file (hash, version, date, reviewed_by) whenever an asset is replaced.",
+  "reviewed_by": "library-updater 2026-09-12 (graph pair: locked dependency refresh and pinned source rebuild; other entries retain 2026-09-02 review)",
+  "date": "2026-09-12",
+  "graph_wasm": {
+    "source_sha256": "1fdf29973770716aa220520e3e4ecc275e324227ae2a482f91644ccbcbadccf7",
+    "cargo_lock_sha256": "dfe6b9df8c27da85d65a3bebd14931130e57c11653d1b39f0a507e0923df7cf7",
+    "pipeline": {
+      "bindgen_executable_sha256": "dc9e4f1e03996c26fb8bfedfded73d81120a37251c3f19eb87bb460f1f89a5be",
+      "bindgen_flags": "--target web --out-name bv_graph",
+      "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+      "cargo_flags": "--locked --offline --release --target wasm32-unknown-unknown -j 2",
+      "features": "default",
+      "optimizer_executable_sha256": "1014958e6f20d412f1542320b43970214b0fb1ed780595e8f7c0d8761ed53725",
+      "optimizer_flags": "-Os",
+      "path_remapping": true,
+      "rustc": "rustc 1.100.0-nightly (908501772 2026-08-30)\nbinary: rustc\ncommit-hash: 90850177249efe0321573c569aec5d12b257f8d6\ncommit-date: 2026-08-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+      "rustflags_transport": "CARGO_ENCODED_RUSTFLAGS",
+      "sysroot_remapping": "/rust-toolchain",
+      "target": "wasm32-unknown-unknown",
+      "wasm_bindgen": "0.2.128",
+      "wasm_opt": "132"
+    }
+  },
+  "files": [
+    {
+      "name": "alpine.min.js",
+      "upstream": "Alpine.js",
+      "version": "3.14.3",
+      "license": "MIT",
+      "sha256": "689f513978d11d69f4d33794f7296c9a586a2e55de79bb447cddbc3f474f9f07",
+      "source_url": "https://github.com/alpinejs/alpine (dist/cdn.min.js of the 3.14.3 release)",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "alpine-collapse.min.js",
+      "upstream": "@alpinejs/collapse",
+      "version": "unknown (no version marker in the minified file; shipped alongside Alpine 3.14.3)",
+      "license": "MIT",
+      "sha256": "c7661d4e2cf0465e3cd693190debb5f592ac72dcc4cfe650581273767558b27b",
+      "source_url": "https://github.com/alpinejs/alpine/tree/main/packages/collapse",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "bv_graph.js",
+      "upstream": "bv-graph-wasm (this repository)",
+      "version": "wasm-bindgen 0.2.128; paired with bv_graph_bg.wasm and graph_wasm provenance",
+      "license": "MIT (repository license)",
+      "sha256": "93de4c67d0c240662dec03efe48107aefef296e0379be55b3a0f494f94262aa5",
+      "source_url": "bv-graph-wasm/src",
+      "build_command": "scripts/build_graph_wasm.sh (pinned rustc, locked Cargo, wasm-bindgen 0.2.128, Binaryen 132 -Os); see graph_wasm and docs/PROVENANCE.md"
+    },
+    {
+      "name": "bv_graph_bg.wasm",
+      "upstream": "bv-graph-wasm (this repository)",
+      "version": "bv-graph-wasm 0.1.0; paired pinned source rebuild recorded in graph_wasm",
+      "license": "MIT (repository license)",
+      "sha256": "833799c32a00ba2ae16aa6caced25347c709b4b8be2ba9661074d8bd7468076e",
+      "source_url": "bv-graph-wasm/src",
+      "build_command": "scripts/build_graph_wasm.sh (pinned rustc, locked Cargo, wasm-bindgen 0.2.128, Binaryen 132 -Os); see graph_wasm and docs/PROVENANCE.md"
+    },
+    {
+      "name": "chart.umd.min.js",
+      "upstream": "Chart.js",
+      "version": "4.4.1",
+      "license": "MIT",
+      "sha256": "d2af8974e95271638772e9e9524db5b9a6f58d6ec2d5d781400447b4a31c681e",
+      "source_url": "https://github.com/chartjs/Chart.js/releases/tag/v4.4.1 (dist/chart.umd.js)",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "d3.v7.min.js",
+      "upstream": "D3",
+      "version": "7.9.0",
+      "license": "ISC",
+      "sha256": "f2094bbf6141b359722c4fe454eb6c4b0f0e42cc10cc7af921fc158fceb86539",
+      "source_url": "https://github.com/d3/d3/releases/tag/v7.9.0 (dist/d3.min.js)",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "dompurify.min.js",
+      "upstream": "DOMPurify",
+      "version": "3.0.6",
+      "license": "Apache-2.0 OR MPL-2.0",
+      "sha256": "ea4b09082ca4ba0ae71be6431a097678751d0453b9c52a4d2c7c39a2166ed9fc",
+      "source_url": "https://github.com/cure53/DOMPurify/blob/3.0.6/dist/purify.min.js",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "force-graph.min.js",
+      "upstream": "force-graph",
+      "version": "1.43.5",
+      "license": "MIT",
+      "sha256": "af9324ce63bb87f330643c04a9062ca17b3be32826234012197ced595eb0f83a",
+      "source_url": "https://github.com/vasturiano/force-graph (dist/force-graph.min.js of 1.43.5)",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "inter-variable.woff2",
+      "upstream": "Inter (variable font)",
+      "version": "unknown (no version table read; hash pins the bytes)",
+      "license": "OFL-1.1",
+      "sha256": "4bfb027b313b0487d4e2f1c3d2781d4011f8155b46744ad5799077dc103e8f0b",
+      "source_url": "https://github.com/rsms/inter",
+      "build_command": "none (published font file)"
+    },
+    {
+      "name": "jetbrains-mono-regular.woff2",
+      "upstream": "JetBrains Mono",
+      "version": "unknown (no version table read; hash pins the bytes)",
+      "license": "OFL-1.1",
+      "sha256": "f1a7a03672cdd494ce0d5543fac6e4360fe22403c6de297fdc2e55a815f7baff",
+      "source_url": "https://github.com/JetBrains/JetBrainsMono",
+      "build_command": "none (published font file)"
+    },
+    {
+      "name": "marked.min.js",
+      "upstream": "marked",
+      "version": "14.1.4",
+      "license": "MIT",
+      "sha256": "0a0fbf5ea62f007e7ede02d6f75b4eb142ee8acb310cd957ed566af3304c0bcc",
+      "source_url": "https://github.com/markedjs/marked/releases/tag/v14.1.4 (marked.min.js)",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "mermaid.min.js",
+      "upstream": "Mermaid",
+      "version": "unknown (bundle carries no mermaid version marker; it embeds DOMPurify 3.1.6 and elkjs 0.16.11, consistent with the mermaid 10.9.x line)",
+      "license": "MIT (bundled DOMPurify Apache-2.0 OR MPL-2.0)",
+      "sha256": "14ea436bbe9bd7a5d52a69bd7ae256c9eb1b25963c1f2f30b700a3a491a4fda9",
+      "source_url": "https://github.com/mermaid-js/mermaid (dist/mermaid.min.js)",
+      "build_command": "none (published minified build)"
+    },
+    {
+      "name": "sql-wasm.js",
+      "upstream": "sql.js",
+      "version": "unknown (loader carries no version marker; pairs with sql-wasm.wasm below)",
+      "license": "MIT",
+      "sha256": "558a72c3ab3415d0e6d243cfd23f9d61543600d59054b4b7b8da3cd65f6b9fd4",
+      "source_url": "https://github.com/sql-js/sql.js (dist/sql-wasm.js)",
+      "build_command": "none (published build)"
+    },
+    {
+      "name": "sql-wasm.wasm",
+      "upstream": "sql.js (SQLite compiled to WebAssembly)",
+      "version": "embeds SQLite 3.45.2 (string present in the binary); sql.js release unknown",
+      "license": "MIT (sql.js); SQLite is public domain",
+      "sha256": "d7e61b828523001f26ce0b3f88dabcf6c12e5e6edf80eb4f08b26ac7b946ff88",
+      "source_url": "https://github.com/sql-js/sql.js (dist/sql-wasm.wasm)",
+      "build_command": "none (published build)"
+    },
+    {
+      "name": "tailwindcss.js",
+      "upstream": "Tailwind CSS Play CDN",
+      "version": "3.x (bundle carries 'Tailwind CSS v3.0' banner and postcss 8.4.49; exact patch unknown)",
+      "license": "MIT",
+      "sha256": "176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15",
+      "source_url": "https://github.com/tailwindlabs/tailwindcss (Play CDN build)",
+      "build_command": "none (published build)"
+    }
+  ]
+}

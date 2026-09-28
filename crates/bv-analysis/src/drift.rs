@@ -229,6 +229,28 @@ pub struct DriftConfig {
     /// (pkg/drift/config.go:125); above it the checks are skipped and the
     /// reason is reported so silence is not mistaken for health.
     pub proactive_max_issues: usize,
+    // The thresholds below are the values Go declares in
+    // pkg/drift/config.go:415-450. Rust's DriftConfig did not carry them, so
+    // the checks that consume them (abandoned_claim, potential_duplicate,
+    // priority_mismatch, velocity_drop, scope_creep) had no configuration to
+    // read and --generate-docs rendered "not carried by Rust DriftConfig yet"
+    // where Go prints the number.
+    /// `scope_creep_pct` (config.go:427).
+    pub scope_creep_pct: f64,
+    /// `velocity_drop_pct` (config.go:430).
+    pub velocity_drop_pct: f64,
+    /// `velocity_window_days` (config.go:431).
+    pub velocity_window_days: i64,
+    /// `velocity_min_baseline` (config.go:432).
+    pub velocity_min_baseline: i64,
+    /// `abandoned_claim_multiplier` (config.go:439).
+    pub abandoned_claim_multiplier: f64,
+    /// `duplicate_jaccard_threshold` (config.go:442).
+    pub duplicate_jaccard_threshold: f64,
+    /// `duplicate_max_alerts` (config.go:443).
+    pub duplicate_max_alerts: usize,
+    /// `priority_mismatch_min_confidence` (config.go:446).
+    pub priority_mismatch_min_confidence: f64,
     /// Alert types that are disabled and should not generate alerts (bv-167).
     pub disabled_alerts: Vec<String>,
     /// Per-label staleness overrides (bv-167).
@@ -250,6 +272,14 @@ impl Default for DriftConfig {
             stale_critical_days: 30,
             in_progress_stale_multiplier: 0.5,
             proactive_max_issues: 2000,
+            scope_creep_pct: 20.0,
+            velocity_drop_pct: 50.0,
+            velocity_window_days: 7,
+            velocity_min_baseline: 5,
+            abandoned_claim_multiplier: 2.0,
+            duplicate_jaccard_threshold: 0.7,
+            duplicate_max_alerts: 10,
+            priority_mismatch_min_confidence: 0.6,
             blocking_cascade_info_threshold: 3,
             blocking_cascade_warning_threshold: 5,
             high_impact_unblock_min: 3,

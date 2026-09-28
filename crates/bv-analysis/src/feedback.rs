@@ -488,19 +488,47 @@ impl FeedbackData {
         let base = default_weights().as_map();
         let adjustments = self.adjusted_weights();
 
+        // Go iterates `baseWeights`, a `map[string]float64`, and Go randomises
+        // map iteration order per run: the oracle returns a different
+        // `effective_weights` ulp on consecutive runs of the same command
+        // (0.19876168474138706 then 0.1987616847413871). No fixed order can
+        // reproduce it, and the golden corpus predates the `feedback` block
+        // entirely, so the last-ulp difference is not a defect. The declared
+        // order below is a deliberate, stable choice.
+        const ORDER: [&str; 8] = [
+            "PageRank",
+            "Betweenness",
+            "BlockerRatio",
+            "Staleness",
+            "PriorityBoost",
+            "TimeToImpact",
+            "Urgency",
+            "Risk",
+        ];
+        let mut pairs: Vec<(String, f64)> = Vec::with_capacity(ORDER.len());
+        for name in ORDER {
+            let w = base
+                .get(name)
+                .copied()
+                .expect("every base weight is present in as_map");
+            let adjusted = adjustments.get(name).copied().unwrap_or(w);
+            pairs.push((name.to_string(), w * adjusted));
+        }
         let mut effective: BTreeMap<String, f64> = BTreeMap::new();
-        for (name, w) in base {
-            let adjusted = adjustments.get(&name).copied().unwrap_or(w);
-            effective.insert(name, w * adjusted);
+        for (name, w) in pairs {
+            effective.insert(name, w);
         }
 
+        // The normalisation must walk the same order the total was summed in.
         let mut total = 0.0;
-        for w in effective.values() {
-            total += w;
+        for name in ORDER {
+            total += effective[name];
         }
         if total > 0.0 {
-            for w in effective.values_mut() {
-                *w /= total;
+            for name in ORDER {
+                if let Some(w) = effective.get_mut(name) {
+                    *w /= total;
+                }
             }
         }
         effective
