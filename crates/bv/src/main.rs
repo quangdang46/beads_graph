@@ -3361,12 +3361,17 @@ fn load_issues_auto_meta_raw(
             .resolve_revision(revision)
             .map_err(|e| e.to_string())?;
         let issues = loader.load_at(revision).map_err(|e| e.to_string())?;
-        eprintln!(
-            "Loaded {} issues from {} ({})",
-            issues.len(),
-            revision,
-            &resolved[..resolved.len().min(7)]
-        );
+        // Go guards this line with `if !envRobot` (main.go:2671): in robot
+        // mode stdout carries only the payload and stderr stays clean, so the
+        // message was being written where the oracle writes nothing at all.
+        if !env_robot() {
+            eprintln!(
+                "Loaded {} issues from {} ({})",
+                issues.len(),
+                revision,
+                &resolved[..resolved.len().min(7)]
+            );
+        }
         let hash = bv_core::data_hash::compute_data_hash(&issues);
         let valid = issues.len();
         // Built before the tuple: `Some(resolved)` moves `resolved` when the
@@ -6841,6 +6846,25 @@ fn history_flag_name(args: &[String]) -> &'static str {
 /// match" and the stale path is returned. That is how `--generate-docs` came
 /// to look for README.md under a fixture while running from the repository
 /// root. Both sides must resolve, and then be equal.
+
+/// Go's `envRobot` (cmd/bv/main.go:2023-2026): the OR of every `--robot-*`
+/// flag, or `BV_ROBOT=1`.
+///
+/// The value flag matters as much as the boolean ones. Go builds `robotMode`
+/// from the whole list at main.go:2011-2020 — `--robot-sprint-show`,
+/// `--robot-forecast`, `--robot-burndown` and `--robot-docs` are value flags and
+/// are all included — and only then exports `BV_ROBOT=1`, which is what
+/// suppresses the human-facing stderr chatter. Checking for a literal `--robot`
+/// missed all of them, so `--as-of` under `--robot-triage` still wrote
+/// "Loaded N issues from REF (sha)" where the oracle writes nothing.
+fn env_robot() -> bool {
+    if std::env::var("BV_ROBOT").as_deref() == Ok("1") {
+        return true;
+    }
+    std::env::args()
+        .skip(1)
+        .any(|a| a.starts_with("--robot-") || a.starts_with("-robot-"))
+}
 
 fn go_working_dir() -> std::path::PathBuf {
     let physical = std::env::current_dir().unwrap_or_default();
