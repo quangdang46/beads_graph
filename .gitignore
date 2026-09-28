@@ -102,3 +102,6 @@ html
 # and an --as-of stamp, so it cannot be matched by a fixed name.
 beads_viewer_rust_graph_export__*.html
 report.md
+
+# A --pages wizard run whose output directory is a bare name.
+/OutA/
