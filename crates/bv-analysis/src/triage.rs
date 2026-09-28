@@ -929,6 +929,34 @@ fn build_triage_inner(
         slack: all_skipped,
     };
 
+    // Go's bv-perf shortcut (triage.go:492-508): "Phase 2 metrics (PageRank,
+    // Betweenness) are only used for scoring open issues. If all issues are
+    // closed, we can skip Phase 2 entirely." When no issue is open it analyses
+    // under `NoPhase2Config`, and `GraphStats.analyzePhase2` then reports every
+    // metric as `skipped` with the reason "all phase 2 disabled"
+    // (graph.go:1779-1790).
+    //
+    // The graph is not empty here — a fully-closed workspace still has nodes —
+    // so `empty_graph` does not cover it. Without this gate the triage status
+    // claimed PageRank and Betweenness were `computed` on a workspace where
+    // the oracle reports them as never attempted, and `triage.status` is what a
+    // caller reads to decide whether a metric actually ran.
+    let has_open_issues = issues.iter().any(|i| !i.status.is_closed());
+    let no_phase2_status = || {
+        let s = crate::analyzer::StatusEntry::skipped("all phase 2 disabled");
+        crate::analyzer::MetricStatus {
+            page_rank: s.clone(),
+            betweenness: s.clone(),
+            eigenvector: s.clone(),
+            hits: s.clone(),
+            critical: s.clone(),
+            cycles: s.clone(),
+            kcore: s.clone(),
+            articulation: s.clone(),
+            slack: s,
+        }
+    };
+
     // Go's statusEntry serialises `ms` only when Elapsed is non-zero
     // (graph.go:131-147, `json:"ms,omitempty"`), and the time-travel path
     // leaves Elapsed at zero — so `--as-of` payloads carry no per-metric timing
@@ -947,6 +975,8 @@ fn build_triage_inner(
     let skipped = crate::analyzer::StatusEntry::skipped("disabled by triage fast config");
     let metric_status = if empty_graph {
         empty_graph_status
+    } else if !has_open_issues {
+        no_phase2_status()
     } else {
         crate::analyzer::MetricStatus {
             page_rank: crate::analyzer::StatusEntry::computed(pr_ms),

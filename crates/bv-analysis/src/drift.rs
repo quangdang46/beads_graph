@@ -861,29 +861,40 @@ pub fn calculate(
     if baseline.actionable > 0 {
         if let Some(pct) = pct_change(baseline.actionable as f64, current.actionable as f64) {
             if pct <= -cfg.actionable_decrease_warning_pct {
+                // Go prints the magnitude of the drop, not the endpoints:
+                // "decreased by %d (%.1f%%)" over -delta and -pct
+                // (drift.go:494). bvr worded it as "from X to Y" and left the
+                // percentage signed, so the same drop read
+                // "...to 0 (-100.0%)" where Go reads "decreased by 2 (100.0%)".
+                let delta = current.actionable as i64 - baseline.actionable as i64;
                 r.push(Alert {
                     alert_type: AlertType::ActionableChange,
                     severity: Severity::Warning,
-                    message: format!(
-                        "Actionable issues decreased from {} to {} ({pct:.1}%)",
-                        baseline.actionable, current.actionable
-                    ),
+                    suggested_action:
+                        "Fewer ready items means work is piling up behind blockers; unblock before starting new work"
+                            .into(),
+                    message: format!("Actionable issues decreased by {} ({:.1}%)", -delta, -pct),
                     baseline_val: Some(baseline.actionable as f64),
                     current_val: Some(current.actionable as f64),
-                    delta: Some((current.actionable as i64 - baseline.actionable as i64) as f64),
+                    delta: Some(delta as f64),
                     ..Default::default()
                 });
-            } else if pct >= cfg.actionable_increase_info_pct {
+            } else if pct >= cfg.actionable_increase_info_pct
+                || pct <= -cfg.actionable_increase_info_pct
+            {
+                // Go's info branch is signed and covers decreases that did not
+                // cross the warning threshold: "changed by %+d (%.1f%%)"
+                // (drift.go:503). The `%+d` keeps the sign, which is why the
+                // wording is "changed" rather than "increased" — bvr matched
+                // the condition but not the message.
+                let delta = current.actionable as i64 - baseline.actionable as i64;
                 r.push(Alert {
                     alert_type: AlertType::ActionableChange,
                     severity: Severity::Info,
-                    message: format!(
-                        "Actionable issues increased from {} to {} (+{pct:.1}%)",
-                        baseline.actionable, current.actionable
-                    ),
+                    message: format!("Actionable issues changed by {delta:+} ({pct:.1}%)"),
                     baseline_val: Some(baseline.actionable as f64),
                     current_val: Some(current.actionable as f64),
-                    delta: Some((current.actionable as i64 - baseline.actionable as i64) as f64),
+                    delta: Some(delta as f64),
                     ..Default::default()
                 });
             }

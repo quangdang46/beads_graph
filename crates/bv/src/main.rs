@@ -3786,31 +3786,25 @@ fn run_robot_next() -> ExitCode {
     }
 
     // Clear skipped reasons for Go omitempty parity (only "approximate" kept).
+    // The exception is `NoPhase2Config`'s "all phase 2 disabled", which Go puts
+    // on all nine entries when nothing is open to score; see the `--robot-triage`
+    // site for the full reasoning.
     let cleared_status = {
         let mut s = out.metric_status.clone();
-        if s.page_rank.state == "skipped" {
-            s.page_rank.reason.clear();
-        }
-        if s.eigenvector.state == "skipped" {
-            s.eigenvector.reason.clear();
-        }
-        if s.hits.state == "skipped" {
-            s.hits.reason.clear();
-        }
-        if s.critical.state == "skipped" {
-            s.critical.reason.clear();
-        }
-        if s.cycles.state == "skipped" {
-            s.cycles.reason.clear();
-        }
-        if s.kcore.state == "skipped" {
-            s.kcore.reason.clear();
-        }
-        if s.articulation.state == "skipped" {
-            s.articulation.reason.clear();
-        }
-        if s.slack.state == "skipped" {
-            s.slack.reason.clear();
+        let all_phase2_disabled = s.page_rank.reason.as_str().eq("all phase 2 disabled");
+        for entry in [
+            &mut s.page_rank,
+            &mut s.eigenvector,
+            &mut s.hits,
+            &mut s.critical,
+            &mut s.cycles,
+            &mut s.kcore,
+            &mut s.articulation,
+            &mut s.slack,
+        ] {
+            if entry.state == "skipped" && !all_phase2_disabled {
+                entry.reason.clear();
+            }
         }
         s.to_json_map()
     };
@@ -3865,24 +3859,44 @@ fn run_robot_next() -> ExitCode {
             payload["actionable"] = serde_json::json!(false);
             payload["phase2_ready"] = serde_json::json!(true);
             payload["status"] = cleared_status;
-            payload["message"] = serde_json::json!(
-                "No claim command emitted because the top recommendation was not claim-safe"
-            );
-            if let Some(first_pick) = picks.first() {
-                payload["diagnostic_top_pick"] = serde_json::json!({
-                    "id": first_pick["id"],
-                    "title": first_pick["title"],
-                    "score": first_pick["score"],
-                    "reasons": first_pick["reasons"],
-                    "unblocks": first_pick["unblocks"],
-                });
+            // Go splits this into two different payloads
+            // (robot_registry.go:2505-2519 and :2520-2526). An empty
+            // `QuickRef.TopPicks` means nothing cleared the claimability
+            // filter at all, which Go reports as
+            // `no_actionable_recommendation` at severity "info" with no
+            // `diagnostic_top_pick`. Only a non-empty list whose entries all
+            // fail the claim gate produces the claim-unsafe diagnosis. bvr
+            // emitted the claim-unsafe wording for both, so a fully-closed
+            // workspace — every issue filtered out — told a caller its
+            // top pick was unclaimable when there was no top pick to speak of.
+            if picks.is_empty() {
+                payload["message"] = serde_json::json!("No proven actionable item available");
+                payload["degraded"] = serde_json::json!([{
+                    "code": "no_actionable_recommendation",
+                    "severity": "info",
+                    "message": "No open, unblocked, unassigned non-epic recommendation passed the robot-next claimability filter.",
+                    "repair": "Use br ready --json or scripts/br_retry.sh actionable --json for authoritative claim candidates.",
+                }]);
+            } else {
+                payload["message"] = serde_json::json!(
+                    "No claim command emitted because the top recommendation was not claim-safe"
+                );
+                if let Some(first_pick) = picks.first() {
+                    payload["diagnostic_top_pick"] = serde_json::json!({
+                        "id": first_pick["id"],
+                        "title": first_pick["title"],
+                        "score": first_pick["score"],
+                        "reasons": first_pick["reasons"],
+                        "unblocks": first_pick["unblocks"],
+                    });
+                }
+                payload["degraded"] = serde_json::json!([{
+                    "code": "robot_next_claim_unsafe",
+                    "severity": "warning",
+                    "message": first_unsafe.unwrap_or_default().join("; "),
+                    "repair": "Use the authoritative Beads actionable queue plus claim gate before claiming work.",
+                }]);
             }
-            payload["degraded"] = serde_json::json!([{
-                "code": "robot_next_claim_unsafe",
-                "severity": "warning",
-                "message": first_unsafe.unwrap_or_default().join("; "),
-                "repair": "Use the authoritative Beads actionable queue plus claim gate before claiming work.",
-            }]);
         }
     }
     payload["usage_hints"] = usage_hints;
@@ -4830,16 +4844,28 @@ fn run_robot_triage() -> ExitCode {
     // `reason` only when the string is empty, so clearing is how Rust reproduces
     // Go's *absent* key rather than a way of erasing a reason Go emits.
     //
-    // For `--robot-triage` every skipped metric is one Go never attempted:
-    // `TriageConfig` (config.go:260-277) sets Compute{Cycles,CriticalPath,
-    // Eigenvector,HITS,KCore,Articulation,Slack} = false, and
-    // `stateFromTiming` (graph.go:229-238) returns a bare "skipped" for a
-    // disabled metric with no reason. Verified against the oracle on
-    // small_chain: all seven emit `{"state":"skipped"}` and nothing else.
+    // Two different reasons exist for a skipped metric under `--robot-triage`,
+    // and only one of them is absent from the payload:
     //
-    // Betweenness is deliberately left alone — `betweennessReason`
-    // (graph.go:256-264) returns "approximate", which Go does emit.
+    //   * The fast config. `TriageConfig` (config.go:260-277) sets
+    //     Compute{Cycles,CriticalPath,Eigenvector,HITS,KCore,Articulation,Slack}
+    //     = false, and `stateFromTiming` (graph.go:229-238) returns a bare
+    //     "skipped" for a disabled metric — no reason. Verified against the
+    //     oracle on small_chain: all seven emit `{"state":"skipped"}`.
+    //   * Nothing open to score. With no non-closed issue Go analyses under
+    //     `NoPhase2Config` and every metric reports "all phase 2 disabled"
+    //     (triage.go:505-508, graph.go:1779-1790). That reason *is* on the
+    //     wire — it is the only thing distinguishing "the workspace is done"
+    //     from "this build cannot compute it".
+    //
+    // Betweenness is never cleared: `betweennessReason` (graph.go:256-264)
+    // returns "approximate", which Go does emit.
     let mut triage_status = out.metric_status.clone();
+    let all_phase2_disabled = triage_status
+        .page_rank
+        .reason
+        .as_str()
+        .eq("all phase 2 disabled");
     for entry in [
         &mut triage_status.page_rank,
         &mut triage_status.eigenvector,
@@ -4850,7 +4876,11 @@ fn run_robot_triage() -> ExitCode {
         &mut triage_status.articulation,
         &mut triage_status.slack,
     ] {
-        if entry.state == "skipped" {
+        // Under the fast config every one of these is a metric Go simply
+        // never asked for, so the reason is absent. Under `NoPhase2Config`
+        // Go reports "all phase 2 disabled" on all nine, and that wording is
+        // load-bearing, so it is kept.
+        if entry.state == "skipped" && !all_phase2_disabled {
             entry.reason.clear();
         }
     }
@@ -4975,12 +5005,21 @@ fn run_robot_triage() -> ExitCode {
         let grouped: Vec<&bv_analysis::impact::IssueImpact> =
             recommendations_top_n_refs(&out.recommendations);
         if argv.iter().any(|a| a == "--robot-triage-by-track") {
-            payload["triage"]["recommendations_by_track"] =
-                serde_json::json!(build_recommendations_by_track(&grouped, &issue_by_id));
+            let by_track = build_recommendations_by_track(&grouped, &issue_by_id);
+            // `RecommendationsByTrack` is `omitempty` (triage.go:52), and Go
+            // leaves the slice nil when the grouper produces nothing — which
+            // happens whenever the scored list is empty. Emitting `[]` instead
+            // claimed "grouping ran and found no tracks" rather than "there
+            // was nothing to group".
+            if !by_track.is_empty() {
+                payload["triage"]["recommendations_by_track"] = serde_json::json!(by_track);
+            }
         }
         if argv.iter().any(|a| a == "--robot-triage-by-label") {
-            payload["triage"]["recommendations_by_label"] =
-                serde_json::json!(build_recommendations_by_label(&grouped, &issue_by_id));
+            let by_label = build_recommendations_by_label(&grouped, &issue_by_id);
+            if !by_label.is_empty() {
+                payload["triage"]["recommendations_by_label"] = serde_json::json!(by_label);
+            }
         }
     }
     // as_of and as_of_commit are deliberately NOT written here. Go declares
@@ -8659,19 +8698,29 @@ fn generate_advanced_insights(
         }
     }
     let topk_limited = candidates.len() as i64;
-    let topk = serde_json::json!({
+    let mut topk = serde_json::json!({
         "status": feature_status(
             "available",
-            "",
+            // Go returns early when `potentialCandidates == 0`
+            // (advanced_insights.go:472-482) with this reason; the later
+            // `len(items) == 0` branch (:546-548) is the same wording for the
+            // case where candidates existed but none could be picked.
+            if topk_limited == 0 { "No actionable issues" } else { "" },
             topk_items.len() as i64 >= 5 && topk_limited > 5,
             topk_items.len() as i64,
             topk_limited,
         ),
-        "items": topk_items,
-        "total_gain": total_gain,
-        "marginal_gain": marginal_gains,
         "how_to_use": "Best k issues to complete for max downstream unlock. Work these in order.",
     });
+    // `Items` and `MarginalGain` are `omitempty` on Go's `TopKSetResult`
+    // (advanced_insights.go:135, :137) and are left nil by the early return, so
+    // both keys are absent there. `TotalGain` is *not* omitempty (:136) and
+    // serialises as 0 — an int field always appears, even on the empty path.
+    topk["total_gain"] = serde_json::json!(total_gain);
+    if topk_limited != 0 {
+        topk["items"] = serde_json::json!(topk_items);
+        topk["marginal_gain"] = serde_json::json!(marginal_gains);
+    }
 
     // ---- Coverage Set (greedy vertex cover, limit 5) — Go generateCoverageSet ----
     let mut edges: Vec<(String, String)> = Vec::new();
@@ -8886,7 +8935,16 @@ fn generate_advanced_insights(
     let mut k_paths = serde_json::json!({
         // Go's KPathsResult.Limited is the number of representative sources
         // considered (advanced_insights.go:943), not the total path count.
-        "status": if order_available {
+        //
+        // The empty-node case is checked first, before the cycle gate
+        // (advanced_insights.go:742-752): with no open issue there is nothing
+        // to trace, and Go reports "No open issues" rather than falling
+        // through to the cycle message. Testing `order_available` first would
+        // have claimed a cycle on an all-closed workspace that has no open
+        // path to break.
+        "status": if n == 0 {
+            feature_status("available", "No open issues", false, 0, 0)
+        } else if order_available {
             feature_status(
                 "available",
                 "",
@@ -8961,13 +9019,17 @@ fn generate_advanced_insights(
         .copied()
         .filter(|id| blocked_by.get(*id).is_none_or(|v| v.is_empty()))
         .collect();
-    for id in actionable_ids {
+    for id in &actionable_ids {
         let mut newly: Vec<String> = Vec::new();
         if let Some(dependents) = blocker_of.get(id) {
             for &dep_id in dependents {
                 let all_others_resolved = blocked_by
                     .get(dep_id)
-                    .map(|blockers| blockers.iter().all(|b| **b == *id || !open_set.contains(b)))
+                    .map(|blockers| {
+                        blockers
+                            .iter()
+                            .all(|b| **b == **id || !open_set.contains(b))
+                    })
                     .unwrap_or(true);
                 // Go requires `!before[id]` (advanced_insights.go:582): an issue
                 // that is already actionable is not a *new* unlock, so it must
@@ -9029,6 +9091,14 @@ fn generate_advanced_insights(
     // Go's FeatureStatus.Count/Limited are omitempty, so an empty cut emits a
     // bare {"state":"available"} and omits `suggestions` entirely.
     let mut pc_status = serde_json::json!({"state": "available"});
+    // …except that Go returns early on `len(actionable) == 0`
+    // (advanced_insights.go:960-970) with this reason, before any candidate is
+    // considered. Reaching an empty cut with nothing actionable took the other
+    // branch and left the reason absent, so a workspace with no actionable work
+    // reported a computed result rather than one that never ran.
+    if actionable_ids.is_empty() {
+        pc_status["reason"] = serde_json::json!("No actionable issues");
+    }
     if !pc_suggestions.is_empty() {
         pc_status["count"] = serde_json::json!(pc_suggestions.len());
         pc_status["limited"] = serde_json::json!(pc_total);
@@ -9488,23 +9558,46 @@ fn run_robot_plan() -> ExitCode {
     }
 
     // Summary: actionable sorted by ID; strictly-greater count wins (Go).
-    let mut highest_id = String::new();
-    let mut highest_count = -1i64;
-    let mut sorted_actionable: Vec<&&bv_core::model::Issue> = actionable.iter().collect();
-    sorted_actionable.sort_by(|a, b| a.id.cmp(&b.id));
-    for issue in &sorted_actionable {
-        let count = compute_unblocks(&issue.id).len() as i64;
-        if count > highest_count {
-            highest_count = count;
-            highest_id = issue.id.clone();
-        }
-    }
-    let impact_reason = if highest_count == 1 {
-        "Unblocks 1 task"
-    } else if highest_count > 1 {
-        "Unblocks multiple tasks"
+    //
+    // Go returns a zero-valued PlanSummary when nothing is actionable
+    // (plan.go:260-262), before `highestCount` is seeded to -1. Without that
+    // early return an all-closed workspace reported unblocks_count -1 and the
+    // "No downstream dependencies" reason — a summary describing a maximum of
+    // negative blockers, which is not a value any real set of issues produces.
+    // Go returns a zero-valued PlanSummary when nothing is actionable
+    // (plan.go:260-262), before `highestCount` is seeded to -1. Without that
+    // early return an all-closed workspace reported unblocks_count -1 and the
+    // "No downstream dependencies" reason — a summary describing a maximum of
+    // negative blockers, a value no real set of issues produces.
+    let (highest_id, impact_reason, highest_count) = if actionable.is_empty() {
+        (String::new(), "", 0i64)
     } else {
-        "No downstream dependencies"
+        let mut highest_id = String::new();
+        let mut highest_count = -1i64;
+        let mut sorted_actionable: Vec<&&bv_core::model::Issue> = actionable.iter().collect();
+        sorted_actionable.sort_by(|a, b| a.id.cmp(&b.id));
+        // Go's tie-break is (count desc, priority asc, id asc) — the slice is
+        // already ID-sorted, so matching on (count, priority) picks the lowest ID
+        // among equals, exactly as Go's comparator does (plan.go:279-287).
+        let mut highest_priority = 0i32;
+        for issue in &sorted_actionable {
+            let count = compute_unblocks(&issue.id).len() as i64;
+            if count > highest_count
+                || (count == highest_count && issue.priority < highest_priority)
+            {
+                highest_count = count;
+                highest_priority = issue.priority;
+                highest_id = issue.id.clone();
+            }
+        }
+        let impact_reason = if highest_count == 1 {
+            "Unblocks 1 task"
+        } else if highest_count > 1 {
+            "Unblocks multiple tasks"
+        } else {
+            "No downstream dependencies"
+        };
+        (highest_id, impact_reason, highest_count)
     };
 
     // Go: TotalBlocked = totalOpen (non-closed-like) - len(actionable).
@@ -10173,8 +10266,9 @@ fn compute_parallel_gain(issues: &[bv_core::model::Issue], limit: usize) -> serd
         "how_to_use": HOW_TO_USE,
     });
     if actionable.is_empty() {
-        out["status"] =
-            serde_json::json!({"state": "computed", "count": 0, "reason": "No actionable issues"});
+        // `FeatureStatus.Count` is `omitempty` (advanced_insights.go:127), so a
+        // zero count is absent rather than present as 0.
+        out["status"] = serde_json::json!({"state": "computed", "reason": "No actionable issues"});
         return out;
     }
 
