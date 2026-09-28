@@ -934,7 +934,30 @@ mod tests {
 
         let now = GoTime::now();
         let raw = serde_json::to_string(&now).unwrap();
-        assert!(raw.ends_with("Z\""), "{raw}");
+        // `GoTime::now()` stamps the LOCAL zone, the way Go's `time.Now()` does
+        // — it does not force UTC. So the suffix is "Z" only on a machine whose
+        // zone offset is zero; in +07:00 it is "+07:00". Asserting "Z" here
+        // made the test fail on every non-UTC developer machine while passing on
+        // CI, which is configured for UTC. What matters for parity is that the
+        // rendered offset matches the machine's, and that it round-trips.
+        let offset = jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC))
+            .offset()
+            .seconds();
+        if offset == 0 {
+            assert!(raw.ends_with("Z\""), "{raw}");
+        } else {
+            let (sign, abs) = if offset < 0 {
+                ('-', -offset)
+            } else {
+                ('+', offset)
+            };
+            let tail = format!("{sign}{:02}:{:02}\"", abs / 3600, (abs % 3600) / 60);
+            assert!(
+                raw.ends_with(&tail),
+                "expected local offset {tail}, got {raw}"
+            );
+        }
         let back: GoTime = serde_json::from_str(&raw).unwrap();
         assert_eq!(back, now);
         assert!(!back.is_zero());

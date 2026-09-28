@@ -877,6 +877,12 @@ pub fn calculate(
                     baseline_val: Some(baseline.actionable as f64),
                     current_val: Some(current.actionable as f64),
                     delta: Some(delta as f64),
+                    // Go stamps every alert with `DetectedAt: c.nowUTC()`
+                    // (drift.go:497). Leaving it to `Default::default()` made
+                    // the key absent, and a consumer reading when a drift was
+                    // observed got nothing. Every sibling constructor here
+                    // sets it; this one did not.
+                    detected_at: Some(now.to_string()),
                     ..Default::default()
                 });
             } else if pct >= cfg.actionable_increase_info_pct
@@ -895,6 +901,7 @@ pub fn calculate(
                     baseline_val: Some(baseline.actionable as f64),
                     current_val: Some(current.actionable as f64),
                     delta: Some(delta as f64),
+                    detected_at: Some(now.to_string()),
                     ..Default::default()
                 });
             }
