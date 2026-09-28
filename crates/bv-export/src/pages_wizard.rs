@@ -311,6 +311,10 @@ pub struct WranglerStatus {
     pub installed: bool,
     pub authenticated: bool,
     pub npm_installed: bool,
+    /// Go's `AccountName` (cloudflare.go:63).
+    pub account_name: Option<String>,
+    /// Go's `AccountID`.
+    pub account_id: Option<String>,
 }
 
 fn on_path(exe: &str) -> bool {
@@ -425,18 +429,140 @@ pub fn check_wrangler_status() -> WranglerStatus {
         npm_installed,
         ..WranglerStatus::default()
     };
-    if on_path("wrangler") {
-        status.installed = true;
-        // `wrangler whoami` exits non-zero when unauthenticated and prints
-        // "You are not authenticated" either way, so the exit status is the
-        // signal.
-        status.authenticated = std::process::Command::new("wrangler")
-            .args(["whoami"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+    if !on_path("wrangler") {
+        return status;
+    }
+    status.installed = true;
+
+    // Go checks three things in this order and stops at the first that
+    // answers (cloudflare.go:83-120). `whoami` is last, not first: it "returns
+    // 0 even when not authenticated" (its own comment at :106) and can hang
+    // on a headless host, which is why Go reads the config file before
+    // shelling out at all.
+    //
+    //   1. CLOUDFLARE_API_TOKEN — the CI/headless path.
+    if std::env::var("CLOUDFLARE_API_TOKEN")
+        .ok()
+        .is_some_and(|t| !t.is_empty())
+    {
+        status.authenticated = true;
+        status.account_name = Some("(API token)".into());
+        status.account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").ok();
+        return status;
+    }
+
+    //   2. The OAuth config file, which is what a logged-in `wrangler login`
+    //   leaves behind.
+    if check_wrangler_config_file() {
+        status.authenticated = true;
+        return status;
+    }
+
+    //   3. `whoami` last, and its OUTPUT is the signal, not its exit status.
+    let out = std::process::Command::new("wrangler")
+        .args(["whoami"])
+        .output();
+    if let Ok(o) = out {
+        let text =
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
+        status.authenticated = o.status.success()
+            && !text.contains("not authenticated")
+            && !text.contains("You are not authenticated")
+            && (text.contains("Account ID") || text.contains("account") || text.contains("@"));
+        if status.authenticated {
+            let (name, id) = parse_wrangler_whoami(&text);
+            status.account_name = name;
+            status.account_id = id;
+        }
     }
     status
+}
+
+/// Go `checkWranglerConfigFile` (cloudflare.go:130-150): wrangler stores OAuth
+/// credentials in one of three places depending on version.
+fn check_wrangler_config_file() -> bool {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return false;
+    };
+    let mut candidates = vec![
+        home.join(".wrangler").join("config").join("default.toml"),
+        home.join(".config")
+            .join(".wrangler")
+            .join("config")
+            .join("default.toml"),
+    ];
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        candidates.push(
+            std::path::PathBuf::from(xdg)
+                .join(".wrangler")
+                .join("config")
+                .join("default.toml"),
+        );
+    }
+    candidates.iter().any(|c| valid_wrangler_config(c))
+}
+
+/// Go `validWranglerConfig` (cloudflare.go:152-178): an `oauth_token` that has
+/// either not expired or can be refreshed.
+fn valid_wrangler_config(path: &std::path::Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    if !content.contains("oauth_token") {
+        return false;
+    }
+    let has_refresh_token = content.contains("refresh_token");
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("expiration_time") {
+            let Some((_, value)) = rest.split_once('=') else {
+                continue;
+            };
+            let time_str = value.trim().trim_matches('"');
+            if let Ok(expiry) = time_str.parse::<jiff::Timestamp>() {
+                if jiff::Timestamp::now() > expiry && !has_refresh_token {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Go `parseWranglerWhoami` (cloudflare.go:180+): the account name and id out
+/// of `wrangler whoami` output.
+fn parse_wrangler_whoami(text: &str) -> (Option<String>, Option<String>) {
+    let mut name = None;
+    let mut id = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Account Name:") {
+            name = Some(rest.trim().to_string());
+        } else if let Some(rest) = t.strip_prefix("Account ID:") {
+            id = Some(rest.trim().to_string());
+        } else if name.is_none() {
+            // wrangler also prints a "| Account Name  foo |" table form.
+            if let Some(rest) = t.strip_prefix("| Account Name") {
+                if let Some(v) = rest.split('|').nth(1) {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        name = Some(v.to_string());
+                    }
+                }
+            }
+        }
+        if id.is_none() {
+            if let Some(rest) = t.strip_prefix("| Account ID") {
+                if let Some(v) = rest.split('|').nth(1) {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        id = Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    (name, id)
 }
 
 /// Go `ShowWranglerInstallInstructions`.
