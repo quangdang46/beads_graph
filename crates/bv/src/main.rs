@@ -16477,15 +16477,30 @@ fn go_cache_stats(m: &serde_json::Value) -> serde_json::Value {
 /// `generateRobotDocs` embeds a large hand-authored guide per topic; this
 /// returns a minimal real index instead of that text (see plan doc §11).
 fn run_robot_docs(args: &[String]) -> ExitCode {
-    // Go: `--robot-docs` with no topic defaults to "guide" (cobra flag value).
-    let topic = args
-        .iter()
-        .position(|a| a == "--robot-docs")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(|| "guide".to_string());
+    // Go: `--robot-docs` with no topic defaults to "guide" (the cobra flag's
+    // declared default).
+    //
+    // `flag_value` rather than a positional scan, because Go's pflag accepts
+    // both `--robot-docs guide` and `--robot-docs=guide` and the scan only
+    // recognised the first. The `=` form therefore fell through to the
+    // "guide" default, so every non-guide topic answered with the guide block
+    // and no error: `commands`, `examples`, `env`, `exit-codes` and `all` all
+    // silently returned the wrong document.
+    let topic = flag_value(args, "robot-docs")
+        .unwrap_or("guide")
+        .to_string();
     let payload = bv_robot::docs::generate_robot_docs(&topic, GO_APP_VERSION, &jiff_now());
-    emit_json(&sort_json_maps_like_go(&payload))
+    // Go's unknown-topic branch writes the same JSON body to stdout and exits
+    // 2 (main.go:8922 sets `ErrorTopic`; the handler returns it). Verified
+    // against the oracle: `bv --robot-docs=bogus` prints the document on stdout
+    // — not stderr — and exits 2, so an agent that mistyped a topic sees the
+    // available list and the status code together.
+    let unknown = payload.get("error").is_some();
+    emit_json(&sort_json_maps_like_go(&payload));
+    if unknown {
+        return ExitCode::from(2);
+    }
+    ExitCode::from(0)
 }
 
 /// Go `Analyzer.GetBlockerChain` — `--robot-blocker-chain <issue-id>`.
