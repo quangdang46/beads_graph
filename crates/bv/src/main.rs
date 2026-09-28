@@ -1969,10 +1969,18 @@ fn main() -> ExitCode {
         // `export.SaveGraphSnapshot` with `Preset: *graphPreset`. That branch
         // was unreachable from this handler, so --graph-preset had nothing to
         // reach and a .png path silently fell through to the JSON branch.
-        let is_static = {
-            let lower = output_path.to_ascii_lowercase();
-            lower.ends_with(".png") || lower.ends_with(".svg")
-        };
+        // Go's dispatch (main.go:129409-129462) is: `.html` (or the bare words
+        // `html`/`interactive`) goes to the interactive branch, and EVERYTHING
+        // ELSE goes to `SaveGraphSnapshot`. That writer only recognises `.png`
+        // and defaults to SVG for anything else, which is why the oracle emits
+        // byte-identical SVG for `.dot`, `.mmd` and `.json`. The old test
+        // matched only `.png`/`.svg`, so those three fell through to the DOT,
+        // Mermaid and adjacency generators here and produced text nobody asked
+        // for.
+        let is_static = !matches!(
+            output_path.to_ascii_lowercase().as_str(),
+            "html" | "interactive"
+        ) && !output_path.to_ascii_lowercase().ends_with(".html");
         if is_static {
             // Go main.go:1512 defaults this to "compact" and has no enum rule
             // for it (main.go:1845-1848), so an unrecognised value is
