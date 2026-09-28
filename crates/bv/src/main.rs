@@ -11009,10 +11009,35 @@ fn run_robot_alerts() -> ExitCode {
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     let baseline_doc = baseline_on_disk.clone().unwrap_or_default();
+    // Go builds its comparison baseline BEFORE the `baseline.Exists` branch
+    // (robot_registry.go:1159) as `&baseline.Baseline{Stats: curStats}` — the
+    // current stats with *no* TopMetrics — and only replaces it with the
+    // loaded file when one exists (:1163-1179). So with no baseline recorded,
+    // Go compares current-against-current on the scalar stats while both
+    // PageRank lists are empty, and no "entered top" is possible.
+    //
+    // Seeding the fallback from `current.clone()` carried the current
+    // PageRank into the baseline, and every current id was then missing from
+    // one side of the comparison, inventing N "entered top" changes out of a
+    // workspace that had recorded nothing at all. `Default` is the faithful
+    // stand-in for Go's `&Baseline{Stats: curStats}`: the stats come from
+    // `current` below either way, and the top-metrics stay empty.
     let mut baseline_stats: bv_analysis::drift::BaselineStats = baseline_doc
         .get("stats")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_else(|| current.clone());
+        .unwrap_or_default();
+    // Go's `cur` is `{Stats: curStats, Cycles: cycles}` in this branch too —
+    // `TopMetrics` is only filled inside the `Exists` case (:1166-1178). Both
+    // sides therefore have an empty PageRank list, and `checkPageRankDrift`
+    // finds nothing to compare. Rust populated `cur` unconditionally, so the
+    // top-10 ids looked like they had "entered top" against an empty list.
+    let mut current_stats = current.clone();
+    if baseline_on_disk.is_none() {
+        let mut go_default = current_stats.clone();
+        go_default.pagerank.clear();
+        baseline_stats = go_default;
+        current_stats.pagerank.clear();
+    }
     // Go keys the top-list by `top_metrics.pagerank`. When that key is
     // genuinely present, honour it. When it is absent, leave the baseline's
     // own PageRank alone: overwriting it with an empty map made every current
@@ -11020,15 +11045,32 @@ fn run_robot_alerts() -> ExitCode {
     // recorded baseline ever observed. A missing top-list is not evidence of
     // change.
     if let Some(doc) = &baseline_on_disk {
+        // Go's `TopMetrics.PageRank` is `[]MetricItem` — a JSON *array* of
+        // `{id, value}` (baseline.go:62-63, :77-80). Rust's
+        // `BaselineStats.pagerank` is a `BTreeMap<String, f64>`, so handing it
+        // the array failed to deserialize and `unwrap_or_default()` silently
+        // produced an empty map. Every current top-10 id was then absent from
+        // the baseline and reported as having "entered top" — 10 invented
+        // changes from a baseline whose values had not moved at all. Read the
+        // array through the same shape Go's decoder sees, then fold it into
+        // the map the drift check compares.
         baseline_stats.pagerank = doc
             .get("top_metrics")
             .and_then(|tm| tm.get("pagerank"))
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .and_then(|v| {
+                serde_json::from_value::<Vec<bv_analysis::drift::MetricItem>>(v.clone()).ok()
+            })
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|m| (m.id, m.value))
+                    .collect::<std::collections::BTreeMap<String, f64>>()
+            })
             .unwrap_or_default();
     }
     let result = bv_analysis::drift::calculate(
         &baseline_stats,
-        &current,
+        &current_stats,
         &bv_analysis::drift::DriftConfig::default(),
         &cycles,
         &issues,
