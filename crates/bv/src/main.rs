@@ -2046,10 +2046,49 @@ fn main() -> ExitCode {
                             .filter(|n| !n.is_empty())
                             .unwrap_or_else(|| "project".to_string())
                     });
-                let mermaid = bv_export::graph_export::generate_mermaid_graph(&issues);
-                format!(
-                    "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>{title}</title>\n<script src=\"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js\"></script>\n<script>mermaid.initialize({{startOnLoad:true}});</script>\n</head>\n<body>\n<h1>{title}</h1>\n<pre class=\"mermaid\">\n{mermaid}</pre>\n</body>\n</html>\n"
-                )
+                // This hand-rolled 15-line document was a placeholder that
+                // never got replaced. Go's page embeds the graph, the
+                // metrics, the triage payload and the history report —
+                // 12,311 lines and 533 KB on this repo's data, against 172
+                // lines and 13.7 KB here, while both binaries exited 0 and
+                // printed the same "✓ Interactive graph exported" line. Anyone
+                // who used it got a stub and no error.
+                //
+                // The port of Go's generator already existed and had its own
+                // byte-parity test against the Go 18afafa document; it was
+                // simply never wired to this branch. It writes the file
+                // itself, so the content is read back rather than returned.
+                let out_path = if output_path.is_empty() {
+                    format!("beads_graph.{fmt}")
+                } else {
+                    output_path.clone()
+                };
+                let opts = bv_export::graph_interactive::InteractiveGraphOptions {
+                    issues: issues.clone(),
+                    stats: bv_export::graph_snapshot::GraphSnapshotMetrics::default(),
+                    extras: bv_export::graph_interactive::GraphSnapshotMetricsExtras::default(),
+                    triage: None,
+                    history: None,
+                    title,
+                    data_hash: hash.clone(),
+                    path: std::path::PathBuf::from(&out_path),
+                    project_name: cwd
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "project".to_string()),
+                    robot_envelope: full_envelope_for(&hash, &issues)
+                        .as_object()
+                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                        .unwrap_or_default(),
+                    generated_at: jiff_now(),
+                };
+                match bv_export::graph_interactive::generate_interactive_graph_html(&opts) {
+                    Ok(_) => std::fs::read_to_string(&out_path).unwrap_or_default(),
+                    Err(e) => {
+                        eprintln!("Error exporting interactive graph: {e}");
+                        return ExitCode::from(1);
+                    }
+                }
             }
             _ => serde_json::to_string_pretty(&serde_json::json!({
                 "format": "json",

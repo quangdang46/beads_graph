@@ -8,8 +8,29 @@ env:
   CARGO_TERM_COLOR: always
   BIN_NAME: bvr
 jobs:
+  # Every published artifact must be gated on the same checks CI runs. This
+  # workflow used to build straight from the tag and upload, so a tag pushed
+  # on a red tree shipped five binaries with nothing between the tests and
+  # the release. `build` and `release` both depend on this job.
+  verify:
+    name: Verify before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Differential gate
+        run: cargo test -p bv --test golden_comparison -- --nocapture
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -89,7 +110,7 @@ jobs:
 
   release:
     name: Attach artifacts to GitHub Release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
