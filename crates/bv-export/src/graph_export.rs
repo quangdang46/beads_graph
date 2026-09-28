@@ -5,6 +5,19 @@
 //! the only copy — Go has a single `GenerateMermaidGraph`, and a second Rust
 //! copy is how the two implementations drifted apart in the first place.
 
+/// Render a float the way Go's encoding/json does: shortest round-trip, with a
+/// whole number written without a trailing ".0". The binary crate has its own
+/// `go_format_f64`; this crate needs the same rule and cannot import it.
+fn json_f64(f: f64) -> serde_json::Value {
+    if f == f.trunc() && f.abs() < 1e15 {
+        serde_json::Value::from(f as i64)
+    } else {
+        serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)
+    }
+}
+
 use bv_core::model::{Issue, Status};
 
 fn truncate_runes(s: &str, max: usize) -> String {
@@ -44,17 +57,33 @@ fn sorted(issues: &[Issue]) -> Vec<&Issue> {
 }
 
 /// JSON adjacency graph (Go generateAdjacency).
-pub fn generate_adjacency(issues: &[Issue]) -> serde_json::Value {
+pub fn generate_adjacency(
+    issues: &[Issue],
+    pagerank: Option<&std::collections::BTreeMap<String, f64>>,
+) -> serde_json::Value {
     let ids: std::collections::HashSet<&String> = issues.iter().map(|i| &i.id).collect();
     let nodes: Vec<serde_json::Value> = sorted(issues)
         .into_iter()
         .map(|i| {
-            serde_json::json!({
-                "id": i.id,
-                "title": i.title,
-                "status": i.status.as_str(),
-                "priority": i.priority,
-            })
+            // Go's AdjacencyNode (graph_export.go) is id, title, status,
+            // priority, labels (omitempty) and pagerank (omitempty). The
+            // adjacency in the JSON export was missing the last two, so the
+            // exported graph did not match even where it was structurally
+            // right.
+            let mut node = serde_json::Map::new();
+            node.insert("id".into(), serde_json::json!(i.id));
+            node.insert("title".into(), serde_json::json!(i.title));
+            node.insert("status".into(), serde_json::json!(i.status.as_str()));
+            node.insert("priority".into(), serde_json::json!(i.priority));
+            if !i.labels.is_empty() {
+                node.insert("labels".into(), serde_json::json!(i.labels));
+            }
+            if let Some(pr) = pagerank.and_then(|m| m.get(&i.id)).copied() {
+                if pr != 0.0 {
+                    node.insert("pagerank".into(), json_f64(pr));
+                }
+            }
+            serde_json::Value::Object(node)
         })
         .collect();
     let mut edges = Vec::new();
@@ -305,7 +334,7 @@ mod tests {
             issue("b", Status::Open, vec![]),
             issue("a", Status::Open, vec![dep("b", true)]),
         ];
-        let j = generate_adjacency(&issues);
+        let j = generate_adjacency(&issues, None);
         assert_eq!(j["nodes"][0]["id"], "a");
         assert_eq!(j["edges"][0]["from"], "a");
         assert_eq!(j["edges"][0]["to"], "b");

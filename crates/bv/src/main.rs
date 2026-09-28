@@ -1247,15 +1247,67 @@ fn render_export_json(
     out.push_str(&issue_rows);
     let _ = first;
     if options.include_graph {
-        field(
-            &mut out,
-            "graph",
-            serde_json::to_value(bv_export::graph_export::generate_adjacency(issues))
-                .unwrap_or(serde_json::Value::Null),
-        );
+        field(&mut out, "graph", export_graph_result(issues, &data_hash));
     }
     out.push('}');
     go_json_indent(&out)
+}
+
+/// Go `ExportGraph` (pkg/export/graph_export.go) for the JSON format, reduced
+/// to what the export needs: no filters are configured here, so
+/// `filters_applied` is omitted and the adjacency comes from the whole set.
+///
+/// `GraphExportResult` wraps the adjacency with the format, the node and edge
+/// COUNTS, an explanation and the data hash; the adjacency itself is a nested
+/// `{nodes, edges}` object. Emitting the adjacency bare — which is what this did
+/// before — drops all of that. Field order is the struct's declaration order.
+fn export_graph_result(issues: &[bv_core::model::Issue], data_hash: &str) -> serde_json::Value {
+    // Go passes a NIL GraphStats here (graph_export.go), so
+    // generateAdjacency leaves PageRank unset and the omitempty field is
+    // absent. Passing real phase-2 data added a  key the oracle
+    // never emits.
+    let adjacency = bv_export::graph_export::generate_adjacency(issues, None);
+    let node_count = adjacency
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let edge_count = adjacency
+        .get("edges")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let mut out = String::from("{");
+    let mut first = true;
+    let mut field = |out: &mut String, key: &str, value: serde_json::Value| {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&serde_json::to_string(key).unwrap_or_default());
+        out.push(':');
+        write_go_json(&value, out);
+    };
+    field(&mut out, "format", serde_json::json!("json"));
+    field(&mut out, "nodes", serde_json::json!(node_count));
+    field(&mut out, "edges", serde_json::json!(edge_count));
+    field(
+        &mut out,
+        "explanation",
+        serde_json::json!({
+            "what": "Dependency graph as JSON adjacency list",
+            "when_to_use": "When you need programmatic access to the graph structure",
+        }),
+    );
+    if !data_hash.is_empty() {
+        field(&mut out, "data_hash", serde_json::json!(data_hash));
+    }
+    out.push(',');
+    out.push_str(&serde_json::to_string("adjacency").unwrap_or_default());
+    out.push(':');
+    write_go_json(&adjacency, &mut out);
+    out.push('}');
+    serde_json::from_str(&out).unwrap_or(serde_json::Value::Null)
 }
 
 fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
@@ -1993,7 +2045,7 @@ fn main() -> ExitCode {
             }
             _ => serde_json::to_string_pretty(&serde_json::json!({
                 "format": "json",
-                "graph": bv_export::graph_export::generate_adjacency(&issues),
+                "graph": bv_export::graph_export::generate_adjacency(&issues, None),
                 "nodes": issues.len(),
                 "data_hash": hash,
             }))
