@@ -1146,6 +1146,118 @@ fn render_export_csv(issues: &[bv_core::model::Issue]) -> String {
     out
 }
 
+/// Go's `case "json"` (pkg/export/markdown.go:115-145): the issues plus the
+/// envelope's provenance, each issue carrying its `actions`, and `graph` only
+/// when `IncludeGraph` is set.
+///
+/// The object is written field by field in Go's struct declaration order rather
+/// than assembled in a `serde_json::Map` and re-read: that round trip lost the
+/// insertion order on this build and emitted a sorted object, so `data_hash`
+/// came first and `title` last.
+fn render_export_json(
+    issues: &[bv_core::model::Issue],
+    options: &bv_export::markdown::ReportOptions,
+) -> String {
+    let data_hash = bv_core::data_hash::compute_data_hash(issues);
+    let source = source_meta_for(issues);
+    let authority = source_authority(&source, &data_hash);
+    let authority_hash = bv_robot::authority_hash(&authority);
+    let (as_of, as_of_commit) = as_of_pair();
+
+    let claimable = options.claimable_ids.clone();
+    let mut out = String::from("{");
+    let mut first = true;
+    let mut field = |out: &mut String, key: &str, value: serde_json::Value| {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&serde_json::to_string(key).unwrap_or_default());
+        out.push(':');
+        write_go_json(&value, out);
+    };
+
+    field(
+        &mut out,
+        "title",
+        serde_json::json!(options.resolved_title()),
+    );
+    field(
+        &mut out,
+        "generated_at",
+        serde_json::json!(options
+            .generated_at
+            .map(|t| t.to_string())
+            .unwrap_or_default()),
+    );
+    field(
+        &mut out,
+        "source_authority",
+        serde_json::to_value(&authority).unwrap_or_default(),
+    );
+    if !authority_hash.is_empty() {
+        field(
+            &mut out,
+            "authority_hash",
+            serde_json::json!(authority_hash),
+        );
+    }
+    if !data_hash.is_empty() {
+        field(&mut out, "data_hash", serde_json::json!(data_hash));
+    }
+    if !source.path.is_empty() {
+        field(&mut out, "source_path", serde_json::json!(source.path));
+    }
+    if !source.kind.is_empty() {
+        field(&mut out, "source_kind", serde_json::json!(source.kind));
+    }
+    if !as_of.is_empty() {
+        field(&mut out, "as_of", serde_json::json!(as_of));
+    }
+    if !as_of_commit.is_empty() {
+        field(&mut out, "as_of_commit", serde_json::json!(as_of_commit));
+    }
+
+    let mut issue_rows = String::from("[");
+    for (i, issue) in issues.iter().enumerate() {
+        if i > 0 {
+            issue_rows.push(',');
+        }
+        let mut row = serde_json::to_value(issue).unwrap_or(serde_json::Value::Null);
+        let claimable = claimable.contains(&issue.id);
+        let actions = match options.origins.get(&issue.id) {
+            Some(origin) => {
+                serde_json::to_value(bv_core::tracker::build_actions(origin, claimable))
+                    .unwrap_or(serde_json::Value::Null)
+            }
+            None => serde_json::to_value(actions_for_source(&source, &issue.id, claimable))
+                .unwrap_or(serde_json::Value::Null),
+        };
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("actions".into(), actions);
+        }
+        write_go_json(&row, &mut issue_rows);
+    }
+    issue_rows.push(']');
+    // `issue_rows` is already valid JSON; passing it through `field` would
+    // JSON-encode the whole array as a string. Write it in place.
+    out.push(',');
+    out.push_str(&serde_json::to_string("issues").unwrap_or_default());
+    out.push(':');
+    out.push_str(&issue_rows);
+    let _ = first;
+    if options.include_graph {
+        field(
+            &mut out,
+            "graph",
+            serde_json::to_value(bv_export::graph_export::generate_adjacency(issues))
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    out.push('}');
+    go_json_indent(&out)
+}
+
 fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     let flag_value = |name: &str| -> Option<String> {
         args.iter()
@@ -1204,8 +1316,10 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
         format: format.clone(),
         template: template.clone(),
         include_graph: include_graph_flag,
-        // Go stamps the report with `robotNow()`, which is UTC.
-        generated_at: Some(jiff::Timestamp::now()),
+        // Go stamps the report with `robotNow()`, which is UTC and honours
+        // SOURCE_DATE_EPOCH; `Timestamp::now()` is the wall clock, so the two
+        // disagreed on every run.
+        generated_at: Some(robot_now()),
         ..Default::default()
     };
     if let Err(e) = options.validate() {
@@ -1231,7 +1345,13 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     let mut options = options;
     attach_report_origins(&mut options, &issues, &cwd, stats);
     let body = match options.format.as_str() {
-        "json" => go_json_string(&serde_json::json!(issues)),
+        // Go `case "json"` (pkg/export/markdown.go:115-145): a report OBJECT
+        // carrying the envelope's provenance alongside the issues, each with
+        // its `actions`. Rust was emitting a bare array of issues — the whole
+        // branch was never ported — so a caller reading the export got no
+        // source_authority and could not tell a healthy read from a degraded
+        // one. Field order is Go's struct declaration order.
+        "json" => render_export_json(&issues, &options),
         "csv" => render_export_csv(&issues),
         "mermaid" => bv_export::mermaid::generate_mermaid(&issues),
         // Go runs `renderReportTemplate` here when `--export-template` names a
@@ -7485,7 +7605,16 @@ fn go_json_indent(compact: &str) -> String {
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
-    for ch in compact.chars() {
+    // Peek the input with its own cursor. The previous version indexed the
+    // INPUT by the OUTPUT length to decide whether a container was empty, and
+    // those diverge as soon as any indentation is emitted — so a document past
+    // a few kilobytes indexed past the end of the input and panicked. It read
+    // the robot payloads only because those never indent deeply.
+    let chars: Vec<char> = compact.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        i += 1;
         if in_string {
             out.push(ch);
             if escaped {
@@ -7503,15 +7632,13 @@ fn go_json_indent(compact: &str) -> String {
                 out.push(ch);
             }
             '{' | '[' => {
-                let open = ch;
-                let close = if open == '{' { '}' } else { ']' };
-                // An empty container stays `{}` / `[]` — Go's indenter does not
-                // break a line for one.
-                if compact[out.len()..].starts_with(&close.to_string()) {
-                    out.push(open);
+                let close = if ch == '{' { '}' } else { ']' };
+                // An empty container stays `{}` / `[]`.
+                if chars.get(i) == Some(&close) {
+                    out.push(ch);
                 } else {
-                    out.push(open);
                     depth += 1;
+                    out.push(ch);
                     out.push('\n');
                     out.push_str(&"  ".repeat(depth));
                 }
