@@ -1671,13 +1671,23 @@ fn main() -> ExitCode {
     // and then never resolved here, so `--recipe nosuchrecipe` scoped nothing
     // and the command produced a full payload for the *unfiltered* issue set —
     // a caller asking for one view silently got another.
-    if let Some(recipe) = flag_value(&args, "recipe")
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        if let Some(err) = validate_recipe_name(recipe) {
-            eprintln!("{err}");
-            return ExitCode::from(1);
+    // …but only once no robot command has claimed the invocation. Go's robot
+    // dispatch sits at main.go:2052-2054 and its handlers exit, so
+    // `bv --robot-recipes -r nosuchrecipe` prints the recipe catalogue and
+    // exits 0: the name is never resolved. Validating here rejected it with
+    // exit 1, which is a different answer for the same command line. The
+    // phase-two robot commands dispatch further down, after this point, so the
+    // split has to be "which registry owns this invocation", not "is a
+    // `--robot-*` present".
+    if !go_dispatches_before_recipe_resolution(&args) {
+        if let Some(recipe) = flag_value(&args, "recipe")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            if let Some(err) = validate_recipe_name(recipe) {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
         }
     }
     set_scope_flags(
@@ -2936,8 +2946,15 @@ fn main() -> ExitCode {
             .get(idx + 1)
             .cloned()
             .unwrap_or_else(|| "./bv-pages".to_string());
-        if !std::path::Path::new(&dir).join("index.html").exists() {
-            eprintln!("No index.html in {dir} — run --export-pages first");
+        // Go has no pre-flight check: it hands the path straight to
+        // `runPreviewServer` (main.go:3050-3051), whose own stat is what
+        // fails. This branch reproduced the symptom with different wording and
+        // a different trigger — it demanded an `index.html` specifically,
+        // where Go rejects a missing *directory*. The error text below is the
+        // server's, so an existing directory without an index still reports
+        // what the oracle reports.
+        if !std::path::Path::new(&dir).is_dir() {
+            eprintln!("Error starting preview server: bundle path does not exist: {dir}");
             return ExitCode::from(1);
         }
         let root = std::path::PathBuf::from(&dir);
@@ -3776,6 +3793,23 @@ fn install_stop_handler() {
 /// Exit codes: 0 on success, 1 on any wizard error. Never 2 — Go declares
 /// `--pages` as a plain `flag.Bool` with no `requires` clause
 /// (main.go:1628), so there is no usage error to report.
+/// The commands Go's phase-one registry dispatches before the recipe is
+/// resolved: `main.go:2052-2054` and `:2544-2550`, each of which exits
+/// before the `:2583` resolution. Every other `--robot-*` is registered
+/// after that point and therefore does go through validation.
+fn go_dispatches_before_recipe_resolution(args: &[String]) -> bool {
+    const PHASE_ONE: [&str; 6] = [
+        "robot-help",
+        "version",
+        "robot-capabilities",
+        "robot-recipes",
+        "robot-schema",
+        "robot-docs",
+    ];
+    let presence = validation::Presence::from_args(args);
+    PHASE_ONE.iter().any(|f| presence.has(f))
+}
+
 fn run_pages_wizard(args: &[String]) -> ExitCode {
     // Go main.go:1937-1944 puts `--db` at the top of the discovery chain and
     // `main` has already published it as BEADS_DB by the time any dispatch
