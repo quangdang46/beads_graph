@@ -10296,27 +10296,25 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
         &source.path,
     );
     match serde_json::to_value(&output) {
-        Ok(mut v) => {
-            // Go v0.25.0 stamps the full envelope ahead of the suggestion
-            // payload; the analysis layer has no source path, so fill it in
-            // from the shared envelope helper here.
-            let envelope = full_envelope_for(&hash, &issues);
-            if let Some(obj) = v.as_object_mut() {
-                for key in [
-                    "output_format",
-                    "version",
-                    "source_path",
-                    "source_kind",
-                    "source_authority",
-                    "authority_hash",
-                    "scope_hash",
-                ] {
-                    if let Some(env) = envelope.get(key) {
-                        obj.insert(key.to_string(), env.clone());
-                    }
+        Ok(v) => {
+            // Go v0.25.0 stamps the full envelope AHEAD of the command
+            // payload, and the wire order is the struct declaration order
+            // (RobotEnvelope, then the command's own fields).
+            //
+            // The previous code did the reverse: it started from the command
+            // object and INSERTED the envelope keys, which appends them —
+            // serde_json preserves insertion order, so output_format, version,
+            // source_path, source_kind, source_authority, authority_hash and
+            // scope_hash all landed after filters/suggestions/usage_hints.
+            // Structurally identical, byte-different, and invisible to a
+            // harness that compares parsed objects.
+            let mut payload = full_envelope_for(&hash, &issues);
+            if let (Some(dst), Some(src)) = (payload.as_object_mut(), v.as_object()) {
+                for (key, value) in src {
+                    dst.insert(key.clone(), value.clone());
                 }
             }
-            emit_json(&v)
+            emit_json(&payload)
         }
         Err(e) => {
             eprintln!("Error: serialization failed: {e}");

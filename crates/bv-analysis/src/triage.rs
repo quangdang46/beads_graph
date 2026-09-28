@@ -1117,7 +1117,14 @@ fn build_triage_inner(
         // excluded InProgress, so an in-progress issue lost a boost Go still
         // gave it — the `>= 0` half is what a `usize` depth cannot express and
         // is spelled out below, but the status half was never in the oracle.
-        let quickwin_boost = if (0..=TRIAGE_QUICKWIN_MAX_DEPTH as i64).contains(&blocker_depth) {
+        // Go gates the quick-win boost on status too
+        // (triage.go:1385): .
+        // A previous commit in this file removed that condition after
+        // misreading the gate as depth-only; the published fixture sets happen
+        // not to contain any in-progress issue, so nothing caught it.
+        let quickwin_boost = if rec.status != Status::InProgress.as_str()
+            && (0..=TRIAGE_QUICKWIN_MAX_DEPTH as i64).contains(&blocker_depth)
+        {
             let depth_factor =
                 1.0 - blocker_depth as f64 / (TRIAGE_QUICKWIN_MAX_DEPTH as f64 + 1.0);
             (depth_factor * base_score * TRIAGE_QUICKWIN_BOOST).min(TRIAGE_QUICKWIN_BOOST)
