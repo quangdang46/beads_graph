@@ -829,7 +829,6 @@ mod impact_network {
     }
 }
 
-use std::io::Write as _;
 use std::process::ExitCode;
 
 // `--cpu-profile` serialises pprof-rs's `Report` into the same
@@ -842,6 +841,13 @@ use std::process::ExitCode;
 // flag worked.
 #[cfg(unix)]
 use pprof::protos::Message as _;
+// `CpuProfileGuard::drop` is the only place a *concrete* type needs the `Write`
+// trait in scope — `self.file.flush()` on a `std::fs::File`. The `writeln!`
+// calls in the update-reporting half reach `write_fmt` through an
+// `out: &mut impl std::io::Write` bound instead, which needs no import, so
+// there is nothing left for this on Windows.
+#[cfg(unix)]
+use std::io::Write as _;
 
 /// Go `strconv.ParseBool` — the exact set `flag.Bool` accepts.
 fn parse_go_bool(value: &str) -> Option<bool> {
@@ -7892,6 +7898,10 @@ fn run_agents_commands(presence: &validation::Presence, _args: &[String]) -> Exi
 /// `SetCPUProfileRate(100)` when the caller has not set one, so 100 Hz is what
 /// a Go `bv --cpu-profile out.pprof` run records. pprof-rs defaults to 99, so
 /// the rate is pinned rather than inherited.
+///
+/// `#[cfg(unix)]` with its only user, `start_cpu_profile` — on Windows that
+/// constant is dead, and `-D warnings` fails the build over it.
+#[cfg(unix)]
 const GO_CPU_PROFILE_HZ: i32 = 100;
 
 /// Keeps the sampler running and owns the destination file for as long as the
