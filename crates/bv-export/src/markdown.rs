@@ -102,8 +102,25 @@ impl ReportOptions {
         }
     }
 
+    /// Go formats `opts.GeneratedAt` with `time.RFC1123` (markdown.go:374), and
+    /// the caller supplies a pinned `robotNow()`. Falling back to the wall
+    /// clock here made two runs of the ORACLE agree while bvr's footer moved,
+    /// so an export was not reproducible under `SOURCE_DATE_EPOCH` — the
+    /// whole point of pinning it.
     fn generated_at(&self) -> jiff::Timestamp {
-        self.generated_at.unwrap_or_else(jiff::Timestamp::now)
+        self.generated_at.unwrap_or_else(|| {
+            if bv_analysis::analyzer::source_date_epoch_active() {
+                jiff::Timestamp::from_second(
+                    std::env::var("SOURCE_DATE_EPOCH")
+                        .ok()
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0),
+                )
+                .unwrap_or_else(|_| jiff::Timestamp::now())
+            } else {
+                jiff::Timestamp::now()
+            }
+        })
     }
 }
 

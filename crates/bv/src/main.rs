@@ -1937,7 +1937,11 @@ fn main() -> ExitCode {
             // Go forces `overrides.Format = "markdown"` for `--export-md`,
             // so the graph stays on (only `csv` turns it off).
             format: "markdown".to_string(),
-            generated_at: Some(jiff::Timestamp::now()),
+            // `robot_now()`, which honours SOURCE_DATE_EPOCH. A bare
+            // `Timestamp::now()` here stamped the report footer with the wall
+            // clock, so `--export-md` was not reproducible under the pin that
+            // every other timestamp in the tree respects.
+            generated_at: Some(robot_now()),
             ..Default::default()
         };
         attach_report_origins(&mut options, &issues, &cwd, stats);
