@@ -101,6 +101,16 @@ fn run_bvr_raw(cwd: &Path, args: &[&str]) -> Option<std::process::Output> {
         .env("SOURCE_DATE_EPOCH", golden_source_date_epoch())
         .env("BV_ROBOT", "1")
         .env("BV_NO_CACHE", "1")
+        // Point the drift baseline somewhere that does not exist. `.bv/` is
+        // gitignored, so a developer who once ran --save-baseline has one and CI
+        // does not: --robot-alerts then reported an extra alert locally and not
+        // on the runner, from the same commit, and the golden gate followed
+        // whichever machine ran it. The corpus was captured without a baseline,
+        // so the run must not see one either.
+        .env(
+            "BV_BASELINE_PATH",
+            cwd.join("golden/.no-such-baseline.json"),
+        )
         .output()
         .ok()
 }

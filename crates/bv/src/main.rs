@@ -6504,6 +6504,21 @@ fn capture_baseline_for(issues: &[bv_core::model::Issue]) -> Result<BaselineCapt
 
 const BASELINE_PATH: &str = ".bv/baseline.json";
 
+/// Where the drift baseline lives.
+///
+/// `BV_BASELINE_PATH` overrides it. The default is relative to the working
+/// directory, which made `--robot-alerts` and `--robot-triage` read whatever
+/// `.bv/baseline.json` happened to exist there: the golden gate reported one
+/// extra alert on a developer machine that had saved a baseline and none on CI,
+/// from the same commit and the same issues file. A test that reports a
+/// different answer depending on untracked local state is not reproducible.
+fn baseline_path() -> std::path::PathBuf {
+    match std::env::var_os("BV_BASELINE_PATH") {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => std::path::PathBuf::from(BASELINE_PATH),
+    }
+}
+
 /// Application version Go bv reports in robot envelopes (`pkg/version`
 /// fallback, pinned at parity commit 18afafa). Byte-parity with frozen
 /// goldens requires emitting Go's version string, not the Rust crate's.
@@ -6713,7 +6728,7 @@ fn run_save_baseline(desc: &str) -> ExitCode {
             let created_at = doc["created_at"].as_str().unwrap_or_default().to_string();
             let stats = &stats;
             let top = &top_metrics;
-            match std::fs::write(BASELINE_PATH, serde_json::to_vec_pretty(&doc).unwrap()) {
+            match std::fs::write(baseline_path(), serde_json::to_vec_pretty(&doc).unwrap()) {
                 Ok(_) => {
                     // Go main.go:3629-3630: the path, then `bl.Summary()`.
                     // Go builds the path from an absolute `os.Getwd()`
@@ -6758,7 +6773,8 @@ fn run_save_baseline(desc: &str) -> ExitCode {
 /// any issue load — the comment at main.go:2547-2548 says so — so it works in
 /// a repo with no `.beads` at all.
 fn run_baseline_info() -> ExitCode {
-    let path = std::path::Path::new(BASELINE_PATH);
+    let baseline = baseline_path();
+    let path = baseline.as_path();
     if !path.exists() {
         println!("No baseline found.");
         println!("Create one with: bv --save-baseline \"description\"");
@@ -8025,7 +8041,7 @@ fn drift_summary(result: &bv_analysis::drift::DriftResult) -> String {
 }
 
 fn run_check_drift() -> ExitCode {
-    let baseline_doc = match std::fs::read_to_string(BASELINE_PATH) {
+    let baseline_doc = match std::fs::read_to_string(baseline_path()) {
         Ok(raw) => raw,
         Err(_) => {
             eprintln!("No baseline found at {BASELINE_PATH}. Save one with --save-baseline.");
@@ -8158,7 +8174,7 @@ fn rfc3339_second_precision(rfc3339: &str) -> String {
 }
 
 fn run_robot_drift() -> ExitCode {
-    let baseline_doc = match std::fs::read_to_string(BASELINE_PATH) {
+    let baseline_doc = match std::fs::read_to_string(baseline_path()) {
         Ok(raw) => raw,
         Err(_) => {
             let payload = serde_json::json!({
