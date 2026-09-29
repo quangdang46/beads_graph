@@ -18505,15 +18505,37 @@ fn jiff_local_now() -> String {
         let (h, m) = (offset.abs() / 3600, (offset.abs() % 3600) / 60);
         format!("{sign}{h:02}:{m:02}")
     };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{zone}",
-        dt.year(),
-        dt.month(),
-        dt.day(),
-        dt.hour(),
-        dt.minute(),
-        dt.second()
-    )
+    // Go's `time.Time` marshals with `RFC3339Nano`, which keeps the fractional
+    // seconds when they are non-zero: the oracle writes
+    // `2026-09-29T12:48:29.345601+07:00`, and a second-only render dropped
+    // them. The stored value is what every later `--check-drift` compares.
+    let nanos = local.subsec_nanosecond();
+    if nanos == 0 {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{zone}",
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second()
+        )
+    } else {
+        // RFC3339Nano also drops TRAILING zeros from the fraction.
+        let mut frac = format!("{nanos:09}");
+        while frac.ends_with('0') {
+            frac.pop();
+        }
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{frac}{zone}",
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second()
+        )
+    }
 }
 
 /// The machine's current UTC offset in seconds, from the C library's
