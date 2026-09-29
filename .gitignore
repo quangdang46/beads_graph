@@ -105,3 +105,9 @@ report.md
 
 # A --pages wizard run whose output directory is a bare name.
 /OutA/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
