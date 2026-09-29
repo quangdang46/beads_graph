@@ -111,3 +111,6 @@ report.md
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+# A --pages wizard run with a single-character output directory.
+/O/
