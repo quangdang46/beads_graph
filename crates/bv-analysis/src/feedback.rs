@@ -115,14 +115,19 @@ impl GoTime {
 
     /// Go's `time.Now()` on this machine: the local zone, not UTC, so the
     /// offset Go writes is the one the wall clock is actually in.
+    ///
+    /// A zero offset is stored as `None` rather than `Some(0)`, because `None`
+    /// is what a `Z` stamp parses back to and both render as `Z` — the same
+    /// form Go writes for a UTC `time.Time`. Keeping `Some(0)` would render
+    /// identically and still fail to equal its own round trip, since
+    /// `parse_offset_suffix` has no `Z` case to return `Some(0)` from.
     pub fn now() -> Self {
         let ts = jiff::Timestamp::now();
-        let offset = Some(
-            ts.to_zoned(jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC))
-                .offset()
-                .seconds() as i64,
-        );
-        Self(ts, offset)
+        let offset = ts
+            .to_zoned(jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC))
+            .offset()
+            .seconds() as i64;
+        Self(ts, (offset != 0).then_some(offset))
     }
 
     /// Whether this is Go's zero `time.Time` — Go's `t.IsZero()`.
@@ -139,19 +144,31 @@ impl GoTime {
     /// what reproduces that; appending it to the UTC form would print
     /// 13:00:07+07:00, the same instant under a label it never had.
     fn to_rfc3339(self) -> String {
-        let base = match self.1 {
-            Some(secs) => (self.0 + jiff::Span::new().seconds(secs))
-                .to_string()
-                .trim_end_matches('Z')
-                .to_string(),
-            None => self.0.to_string(),
-        };
         match self.1 {
             Some(secs) if secs != 0 => {
+                let base = (self.0 + jiff::Span::new().seconds(secs))
+                    .to_string()
+                    .trim_end_matches('Z')
+                    .to_string();
                 let (sign, abs) = if secs < 0 { ('-', -secs) } else { ('+', secs) };
                 format!("{base}{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60)
             }
-            _ => base,
+            // A zero offset is UTC, and Go renders UTC as `Z` — RFC3339 admits
+            // only `Z` or `±HH:MM`. This used to trim the `Z` for *every*
+            // recorded offset and re-append one only for non-zero, which left
+            // the UTC case as a bare `2026-09-30T01:23:45.123456789`. That is
+            // not a timestamp jiff can read back, and `GoTime::now` records
+            // an offset unconditionally — so a machine at UTC+0 wrote a
+            // feedback store it then refused to load:
+            //
+            //     Error loading feedback: failed to parse feedback file:
+            //     failed to find offset component, which is required for
+            //     parsing a timestamp
+            //
+            // Measured against the oracle at TZ=UTC: Go writes
+            // `"created_at": "...113126Z"` and reads it back. Any user in UTC
+            // lost their feedback store on the next run.
+            _ => self.0.to_string(),
         }
     }
 }
@@ -385,6 +402,28 @@ fn normalize_loaded(loaded: FeedbackData) -> FeedbackData {
 
 /// Load feedback data from the beads directory — Go `LoadFeedback`
 /// (feedback.go:83-103). A missing file yields fresh defaults without an
+/// Where the recommendation-weight store lives.
+///
+/// `BV_FEEDBACK_PATH` overrides it, for the same reason `BV_BASELINE_PATH`
+/// exists. `.beads/feedback.json` is gitignored, so a machine that has ever
+/// run a `--feedback-*` flag carries a store that a clean clone and CI do not —
+/// and the store is not inert: it is the `feedback` block of every robot
+/// payload, including the tuned `weight_adjustments` and `effective_weights`
+/// that feed scoring. A gate that reads whichever store it finds is a gate
+/// that follows the machine.
+///
+/// That is not hypothetical. `golden/selfrepo____robot_triage.json` had one
+/// machine's 2 events and weight adjustments baked into it, so it matched here
+/// and diverged on every runner. Point the override at a path that does not
+/// exist and the command takes Go's clean-checkout path, which returns
+/// defaults and omits the block entirely.
+pub fn feedback_path(beads_dir: &Path) -> std::path::PathBuf {
+    match std::env::var_os("BV_FEEDBACK_PATH") {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => beads_dir.join(FEEDBACK_FILE),
+    }
+}
+
 /// error, which is what lets `--feedback-reset` work on a clean checkout.
 ///
 /// Only a *not-found* stat takes that path. Go's `os.Stat` +
@@ -392,7 +431,7 @@ fn normalize_loaded(loaded: FeedbackData) -> FeedbackData {
 /// through to `os.ReadFile`, which then fails; `Path::exists` would swallow a
 /// permission error and silently hand back defaults instead.
 pub fn load_feedback(beads_dir: &Path) -> Result<FeedbackData, FeedbackError> {
-    let path = beads_dir.join(FEEDBACK_FILE);
+    let path = feedback_path(beads_dir);
     match std::fs::metadata(&path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -414,7 +453,7 @@ impl FeedbackData {
     pub fn save(&mut self, beads_dir: &Path) -> Result<(), FeedbackError> {
         self.updated_at = GoTime::now();
         let data = serde_json::to_string_pretty(self).map_err(FeedbackError::Marshal)?;
-        let path = beads_dir.join(FEEDBACK_FILE);
+        let path = feedback_path(beads_dir);
         std::fs::write(&path, data).map_err(FeedbackError::Write)?;
         #[cfg(unix)]
         {

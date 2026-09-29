@@ -64,6 +64,71 @@ fn run(dir: &Path, args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// As [`run`], but pinned to a timezone. The store's timestamps are rendered in
+/// the *local* zone, so the zone changes the bytes on disk.
+fn run_in_tz(dir: &Path, tz: &str, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_bvr"))
+        .args(args)
+        .current_dir(dir)
+        .env("TZ", tz)
+        .output()
+        .expect("binary runs");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+/// The store has to be readable by the *next* run, in whatever zone that run is
+/// in. `GoTime::now` records a local offset and RFC3339 permits only `Z` or
+/// `±HH:MM`, so a zero offset must render as `Z`.
+///
+/// It used to render as neither: the `Z` was trimmed for every recorded offset
+/// and re-appended only when non-zero, so a machine at UTC+0 wrote
+/// `"created_at": "2026-09-29T18:30:22.691881"` and then refused to load it —
+///
+///     Error loading feedback: failed to parse feedback file: failed to find
+///     offset component, which is required for parsing a timestamp
+///
+/// which is a user's feedback store, not a test fixture. Every other offset
+/// worked, so this passed on any machine not at UTC — and GitHub's runners are
+/// UTC, where three of these tests went red. Measured against the oracle at
+/// TZ=UTC, Go writes `"...113126Z"` and reads it back.
+#[test]
+fn the_store_round_trips_in_a_zero_offset_zone() {
+    for tz in [
+        "UTC",
+        "Asia/Ho_Chi_Minh",
+        "America/New_York",
+        "Pacific/Kiritimati",
+    ] {
+        let dir = repo(&format!("tz{}", tz.replace('/', "_")));
+        let (code, _, stderr) = run_in_tz(&dir, tz, &["--feedback-accept", "stale"]);
+        assert_eq!(code, 0, "write at TZ={tz}: {stderr}");
+
+        let raw = std::fs::read_to_string(dir.join(".beads").join("feedback.json"))
+            .expect("feedback.json");
+        let created: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let stamp = created["created_at"]
+            .as_str()
+            .expect("created_at is a string");
+        assert!(
+            stamp.ends_with('Z') || stamp.ends_with("00"),
+            "RFC3339 needs Z or ±HH:MM; TZ={tz} wrote {stamp:?}"
+        );
+
+        // The store must load on the next run, not just parse as JSON.
+        let (code, stdout, stderr) = run_in_tz(&dir, tz, &["--feedback-ignore", "hub"]);
+        assert_eq!(code, 0, "read back at TZ={tz}: {stderr}");
+        assert!(
+            stdout.contains("2 total events"),
+            "the first event was lost at TZ={tz}: {stdout:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// `--feedback-show` with an empty store. Go loads defaults when `feedback.json`
 /// is absent (feedback.go:86-89) and prints `ToJSON` re-indented with two
 /// spaces (main.go:2464-2469) — deliberately NOT inside the robot envelope.

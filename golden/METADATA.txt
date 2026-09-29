@@ -14,3 +14,14 @@ captured_files: 70
 # oracle emits on a machine with no drift baseline. scripts/capture_goldens.sh
 # now fails outright rather than repeat the capture.
 partial_recapture: selfrepo____robot_alerts.json@2026-09-30
+# selfrepo____robot_triage.json was recaptured on 2026-09-30 from the same
+# go_commit, for the same reason. The original was taken with a
+# .beads/feedback.json present, so it froze the capture machine's own
+# recommendation-weight store into the oracle — 2 events, and the tuned
+# weight_adjustments/effective_weights they produce, which feed scoring.
+# That file is gitignored, so no clean checkout can reproduce them; the
+# payload on a clean machine simply omits the `feedback` block. Recaptured
+# with the store moved aside: the `feedback` key is gone and nothing else
+# changed. scripts/capture_goldens.sh now refuses to run while either this
+# file or .bv/baseline.json is present.
+partial_recapture: selfrepo____robot_triage.json@2026-09-30

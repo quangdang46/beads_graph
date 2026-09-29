@@ -111,6 +111,17 @@ fn run_bvr_raw(cwd: &Path, args: &[&str]) -> Option<std::process::Output> {
             "BV_BASELINE_PATH",
             cwd.join("golden/.no-such-baseline.json"),
         )
+        // Same trap, one level over: `.beads/feedback.json` is gitignored too,
+        // and it is not inert. It supplies the `feedback` block of every robot
+        // payload — the tuned `weight_adjustments` and `effective_weights` —
+        // so a machine that once ran a `--feedback-*` flag scored differently
+        // from a clean clone. `selfrepo____robot_triage`'s golden had one
+        // machine's 2 events baked in: it matched here and failed on every
+        // runner with 'g' vs 'f' at byte 2, the first key of the object.
+        .env(
+            "BV_FEEDBACK_PATH",
+            cwd.join("golden/.no-such-feedback.json"),
+        )
         .output()
         .ok()
 }

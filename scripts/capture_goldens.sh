@@ -81,29 +81,38 @@ declare -a COMMANDS=(
 mkdir -p "$OUT"
 captured=0
 
-# A `.bv/baseline.json` under a fixture root poisons the corpus, and it is the
-# one input a capture cannot control. Go's `--robot-alerts` and `--robot-triage`
-# read the drift baseline relative to the working directory, and `.bv/` is
-# gitignored — so a machine that has ever run `--save-baseline` carries a
-# baseline that a fresh clone (and CI) does not. Capturing the `selfrepo` class
-# with one present froze a local reading into the oracle: golden/
-# selfrepo____robot_alerts.json carried
-#   "Actionable issues decreased by 2 (100.0%)", baseline_value 2
-# which no clean machine can reproduce, because the 2 came from the capture
-# machine's own workspace state. The Rust port matched it here only because
-# this machine had the same file; CI, without it, read an empty alert list and
-# the gate failed for a reason that had nothing to do with the port.
+# A `.bv/baseline.json` or a `.beads/feedback.json` under a fixture root
+# poisons the corpus, and these are the two inputs a capture cannot control.
+# Both are gitignored, so a machine that has ever run `--save-baseline` or a
+# `--feedback-*` flag carries state that a fresh clone (and CI) does not, and
+# both change the payload rather than sitting inert:
+#
+#   .bv/baseline.json    read by --robot-alerts/--robot-triage. Capturing the
+#                        selfrepo class with one present froze
+#                          "Actionable issues decreased by 2 (100.0%)"
+#                        into golden/selfrepo____robot_alerts.json, and the 2
+#                        came from the capture machine's own workspace.
+#
+#   .beads/feedback.json supplies the `feedback` block of every robot payload,
+#                        including the tuned `weight_adjustments` and
+#                        `effective_weights` that feed scoring. It froze one
+#                        machine's 2 events into
+#                        golden/selfrepo____robot_triage.json. The Rust port
+#                        matched here only because this machine had the same
+#                        file; CI, without it, omitted the block and the gate
+#                        failed at byte 2 — the first key of the object.
 #
 # Hard failure, same reasoning as the commit guard above: silently capturing
-# local state is worse than not capturing. Move the baseline aside (or commit
-# a decision to baseline-dependent goldens) and re-run.
-if [ -f "$REPO/.bv/baseline.json" ]; then
-  echo "ERROR: $REPO/.bv/baseline.json exists." >&2
-  echo "       --robot-alerts/--robot-triage would read it and freeze this" >&2
-  echo "       machine's drift state into the corpus. Move it aside and" >&2
-  echo "       re-run, e.g.  mv .bv/baseline.json /tmp/  (do not delete it)." >&2
-  exit 1
-fi
+# local state is worse than not capturing. Move the files aside and re-run.
+for local_state in "$REPO/.bv/baseline.json" "$REPO/.beads/feedback.json"; do
+  if [ -f "$local_state" ]; then
+    echo "ERROR: $local_state exists." >&2
+    echo "       A robot payload would read it and freeze this machine's" >&2
+    echo "       state into the corpus. Move it aside and re-run, e.g." >&2
+    echo "         mv $local_state /tmp/    (do not delete it)" >&2
+    exit 1
+  fi
+done
 
 for fixture in "${FIXTURES[@]}"; do
     name=$(basename "$fixture")
