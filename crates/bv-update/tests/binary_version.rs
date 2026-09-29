@@ -19,6 +19,10 @@ use bv_update::update::parse_binary_version_output;
 // build failure.
 #[cfg(unix)]
 use bv_update::update::verify_binary_version;
+// Same for `PathBuf`: `fake_binary`, `version_script` and `cleanup` are the
+// only users and all three are `#[cfg(unix)]`, so on Windows this import is
+// unused too.
+#[cfg(unix)]
 use std::path::PathBuf;
 
 // --- pure parsing ----------------------------------------------------------
