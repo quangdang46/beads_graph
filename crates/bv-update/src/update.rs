@@ -154,6 +154,29 @@ pub fn current_binary_path() -> Result<PathBuf, UpdateError> {
         .map_err(|e| UpdateError::BinaryPath(e.to_string()))
 }
 
+/// Render a path for a message, the way Go's `filepath` would print it.
+///
+/// `Path::canonicalize` returns a *verbatim* path on Windows — `\\?\C:\...` —
+/// which is a correct way to hand a path back to the OS but not what a user
+/// expects to read, and not what Go produces. Go resolves symlinks through
+/// `filepath.EvalSymlinks` and prints an ordinary `C:\...`, so a rollback error
+/// that named `\\?\C:\...\bvr-under-test.backup` would differ from Go's text on
+/// every Windows install of the same file.
+///
+/// The prefix is stripped for display only; nothing here changes the path that
+/// is opened, renamed or written.
+fn display_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    // `\\?\UNC\server\share\...` is the verbatim spelling of a UNC path.
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => rest.to_string(),
+        None => s,
+    }
+}
+
 /// Backup path for a binary (`<bin>.backup`, Go parity).
 pub fn backup_path(binary: &Path) -> PathBuf {
     let mut s = binary.as_os_str().to_owned();
@@ -493,11 +516,11 @@ fn probe_error(dir: &Path, cause: &std::io::Error) -> UpdateError {
     if cause.kind() == std::io::ErrorKind::PermissionDenied {
         UpdateError::NoPermission(format!(
             "{} (try running with sudo): {cause}",
-            dir.display()
+            display_path(dir)
         ))
     } else {
         UpdateError::CannotPrepare {
-            dir: dir.display().to_string(),
+            dir: display_path(dir),
             cause: cause.to_string(),
         }
     }
@@ -520,7 +543,7 @@ fn check_writable(binary_path: &Path) -> Result<(), UpdateError> {
     // Rust's `File` has no fallible close.
     drop(file);
     std::fs::remove_file(&probe).map_err(|e| UpdateError::CannotPrepare {
-        dir: dir.display().to_string(),
+        dir: display_path(dir),
         cause: format!("remove update permission probe: {e}"),
     })
 }
@@ -831,7 +854,7 @@ pub fn perform_update(
         return Err(UpdateError::Backup {
             reason: "backup failed".into(),
             // The rename may have half-succeeded; Go reports the path either way.
-            backup_path: Some(backup.display().to_string()),
+            backup_path: Some(display_path(&backup)),
         });
     }
 
@@ -849,12 +872,12 @@ pub fn perform_update(
             // Go sets `result.BackupPath` before the risky rename
             // (updater.go:1394) and `cmd/bv` prints it so the user can still
             // roll back by hand when the restore itself failed.
-            let backup_path = Some(backup.display().to_string());
+            let backup_path = Some(display_path(&backup));
             if !restored {
                 return Err(UpdateError::Install {
                     reason: format!(
                         "(restore also failed; manual recovery: mv {} {})",
-                        backup.display(),
+                        display_path(&backup),
                         binary_path.display()
                     ),
                     backup_path,
@@ -882,7 +905,7 @@ pub fn perform_update(
     Ok(UpdateResult {
         old_version: old,
         new_version: release.tag_name.clone(),
-        backup_path: Some(backup.display().to_string()),
+        backup_path: Some(display_path(&backup)),
         message,
     })
 }
@@ -892,9 +915,9 @@ pub fn perform_rollback() -> Result<(), UpdateError> {
     let binary_path = current_binary_path()?;
     let backup = backup_path(&binary_path);
     if !backup.exists() {
-        return Err(UpdateError::NoBackup(backup.display().to_string()));
+        return Err(UpdateError::NoBackup(display_path(&backup)));
     }
-    println!("Rolling back from backup at {}...", backup.display());
+    println!("Rolling back from backup at {}...", display_path(&backup));
     let bad = {
         let mut s = binary_path.as_os_str().to_owned();
         s.push(".bad");
@@ -928,6 +951,30 @@ pub fn releases_url() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `\\?\` prefix is Windows-only, so the test builds the string rather
+    /// than a `PathBuf` — on a unix host there is no way to make
+    /// `canonicalize` produce one, and on Windows `Path::new` would keep the
+    /// prefix verbatim and stop testing the stripping.
+    #[test]
+    fn display_path_strips_the_windows_verbatim_prefix() {
+        assert_eq!(
+            display_path(Path::new(r"C:\Users\me\bvr.exe")),
+            r"C:\Users\me\bvr.exe",
+            "a plain path is untouched"
+        );
+        // What `Path::canonicalize` actually returns on Windows.
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\me\bvr.exe")),
+            r"C:\Users\me\bvr.exe",
+            "the verbatim prefix is stripped"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\bvr.exe")),
+            r"\\server\share\bvr.exe",
+            "a verbatim UNC path becomes a normal UNC path"
+        );
+    }
 
     #[test]
     fn safe_names() {
