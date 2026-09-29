@@ -1,7 +1,7 @@
 //! Validation — modifier-requires + exclusive-primary checks.
 //! Port of Go validateModifierFlags / validateExclusivePrimaryCommands.
 
-use crate::flags::{MODIFIER_REQUIRES, ROBOT_PRIMARIES};
+use crate::flags::{FlagKind, MODIFIER_FLAGS, MODIFIER_REQUIRES, ROBOT_PRIMARIES};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -75,12 +75,41 @@ pub struct Presence {
 }
 
 impl Presence {
+    /// Build the set of flags the caller actually passed.
+    ///
+    /// Only tokens that are a REGISTERED flag name count, and a value-taking
+    /// flag's value is skipped. Go's `isFlagActive` (main.go:471-480) looks
+    /// the name up in the `FlagSet` and ignores anything it does not find, so
+    /// `--schema-command robot-capabilities` leaves only `schema-command`
+    /// active. Inserting every token made the VALUE look like a second primary
+    /// command, and `--robot-schema --schema-command robot-capabilities`
+    /// failed with "only one primary command allowed" where the oracle emits
+    /// the schema.
     pub fn from_args(args: &[String]) -> Self {
         let mut present = HashSet::new();
-        for arg in args {
-            let name = arg.strip_prefix("--").unwrap_or(arg);
-            let name = name.split('=').next().unwrap_or(name);
-            present.insert(name.to_string());
+        let mut skip_next = false;
+        for (i, arg) in args.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            let Some(rest) = arg.strip_prefix("--") else {
+                continue;
+            };
+            // `--name=value` carries its own value; `--name value` consumes
+            // the next token when the flag is registered and takes one.
+            match rest.split_once('=') {
+                Some((name, _)) => {
+                    present.insert(name.to_string());
+                }
+                None => {
+                    present.insert(rest.to_string());
+                    if takes_value(rest) {
+                        skip_next = true;
+                    }
+                }
+            }
+            let _ = i;
         }
         Presence { present }
     }
@@ -170,6 +199,22 @@ pub fn validate_modifier_requires_with(
 /// main.go:1903-1906, and every stage exits on its own. Folding two stages
 /// into one call made the later message print even when an earlier stage had
 /// already rejected the run.
+/// Whether a registered flag consumes the following token as its value.
+/// Unknown names are assumed to take none, which matches Go looking the flag
+/// up and finding nothing.
+fn takes_value(name: &str) -> bool {
+    ROBOT_PRIMARIES
+        .iter()
+        .chain(MODIFIER_FLAGS.iter())
+        .find(|f| f.name == name)
+        .is_some_and(|f| {
+            matches!(
+                f.kind,
+                FlagKind::Str | FlagKind::Int | FlagKind::Float | FlagKind::StringArray
+            )
+        })
+}
+
 pub fn validate_exclusive_primaries(present: &Presence) -> Vec<ValidationError> {
     let mut group_counts: HashMap<&str, Vec<&str>> = HashMap::new();
     for f in ROBOT_PRIMARIES {

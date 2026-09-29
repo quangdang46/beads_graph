@@ -17795,12 +17795,24 @@ fn run_robot_schema(args: &[String]) -> ExitCode {
         }
         return ExitCode::from(1);
     };
-    let payload = serde_json::json!({
-        "schema_version": full["schema_version"],
-        "generated_at": full["generated_at"],
-        "command": name,
-        "schema": schema,
-    });
+    // Go builds this from a `map[string]any` (main.go:8223's neighbour), and
+    // `encoding/json` sorts map keys: the oracle emits
+    // `command, generated_at, schema, schema_version`. An object literal here
+    // preserves insertion order and came out `schema_version, generated_at,
+    // command, schema`, so the document differed byte-for-byte while parsing
+    // identically. Sorting restores Go's order.
+    let mut payload = serde_json::Map::new();
+    payload.insert("command".into(), serde_json::json!(name));
+    payload.insert("generated_at".into(), full["generated_at"].clone());
+    payload.insert("schema".into(), schema.clone());
+    payload.insert("schema_version".into(), full["schema_version"].clone());
+    let payload = serde_json::Value::Object(
+        payload
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_iter()
+            .collect(),
+    );
     emit_json(&payload)
 }
 
