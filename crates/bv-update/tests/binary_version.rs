@@ -23,7 +23,7 @@ use bv_update::update::verify_binary_version;
 // only users and all three are `#[cfg(unix)]`, so on Windows this import is
 // unused too.
 #[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // --- pure parsing ----------------------------------------------------------
 
@@ -102,6 +102,48 @@ fn version_script(tag: &str, version: &str) -> PathBuf {
     fake_binary(tag, &format!("#!/bin/sh\necho 'bv {version}'\n"))
 }
 
+/// `verify_binary_version`, retried through the runner's ETXTBSY.
+///
+/// A file that was written a moment ago and then executed is exactly the case
+/// ETXTBSY exists for: on a container-backed runner the filesystem can still
+/// hold the file open for write-back after the writer closed it, and `execve`
+/// refuses. `sync_all` in [`fake_binary`] narrows the window but does not close
+/// it, which is why the failure survived that change and kept appearing on a
+/// different subset of these tests each run — one, then three, none of them
+/// reproducible here in 30 consecutive runs.
+///
+/// The retry is in the test rather than in `verify_binary_version` on purpose:
+/// the production path never writes the binary it is about to run — the
+/// downloader writes it once, well before verification — so a retry there
+/// would be defending against a situation the product does not have, and would
+/// also mask a genuine "still busy" condition.
+///
+/// Only ETXTBSY is retried; every other spawn error is returned unchanged, so a
+/// missing file or a permission problem still fails immediately.
+#[cfg(unix)]
+fn verify_with_retry(binary: &Path, expected: &str) -> Result<(), String> {
+    const ATTEMPTS: usize = 5;
+    for attempt in 1..=ATTEMPTS {
+        match verify_binary_version(binary, expected) {
+            Err(ref e) if is_etxtbsy(e) && attempt < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
+            }
+            other => return other,
+        }
+    }
+    unreachable!("the loop returns on the final attempt")
+}
+
+#[cfg(unix)]
+fn is_etxtbsy(message: &str) -> bool {
+    // Rendered by the `map_err` at update.rs:619 as "run --version: {e}".
+    // Matched on the text rather than the raw errno because the `spawn` error
+    // has already been formatted into the string by the time it reaches here;
+    // "os error 26" is ETXTBSY on Linux, and "Text file busy" is its Display.
+    (message.starts_with("run --version:") && message.contains("Text file busy"))
+        || message.contains("os error 26")
+}
+
 #[cfg(unix)]
 fn cleanup(paths: &[PathBuf]) {
     for p in paths {
@@ -116,7 +158,7 @@ fn cleanup(paths: &[PathBuf]) {
 #[test]
 fn a_stock_bvr_reporting_the_go_compat_version_is_accepted() {
     let bin = version_script("stock", "v0.25.0");
-    let result = verify_binary_version(&bin, "v0.2.1");
+    let result = verify_with_retry(&bin, "v0.2.1");
     cleanup(&[bin]);
     assert_eq!(
         result,
@@ -135,7 +177,7 @@ fn an_exact_or_equivalent_match_is_accepted() {
         ("  v0.2.1  ", "v0.2.1"),
     ] {
         let bin = version_script("exact", reported);
-        let result = verify_binary_version(&bin, expected);
+        let result = verify_with_retry(&bin, expected);
         cleanup(&[bin]);
         assert_eq!(result, Ok(()), "{reported:?} vs {expected:?}");
     }
@@ -145,7 +187,7 @@ fn an_exact_or_equivalent_match_is_accepted() {
 #[test]
 fn a_mismatched_version_that_is_not_the_go_compat_string_is_refused() {
     let bin = version_script("wrong", "v0.1.0");
-    let err = verify_binary_version(&bin, "v0.2.1").unwrap_err();
+    let err = verify_with_retry(&bin, "v0.2.1").unwrap_err();
     cleanup(&[bin]);
     assert_eq!(
         err, "downloaded binary reports v0.1.0, expected v0.2.1",
@@ -157,7 +199,7 @@ fn a_mismatched_version_that_is_not_the_go_compat_string_is_refused() {
 #[test]
 fn something_that_is_not_bvr_is_refused() {
     let bin = fake_binary("other", "#!/bin/sh\necho 'malware 9.9.9'\n");
-    let err = verify_binary_version(&bin, "v0.2.1").unwrap_err();
+    let err = verify_with_retry(&bin, "v0.2.1").unwrap_err();
     cleanup(&[bin]);
     assert!(err.contains("unexpected --version output"), "got {err:?}");
 }
@@ -169,7 +211,7 @@ fn a_non_zero_exit_is_refused_with_stderr_attached() {
         "fail",
         "#!/bin/sh\necho 'cannot allocate segment' >&2\nexit 3\n",
     );
-    let err = verify_binary_version(&bin, "v0.2.1").unwrap_err();
+    let err = verify_with_retry(&bin, "v0.2.1").unwrap_err();
     cleanup(&[bin]);
     assert!(err.contains("run --version:"), "got {err:?}");
     assert!(
@@ -183,7 +225,7 @@ fn a_non_zero_exit_is_refused_with_stderr_attached() {
 fn a_non_executable_or_broken_file_is_refused() {
     let path = std::env::temp_dir().join(format!("bvr-notexec-{}", std::process::id()));
     std::fs::write(&path, b"not a program").unwrap();
-    assert!(verify_binary_version(&path, "v0.2.1").is_err());
+    assert!(verify_with_retry(&path, "v0.2.1").is_err());
     let _ = std::fs::remove_file(&path);
 }
 
@@ -194,7 +236,7 @@ fn output_beyond_the_four_kib_cap_is_refused() {
     // `verifyBinaryVersion` refuses rather than parsing a partial string.
     let filler = "x".repeat(8192);
     let bin = fake_binary("chatty", &format!("#!/bin/sh\necho 'bv v0.2.1 {filler}'\n"));
-    let err = verify_binary_version(&bin, "v0.2.1").unwrap_err();
+    let err = verify_with_retry(&bin, "v0.2.1").unwrap_err();
     cleanup(&[bin]);
     assert!(
         err.contains("--version output exceeds 4096 bytes"),
