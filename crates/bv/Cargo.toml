@@ -29,6 +29,20 @@ bv-recipe = { path = "../bv-recipe" }
 # `--id-pattern` hands each value to regex::Regex::compile before registering
 # it with bv-correlation (Go main.go:1772-1782), so the CLI needs the type.
 regex = "1"
+# `--robot-history-timeout-ms` bounds the git-history prologue of robot triage
+# with the same shape Go uses: the report is built on its own thread and the
+# caller selects the result against a deadline. A channel plus `recv_timeout`
+# is the sync stand-in for Go's `select` on `resCh` vs `histCtx.Done()`, and is
+# this repo's established per-metric timeout pattern (no tokio, per AGENTS.md).
+crossbeam-channel = { workspace = true }
+# `--watch-export` (Go main.go:3315-3317) does `signal.Notify(sigCh,
+# os.Interrupt, syscall.SIGTERM)` so Ctrl+C prints "Stopping watch mode..." and
+# exits 0 instead of dying on the default disposition. Reproducing that needs a
+# real signal handler, which std has no API for; libc is already in the lock
+# file via other workspace members, so this adds no new package. It also backs
+# the `fstat` probe in the Pages wizard, whose `st_mode` width differs per
+# platform.
+libc = "0.2"
 # `--cpu-profile` (Go main.go:1908-1933) samples the process and writes the
 # pprof protobuf, the same artifact Go's `runtime/pprof` produces. Rust has no
 # stdlib equivalent, so the sampling comes from tikv/pprof-rs; `protobuf-codec`
@@ -50,23 +64,17 @@ regex = "1"
 # building the whole binary for Windows at all, so the flag is gated and
 # `start_cpu_profile` reports the limitation instead of failing the build.
 # Lifting it needs a Windows-capable sampling profiler, not a cfg.
+# `flate2` is here too because only `CpuProfileGuard::drop` gzips anything, and
+# that struct is `#[cfg(unix)]`.
+#
+# This table MUST come after every shared `[dependencies]` entry. A TOML table
+# header ends the one before it, so inserting this mid-list silently reassigns
+# everything below it to the unix-only set — which builds fine on a mac and
+# fails on Windows with `unresolved import crossbeam_channel` for a crate that
+# is plainly declared two lines above.
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15.0", features = ["protobuf-codec"] }
-# Go's `pprof.StartCPUProfile` gzips what it writes; pprof-rs hands back a bare
-# `Profile` and leaves serialization to the caller, so the gzip wrapper is ours.
 flate2 = "1"
-# `--robot-history-timeout-ms` bounds the git-history prologue of robot triage
-# with the same shape Go uses: the report is built on its own thread and the
-# caller selects the result against a deadline. A channel plus `recv_timeout`
-# is the sync stand-in for Go's `select` on `resCh` vs `histCtx.Done()`, and is
-# this repo's established per-metric timeout pattern (no tokio, per AGENTS.md).
-crossbeam-channel = { workspace = true }
-# `--watch-export` (Go main.go:3315-3317) does `signal.Notify(sigCh,
-# os.Interrupt, syscall.SIGTERM)` so Ctrl+C prints "Stopping watch mode..." and
-# exits 0 instead of dying on the default disposition. Reproducing that needs a
-# real signal handler, which std has no API for; libc is already in the lock
-# file via other workspace members, so this adds no new package.
-libc = "0.2"
 
 [dev-dependencies]
 # The watch-loop test has to deliver a real SIGINT to check the graceful

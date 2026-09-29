@@ -18,6 +18,20 @@
 //! touching `.beads/`. History generation is switched off because the scratch
 //! dir is not a git repository and Go warns rather than fails there.
 
+// Unix only. Every test here ends by delivering a real SIGINT to the watch
+// process, through `libc::kill(child.id() as libc::pid_t, libc::SIGINT)` —
+// `Child::kill` sends SIGKILL, which skips the handler and is exactly what
+// these tests must not do. Neither `kill` nor `pid_t` is defined in
+// `libc/src/windows/`, so the file does not compile there:
+//
+//     error[E0425]: cannot find function `kill` in crate `libc`
+//     error[E0425]: cannot find type `pid_t` in crate `libc`
+//
+// This follows the port itself: `install_stop_handler` is `#[cfg(unix)]`, so
+// Windows has no graceful stop to exercise. Go's `signal.Notify` does work
+// there — that gap is documented on `install_stop_handler`.
+#![cfg(unix)]
+
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
