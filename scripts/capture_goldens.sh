@@ -81,6 +81,30 @@ declare -a COMMANDS=(
 mkdir -p "$OUT"
 captured=0
 
+# A `.bv/baseline.json` under a fixture root poisons the corpus, and it is the
+# one input a capture cannot control. Go's `--robot-alerts` and `--robot-triage`
+# read the drift baseline relative to the working directory, and `.bv/` is
+# gitignored — so a machine that has ever run `--save-baseline` carries a
+# baseline that a fresh clone (and CI) does not. Capturing the `selfrepo` class
+# with one present froze a local reading into the oracle: golden/
+# selfrepo____robot_alerts.json carried
+#   "Actionable issues decreased by 2 (100.0%)", baseline_value 2
+# which no clean machine can reproduce, because the 2 came from the capture
+# machine's own workspace state. The Rust port matched it here only because
+# this machine had the same file; CI, without it, read an empty alert list and
+# the gate failed for a reason that had nothing to do with the port.
+#
+# Hard failure, same reasoning as the commit guard above: silently capturing
+# local state is worse than not capturing. Move the baseline aside (or commit
+# a decision to baseline-dependent goldens) and re-run.
+if [ -f "$REPO/.bv/baseline.json" ]; then
+  echo "ERROR: $REPO/.bv/baseline.json exists." >&2
+  echo "       --robot-alerts/--robot-triage would read it and freeze this" >&2
+  echo "       machine's drift state into the corpus. Move it aside and" >&2
+  echo "       re-run, e.g.  mv .bv/baseline.json /tmp/  (do not delete it)." >&2
+  exit 1
+fi
+
 for fixture in "${FIXTURES[@]}"; do
     name=$(basename "$fixture")
     [ "$name" = "." ] && name="selfrepo"

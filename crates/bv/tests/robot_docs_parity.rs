@@ -223,9 +223,25 @@ fn every_topic_is_a_subset_of_all() {
 
 /// The `default` arm: an unknown topic reports itself, lists what exists, and
 /// suggests the nearest by edit distance (Go `suggestClosest`, main.go:8224).
+///
+/// Exit code is 2, not 0. Measured against the oracle at 18afafa: an unknown
+/// topic writes that JSON to *stdout* and returns 2, which is contract #4's
+/// usage-error code — `main.go:8922` sets `ErrorTopic` and the handler
+/// propagates it. This test went through [`docs`], which asserts exit 0, so it
+/// was really asserting that a usage error is not a usage error.
 #[test]
 fn unknown_topic_suggests_the_nearest_real_topic() {
-    let got: Value = serde_json::from_str(&docs("guied")).expect("stdout is JSON");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_bvr"))
+        .args(["--robot-docs", "guied"])
+        .output()
+        .expect("binary runs");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "oracle exits 2 on an unknown topic: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got: Value = serde_json::from_slice(&out.stdout).expect("the error payload goes to stdout");
     assert_eq!(got["error"], "Unknown topic: guied");
     assert_eq!(got["did_you_mean"], "guide");
     assert_eq!(got["suggested_action"], "Run `bv --robot-docs guide`");

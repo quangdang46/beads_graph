@@ -1031,7 +1031,13 @@ fn run_generate_docs() -> ExitCode {
     if code != ExitCode::SUCCESS {
         return code;
     }
-    println!("generating docs: wrote {}", files.len());
+    // Go prints nothing on success. `docgen.Generate` ends by returning nil
+    // (docgen.go:582-680) and its caller returns that straight up
+    // (main.go:1756-1759); there is no `fmt.Print` anywhere in the path.
+    // Measured against the oracle: `--generate-docs` exits 0 with zero bytes
+    // on both stdout and stderr. A progress line here is stdout noise a
+    // drop-in replacement cannot emit — anything piping `bv --generate-docs`
+    // would see a line Go never prints.
     ExitCode::SUCCESS
 }
 
@@ -12453,7 +12459,7 @@ fn run_robot_alerts() -> ExitCode {
     // comparison. With a file present, Go honours its exact layout below —
     // including an absent `top_metrics.pagerank`, which it reads as an empty
     // list and therefore reports every current entry as newly entered.
-    let baseline_on_disk = std::fs::read_to_string(BASELINE_PATH)
+    let baseline_on_disk = std::fs::read_to_string(baseline_path())
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     let baseline_doc = baseline_on_disk.clone().unwrap_or_default();

@@ -163,11 +163,20 @@ const FLAG_SECTIONS: &[FlagSection] = &[
         exact: &[],
         prefixes: &["agents-"],
     },
-    FlagSection {
-        title: "Debug Flags",
-        exact: &[],
-        prefixes: &[],
-    },
+    // No "Debug Flags" section, deliberately. `--generate-docs` does not use
+    // `docgen.DefaultFlagSections` (docgen.go:48), which does define one; it
+    // builds its section list from `rootHelpSections` (main.go:1747-1752), and
+    // that list has six entries, none of them "Debug Flags". Go's
+    // `isDebug = s.Title == "Debug Flags"` (docgen.go:157) therefore never
+    // fires for this caller, and the debug-last sort arm never engages.
+    //
+    // An empty section here matched nothing but invited the belief that
+    // `--generate-docs` and friends landed in a debug group — they do not.
+    // In `rootHelpSections` they are split by role: `cpu-profile`,
+    // `profile-startup` and `profile-json` are "General Flags", and
+    // `debug-render`, `debug-width` and `debug-height` are "Export &
+    // Reporting" (main.go:73-74, 186-188). `generate-docs` itself is in no
+    // section at all and renders as "Other", which is what Go emits.
 ];
 
 fn section_for(name: &str) -> &'static str {
@@ -670,24 +679,56 @@ mod tests {
         // Prefix match, per Go's robot section.
         assert_eq!(section_for("robot-triage"), "Robot & Planning Flags");
         assert_eq!(section_for("export-pages"), "Export & Reporting");
-        assert_eq!(section_for("generate-docs"), "Debug Flags");
+        // `generate-docs` is in no `rootHelpSections` entry, so Go leaves it
+        // "Other" (main.go:151-158). It is not a debug-group flag.
+        assert_eq!(section_for("generate-docs"), "Other");
+        // The flags whose *names* start with `debug-` are not debug-group
+        // flags either — Go files them under Export & Reporting (main.go:186-188).
+        assert_eq!(section_for("debug-render"), "Export & Reporting");
+        // Nor are the `profile-*` / `cpu-profile` flags, which are General.
+        assert_eq!(section_for("profile-json"), "General Flags");
         assert_eq!(section_for("something-unlisted"), "Other");
     }
 
     #[test]
-    fn debug_flags_sort_last() {
+    fn no_flag_lands_in_a_debug_group() {
+        // Go's `isDebug` arm of the comparator (docgen.go:158, 186-188) never
+        // fires for the section list `--generate-docs` actually passes, so the
+        // table sorts by group then name alone. This test pins that the port
+        // reaches the same conclusion rather than sorting on a group that the
+        // oracle never assigns.
         let table = render_flags_table();
-        let debug = table.find("`--generate-docs`").expect("debug flag present");
-        let general = table.find("`--db`").expect("general flag present");
-        assert!(debug > general, "Debug Flags must sort after General Flags");
+        assert!(
+            !table.contains("| Debug Flags |"),
+            "no row may be grouped as Debug Flags: {table}"
+        );
+    }
+
+    #[test]
+    fn rows_sort_by_group_then_name() {
+        // The comparator's first live key is the group, then the name; the
+        // debug arm is dead (see `no_flag_lands_in_a_debug_group`). Group
+        // ordering is plain string order, so "Other" sits between
+        // "History & Drift" and "Robot & Planning Flags".
+        let table = render_flags_table();
+        let pos = |needle: &str| {
+            table
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from table"))
+        };
+        assert!(pos("| General Flags |") < pos("| History & Drift |"));
+        assert!(pos("| History & Drift |") < pos("| Other |"));
+        assert!(pos("| Other |") < pos("| Robot & Planning Flags |"));
     }
 
     #[test]
     fn an_empty_default_renders_as_the_go_placeholder() {
-        // Go substitutes the literal `(empty)` rather than an empty cell
-        // (docgen.go:159-161).
+        // Go substitutes the bare literal `(empty)` for an empty DefValue
+        // (docgen.go:166-167) and wraps only non-empty defaults in backticks
+        // (docgen.go:168-173) — so the placeholder is *not* backticked.
         let table = render_flags_table();
-        assert!(table.contains("| `(empty)` |"), "{table}");
+        assert!(table.contains("| (empty) |"), "{table}");
+        assert!(!table.contains("| `(empty)` |"), "{table}");
     }
 
     #[test]

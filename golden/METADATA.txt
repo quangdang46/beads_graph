@@ -4,3 +4,13 @@ go_commit: 18afafaefbcfd7fbb2ed4f55b49e7141da6513d2
 expected_commit: 18afafaefbcfd7fbb2ed4f55b49e7141da6513d2
 source_date_epoch: 1787407612
 captured_files: 70
+# selfrepo____robot_alerts.json was recaptured on 2026-09-30 from the same
+# go_commit. The 2026-08-22 original was taken with a .bv/baseline.json present
+# in the repo root, so it froze the capture machine's drift state
+# ("Actionable issues decreased by 2 (100.0%)", baseline_value 2) into the
+# oracle. That file is gitignored, so no clean checkout can reproduce those
+# numbers. Recaptured with the baseline moved aside; the only change is that
+# `alerts` is now empty and summary total/warning are 0, which is what the
+# oracle emits on a machine with no drift baseline. scripts/capture_goldens.sh
+# now fails outright rather than repeat the capture.
+partial_recapture: selfrepo____robot_alerts.json@2026-09-30

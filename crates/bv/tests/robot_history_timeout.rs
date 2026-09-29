@@ -15,19 +15,100 @@
 //! (itself a git repository with a `.beads` file, so the prologue really runs)
 //! and assert on the one field the budget is allowed to move:
 //! `triage.meta.history_status`.
+//!
+//! ## Why this builds its own repository
+//!
+//! These tests used to run against the workspace, on the reasoning that the
+//! workspace "is itself a git repository with a `.beads` file, so the prologue
+//! really runs". That coupled them to the project's own backlog, and Go gates
+//! the whole feature on that backlog having open work:
+//!
+//! ```text
+//! robot_registry.go:2156  hasOpenIssues := false
+//! robot_registry.go:2158      if issue.Status != closed && != tombstone { hasOpenIssues = true }
+//! robot_registry.go:2165  if hasOpenIssues && sourceDateEpochActive() { "skipped" }
+//! robot_registry.go:2167  else if hasOpenIssues { ...run the bounded prologue... }
+//! ```
+//!
+//! With every bead closed, `hasOpenIssues` is false, neither branch runs,
+//! `historyStatus` stays `""`, and `triage.go:71`'s `omitempty` drops the key
+//! — in *both* binaries, identically. So the tests went red as a side effect of
+//! finishing the work, which is the worst possible reason for a parity test to
+//! fail. The fixture below pins the precondition instead of inheriting it.
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
-const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+/// Enough open work that Go's `hasOpenIssues` is true no matter what else the
+/// project is doing, with a dependency edge so the prologue has something to
+/// correlate. Mirrors the shape `pkg/analysis/feedback.go`'s own e2e test uses.
+const ISSUES: &str = concat!(
+    r#"{"id":"hub","title":"Hub","status":"open","issue_type":"task","priority":1,"created_at":"2026-08-30T00:00:00Z","updated_at":"2026-08-31T00:00:00Z"}"#,
+    "\n",
+    r#"{"id":"leaf","title":"Leaf","status":"open","issue_type":"task","priority":2,"created_at":"2026-08-30T00:00:00Z","updated_at":"2026-08-31T00:00:00Z","dependencies":[{"issue_id":"leaf","depends_on_id":"hub","type":"blocks"}]}"#,
+    "\n",
+    r#"{"id":"done","title":"Already closed","status":"closed","issue_type":"task","priority":3,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"#,
+    "\n",
+);
 
-/// Run `--robot-triage` in the workspace, pinning the two environment inputs
-/// the resolution order reads. `flag` is appended only when Some, so "the flag
-/// is absent" is expressible — that is the case that lets the env var and then
-/// the default apply.
+/// Commits in the fixture. The 1ms cases assert the prologue *times out*, and
+/// that is only a property of the bound if the walk has real work to do — over
+/// a one-commit repository `git log` can finish inside the budget and the test
+/// would report a spurious failure. Sixty empty commits keeps the walk well
+/// past 1ms without making the suite slow.
+const COMMITS: usize = 60;
+
+/// Build the fixture once per test process and share it. The tests only read
+/// from it, so concurrent readers are safe.
+fn fixture() -> &'static Path {
+    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("bvr_history_timeout_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".beads")).expect("fixture .beads");
+        std::fs::write(dir.join(".beads").join("issues.jsonl"), ISSUES).expect("issues.jsonl");
+
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        git(&["config", "user.name", "fixture"]);
+        git(&["add", "-A"]);
+        for i in 0..COMMITS {
+            git(&[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                Box::leak(format!("commit {i}").into_boxed_str()),
+            ]);
+        }
+        dir
+    })
+}
+
+/// Run `--robot-triage` in the fixture repository, pinning the two environment
+/// inputs the resolution order reads. `flag` is appended only when Some, so "the
+/// flag is absent" is expressible — that is the case that lets the env var and
+/// then the default apply.
+///
+/// No `--db`: Go's chain reaches the prologue through `loader.GetBeadsDir("")`
+/// and `loader.FindJSONLPath` (robot_registry.go:2168-2171), which do their own
+/// discovery from the working directory. Pointing `--db` straight at a file
+/// satisfies neither, so the status would be empty for a reason that has nothing
+/// to do with the budget.
 fn run(flag: Option<&str>, env_timeout: Option<&str>, source_date_epoch: Option<&str>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bvr"));
-    cmd.current_dir(REPO_ROOT)
-        .args(["--robot-triage", "--db", ".beads/issues.jsonl"]);
+    cmd.current_dir(fixture()).args(["--robot-triage"]);
     if let Some(v) = flag {
         cmd.args(["--robot-history-timeout-ms", v]);
     }

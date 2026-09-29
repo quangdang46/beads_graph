@@ -736,7 +736,12 @@ fn generate_docs_exits_zero_without_launching_tui() {
     let (code, stdout, stderr) = run(&["--generate-docs"]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(!stderr.contains("launching TUI"), "{stderr}");
-    assert!(stdout.contains("Generated docs"), "{stdout}");
+    // Go prints nothing on success. Measured against the oracle at 18afafa:
+    // `--generate-docs` exits 0 with 0 bytes on stdout *and* stderr. The
+    // handler used to print a progress line, which asserted against this
+    // text; the assertion was pinning a message Go never emits, so it also
+    // failed the moment the line was corrected. Silence is the contract.
+    assert!(stdout.is_empty(), "Go writes nothing to stdout: {stdout:?}");
 }
 
 #[test]
