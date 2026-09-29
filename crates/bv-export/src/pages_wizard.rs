@@ -699,16 +699,22 @@ pub fn guard_stdin() -> Result<Option<Vec<u8>>, WizardError> {
         return Ok(None);
     }
     // `st_mode` is u16 on Windows and u32 on unix, and the `S_IF*` constants
-    // are not the same width on either, so `st_mode & S_IFMT` compiles on unix
-    // and fails on Windows with `no implementation for u16 & i32`. Casting both
-    // sides to u32 types the comparison everywhere; every `S_IF*` value fits in
-    // 16 bits, so the widening is lossless.
-    let file_type = (libc::S_IFMT as u32) & (st.st_mode as u32);
-    let is_regular = file_type == (libc::S_IFREG as u32);
+    // are i32, so `st_mode & S_IFMT` compiles on unix and fails on Windows
+    // with `no implementation for u16 & i32`. Widening both sides to u64
+    // types the comparison everywhere; every `S_IF*` value fits in 16 bits,
+    // so the widening is lossless.
+    //
+    // u64, not u32: on unix `st_mode` is *already* u32, and `st_mode as u32`
+    // is then a same-type no-op that clippy rejects as `unnecessary_cast`
+    // ("casting to the same type is unnecessary (`u32` -> `u32`)"). u64 is
+    // wider than `st_mode` on every platform libc supports here, so each cast
+    // is a genuine widening on all of them and the lint cannot fire.
+    let file_type = (libc::S_IFMT as u64) & (st.st_mode as u64);
+    let is_regular = file_type == (libc::S_IFREG as u64);
     if is_regular && st.st_size == 0 {
         return Err(WizardError::StdinEmpty);
     }
-    let is_pipe = file_type != (libc::S_IFCHR as u32) && !is_regular;
+    let is_pipe = file_type != (libc::S_IFCHR as u64) && !is_regular;
     if !is_pipe {
         return Ok(None);
     }
