@@ -41,6 +41,17 @@ fn fixture(name: &str) -> PathBuf {
     dir
 }
 
+/// Normalize a path or message for comparison across platforms: forward
+/// slashes, and no Windows verbatim (`\\?\`) prefix. `\\?\UNC\server\share`
+/// becomes `//server/share`.
+fn comparable_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    match s.strip_prefix("//?/UNC/") {
+        Some(rest) => format!("//{rest}"),
+        None => s.strip_prefix("//?/").unwrap_or(&s).to_string(),
+    }
+}
+
 fn run_in(dir: &Path, binary: &Path, args: &[&str]) -> Output {
     Command::new(binary)
         .current_dir(dir)
@@ -140,10 +151,23 @@ fn rollback_without_a_backup_exits_one() {
     assert_fails_with(&out, &["--rollback"], "Rollback failed: ");
     // Go updater.go:1560 names the path it looked at, so the message must
     // point inside the fixture rather than at the build tree.
+    //
+    // Both sides are compared through `comparable_path`. The binary's own path
+    // comes from `current_binary_path`, which canonicalizes; the fixture path
+    // here comes from `%TEMP%`, and on a Windows runner that is the 8.3 short
+    // name `C:\Users\RUNNER~1\...` while canonicalize reports the long
+    // `C:\Users\runneradmin\...`. Those are two spellings of one directory, so
+    // the literal comparison was failing on the spelling rather than on the
+    // resolution — which is the thing being asserted.
     let stderr = stderr_of(&out);
+    let expected = format!(
+        "{}/bvr-under-test.backup",
+        comparable_path(&dir.canonicalize().expect("fixture canonicalizes"))
+    );
+    let got = comparable_path(std::path::Path::new(&stderr));
     assert!(
-        stderr.contains(&dir.join("bvr-under-test.backup").display().to_string()),
-        "stderr should name the fixture backup path, got {stderr:?}"
+        got.contains(&expected),
+        "stderr should name the fixture backup path, wanted {expected:?}, got {stderr:?}"
     );
     // main.go:2160-2164: the handler adds nothing on stdout.
     assert_eq!(stdout_of(&out), "");
