@@ -16,7 +16,16 @@ jobs:
     name: Verify before publishing
     runs-on: ubuntu-latest
     steps:
+      # Full history is required, exactly as in ci.yml. This job runs the
+      # differential gate, which shells out to `git log` for the `selfrepo`
+      # history and diff cases. The actions/checkout default is fetch-depth: 1,
+      # which starves those commands and makes the gate fail on a tree that is
+      # perfectly green — so the release would be blocked by a checkout
+      # setting rather than by a real regression. (Or worse: it would block
+      # every release, which is how this goes unnoticed.)
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Format
