@@ -435,35 +435,49 @@ fn vendor_assets_are_sixteen_files_written_verbatim() {
 
 #[test]
 fn export_creates_no_database_when_the_write_fails() {
-    // A read-only parent must fail before anything is published, so a good
-    // bundle in place is never replaced by a broken one.
+    // A target that cannot be written must fail before anything is published,
+    // so a good bundle in place is never replaced by a broken one.
     let (issues, deps) = fixture();
     let out = scratch("readonly");
     let good = SqliteExporter::new(&issues, &deps);
     good.export(&out).unwrap();
     let before = std::fs::read(out.join("beads.sqlite3")).unwrap();
 
-    let blocked = out.join("blocked");
-    std::fs::create_dir_all(&blocked).unwrap();
-    let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
+    // Unix: a read-only parent. `PermissionsExt` is unix-only and 0o500 means
+    // nothing on Windows, so the two branches build genuinely unwritable
+    // targets by different means — otherwise the Windows build would clear the
+    // mode, export would succeed, and the assertion below would be testing
+    // nothing.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o500);
-    }
-    std::fs::set_permissions(&blocked, perms).unwrap();
+    let blocked = {
+        let dir = out.join("blocked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o500);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        dir
+    };
+    // Windows has no directory mode to clear, so use a parent that cannot be
+    // a directory at all: a path underneath an existing regular file. Creating
+    // it fails on any platform, so the export has no choice but to refuse.
+    #[cfg(not(unix))]
+    let blocked = {
+        let file = out.join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        file.join("blocked")
+    };
 
     let result = SqliteExporter::new(&issues, &deps).export(&blocked);
+    // Restore write permission so the scratch tree can be cleaned up.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
-        perms.set_mode(0o700);
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
         std::fs::set_permissions(&blocked, perms).unwrap();
     }
     assert!(
         result.is_err(),
-        "export into a read-only directory should fail"
+        "export into an unwritable target should fail"
     );
     assert!(!blocked.join("beads.sqlite3").exists());
 
