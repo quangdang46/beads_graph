@@ -32,6 +32,11 @@ pub enum DiscoveryError {
     RedirectDepth(usize),
     #[error("git: {0}")]
     Git(String),
+    /// A revision that could not be resolved. Go wraps this at
+    /// `LoadAtWithReport` (git.go:151) and prints it with no `git:` prefix, so
+    /// it gets its own variant rather than borrowing `Git`'s.
+    #[error("{0}")]
+    ResolveRevision(String),
 }
 
 /// Go: `looksLikeBeadsDBFile`.
@@ -348,24 +353,80 @@ impl GitLoader {
 
     /// Go: `resolveRevision` — rev-parse --verify first, then date fallback.
     pub fn resolve_revision(&self, revision: &str) -> Result<String, DiscoveryError> {
-        match self.git(&["rev-parse", "--verify", "--end-of-options", revision]) {
+        // Go peels to a commit: `rev-parse --verify --end-of-options
+        // <rev>^{commit}` (git.go:296). Without the peel a tag or a tree object
+        // resolves fine here and only fails later, when the historical load
+        // needs a commit timestamp.
+        match self.git(&[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{revision}^{{commit}}"),
+        ]) {
             Ok(sha) => Ok(sha),
-            Err(err) => {
+            Err(_) => {
                 if let Some(t) = parse_date_string(revision) {
                     self.resolve_date_revision(t)
+                        // Go wraps the whole resolution: "resolving revision
+                        // %q: %w" (git.go:151). The bare inner message left
+                        // a reader with "no commit found at or before ..." and
+                        // no indication of which revision was asked for.
+                        .map_err(|e| match e {
+                            DiscoveryError::Git(m) => DiscoveryError::ResolveRevision(format!(
+                                "resolving revision {revision:?}: {m}"
+                            )),
+                            other => other,
+                        })
                 } else {
-                    Err(err)
+                    Err(DiscoveryError::ResolveRevision(format!(
+                        "resolving revision {revision:?}: git rev-parse failed"
+                    )))
                 }
             }
         }
     }
 
+    /// RFC3339 for `t` in the machine's own offset, with no zone name —
+    /// Go's `time.Format(time.RFC3339)` emits the numeric offset and, for a
+    /// zone that has a name in the load location, would append it; the
+    /// revisions this formats come from a user-typed string, so the numeric
+    /// form is what both binaries print.
+    fn format_offset(t: jiff::Timestamp) -> String {
+        let local = jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC);
+        // `Timestamp::to_zoned` renders the instant in the given zone, so the
+        // wall clock and the offset come from the SAME conversion. Rendering
+        // `t` as UTC and appending the local offset describes a different
+        // instant under this one's label — 2025-12-31T17:00Z is not
+        // 2026-01-01 in +07 — and that is what Go's `Format` never does,
+        // because a `time.Time` carries its zone (git.go:314).
+        let zoned = t.to_zoned(local);
+        let secs = zoned.offset().seconds();
+        let (sign, abs) = if secs < 0 { ('-', -secs) } else { ('+', secs) };
+        let (h, m, s) = (abs / 3600, (abs % 3600) / 60, abs % 60);
+        let base = zoned.strftime("%Y-%m-%dT%H:%M:%S").to_string();
+        if s == 0 {
+            format!("{base}{sign}{h:02}:{m:02}")
+        } else {
+            format!("{base}{sign}{h:02}:{m:02}:{s:02}")
+        }
+    }
+
     /// Go: `resolveDateRevision` — last commit at-or-before timestamp.
     fn resolve_date_revision(&self, t: jiff::Timestamp) -> Result<String, DiscoveryError> {
-        let out = self.git(&["rev-list", "-1", &format!("--before={t}"), "HEAD"])?;
+        // Go hands `t` to `time.Format(time.RFC3339)`, which keeps the zone
+        // the revision string was parsed in — a user writing a bare date gets
+        // their own offset back, not UTC. `jiff::Timestamp` always renders UTC,
+        // so the offset is applied here before formatting.
+        let local = t
+            .to_zoned(jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC))
+            .offset()
+            .seconds();
+        let _ = local;
+        let shown = Self::format_offset(t);
+        let out = self.git(&["rev-list", "-1", &format!("--before={shown}"), "HEAD"])?;
         if out.is_empty() {
             return Err(DiscoveryError::Git(format!(
-                "no commit found at or before {t}"
+                "no commit found at or before {shown}"
             )));
         }
         Ok(out)
@@ -423,10 +484,22 @@ fn parse_date_string(s: &str) -> Option<jiff::Timestamp> {
     if let Ok(ts) = s.parse::<jiff::Timestamp>() {
         return Some(ts);
     }
+    // Go parses a zone-less string in `time.Local` (git.go:339-342) so that
+    // `--as-of 2026-01-01` means the same wall clock to git's
+    // `--before=` as it does to the user. `TimeZone::system()` is a
+    // `Result` and was being used where a `TimeZone` was expected, which
+    // silently resolved the date in UTC and made the instant 7 hours off.
+    let local = jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC);
     for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"] {
         if let Ok(dt) = civil::DateTime::strptime(fmt, s) {
-            let tz = jiff::tz::TimeZone::system();
-            if let Ok(zoned) = dt.to_zoned(tz) {
+            // `to_zoned` can fail for a wall clock the local zone skips (a DST
+            // gap). `TimeZone::system()` is a `Result` and was being passed
+            // where a `TimeZone` was expected, so the `?`-less call silently
+            // resolved the date in UTC — `--as-of 2026-01-01` then meant
+            // 2025-12-31T17:00Z to git, seven hours before the date the user
+            // typed. `disambiguate` picks the compatible offset on a gap,
+            // which is what a user means by a wall-clock date.
+            if let Ok(zoned) = dt.to_zoned(local.clone()) {
                 return Some(zoned.into());
             }
         }

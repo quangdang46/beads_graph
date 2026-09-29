@@ -3445,6 +3445,42 @@ fn emit_unresolved_source() -> ExitCode {
     ExitCode::from(1)
 }
 
+/// Go's answer to a historical load failure that could not reach a revision
+/// (cmd/bv/main.go:2655-2660, via `writeRobotLoadFailure` at :7415).
+///
+/// The message is a bare `String` here, so the caller cannot tell this apart
+/// from any other error string; it is turned into the envelope before
+/// leaving so the contract holds for every --as-of failure.
+fn as_of_load_failure(revision: &str, error: &str) -> String {
+    if env_robot() {
+        // In robot mode Go writes the envelope and suppresses the stderr
+        // diagnostics entirely (the `if !envRobot` guard at :2671).
+        let authority = failed_source_authority("", error);
+        let ahash = bv_robot::authority_hash(&authority);
+        let mut payload = serde_json::json!({
+            "generated_at": jiff_now(),
+            "data_hash": "",
+            "output_format": output_format(),
+            "version": GO_APP_VERSION,
+            "source_authority":
+                serde_json::to_value(&authority).unwrap_or(serde_json::Value::Null),
+        });
+        if !ahash.is_empty() {
+            payload["authority_hash"] = serde_json::json!(ahash);
+        }
+        let shash = bv_robot::scope_hash("", "", "", "", &[]);
+        if !shash.is_empty() {
+            payload["scope_hash"] = serde_json::json!(shash);
+        }
+        payload["actionable"] = serde_json::json!(false);
+        payload["error"] = serde_json::json!(error);
+        let _ = emit_json(&payload);
+        error.to_string()
+    } else {
+        format!("Error loading issues at {revision}: {error}")
+    }
+}
+
 /// True when `e` is the load failure Go answers with the degraded envelope
 /// rather than a bare error line.
 fn is_unresolved_source_error(e: &str) -> bool {
@@ -4604,10 +4640,19 @@ fn load_issues_auto_meta_raw(
     // If --as-of is specified, use GitLoader for time-travel (Go parity).
     if let Some(revision) = as_of {
         let loader = bv_core::discovery::GitLoader::new(cwd);
-        let resolved = loader
-            .resolve_revision(revision)
-            .map_err(|e| e.to_string())?;
-        let issues = loader.load_at(revision).map_err(|e| e.to_string())?;
+        // Go's historical-load failure is not a bare error line: it writes a
+        // degraded envelope to stdout and exits 1 (cmd/bv/main.go:2655-2660),
+        // so a robot caller always gets a parseable document with
+        // `actionable: false` and the reason in `error`. Both the revision
+        // lookup and the load itself take that path.
+        let resolved = match loader.resolve_revision(revision) {
+            Ok(r) => r,
+            Err(e) => return Err(as_of_load_failure(revision, &e.to_string())),
+        };
+        let issues = match loader.load_at(revision) {
+            Ok(i) => i,
+            Err(e) => return Err(as_of_load_failure(revision, &e.to_string())),
+        };
         // Go guards this line with `if !envRobot` (main.go:2671): in robot
         // mode stdout carries only the payload and stderr stays clean, so the
         // message was being written where the oracle writes nothing at all.
@@ -9229,7 +9274,33 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
                 issues
             }
             Err(e) => {
-                eprintln!("Error loading issues at {revision}: {e}");
+                // Go writes the degraded envelope to stdout before the stderr
+                // line and still exits 1 (cmd/bv/main.go:2655-2660). A bare
+                // error line left a robot caller with nothing to parse: the
+                // contract is that a failed load is still a document, with
+                // `actionable: false` and the reason in `error`.
+                let error = e.to_string();
+                let authority = failed_source_authority("", &error);
+                let ahash = bv_robot::authority_hash(&authority);
+                let mut payload = serde_json::json!({
+                    "generated_at": jiff_now(),
+                    "data_hash": "",
+                    "output_format": output_format(),
+                    "version": GO_APP_VERSION,
+                    "source_authority":
+                        serde_json::to_value(&authority).unwrap_or(serde_json::Value::Null),
+                });
+                if !ahash.is_empty() {
+                    payload["authority_hash"] = serde_json::json!(ahash);
+                }
+                let shash = bv_robot::scope_hash("", "", "", "", &[]);
+                if !shash.is_empty() {
+                    payload["scope_hash"] = serde_json::json!(shash);
+                }
+                payload["actionable"] = serde_json::json!(false);
+                payload["error"] = serde_json::json!(error);
+                let _ = emit_json(&payload);
+                eprintln!("Error loading issues at {revision}: {error}");
                 return Err(ExitCode::from(1));
             }
         }
