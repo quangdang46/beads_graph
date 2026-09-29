@@ -12,7 +12,13 @@
 //! (`crates/bv/src/main.rs` `GO_APP_VERSION`), which never equals the release
 //! tag. Both failure directions are covered below.
 
-use bv_update::update::{parse_binary_version_output, verify_binary_version};
+use bv_update::update::parse_binary_version_output;
+// The tests that exercise `verify_binary_version` shell out to a fake `bvr`
+// script, so they are all `#[cfg(unix)]`. The import has to carry the same
+// gate: left ungated it is unused on Windows, which `-D warnings` turns into a
+// build failure.
+#[cfg(unix)]
+use bv_update::update::verify_binary_version;
 use std::path::PathBuf;
 
 // --- pure parsing ----------------------------------------------------------
