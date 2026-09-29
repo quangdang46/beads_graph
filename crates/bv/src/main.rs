@@ -4050,6 +4050,34 @@ fn run_pages_steps_5_to_7(
     }
 }
 
+/// Go `GenerateHeadersFile` (cloudflare.go:265-290), byte for byte.
+///
+/// Cloudflare Pages serves `_headers` verbatim as response headers, and the
+/// bundle's WASM viewer needs the COOP/COEP pair to instantiate at all —
+/// without them the graph module fails to load in the deployed page while
+/// working fine in `--preview-pages`, which serves no such file.
+fn generate_cloudflare_headers(bundle: &std::path::Path) -> Result<(), String> {
+    const HEADERS: &str = "/*\n  \
+X-Frame-Options: DENY\n  \
+X-Content-Type-Options: nosniff\n  \
+Referrer-Policy: strict-origin-when-cross-origin\n  \
+Cross-Origin-Opener-Policy: same-origin\n  \
+Cross-Origin-Embedder-Policy: require-corp\n  \
+Cross-Origin-Resource-Policy: same-origin\n  \
+Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()\n\
+\n\
+/*.js\n  \
+Content-Type: application/javascript; charset=utf-8\n\
+\n\
+/*.wasm\n  \
+Content-Type: application/wasm\n\
+\n\
+/*.css\n  \
+Content-Type: text/css; charset=utf-8\n";
+    std::fs::write(bundle.join("_headers"), HEADERS)
+        .map_err(|e| format!("failed to write _headers file: {e}"))
+}
+
 /// Go `InitAndPush`'s first half (github.go:278-303): the local git sequence
 /// that turns the bundle into a repository. Split out so it can be exercised
 /// against a local bare remote — the network half is the only part that needs
@@ -4278,17 +4306,52 @@ fn repo_has_content(repo_full_name: &str) -> Result<bool, String> {
 /// prerequisites already gated on, so a machine without wrangler never
 /// reaches this.
 fn deploy_to_cloudflare(
-    wizard: &bv_export::pages_wizard::Wizard,
+    wizard: &mut bv_export::pages_wizard::Wizard,
     bundle: &std::path::Path,
 ) -> ExitCode {
-    let cfg = wizard.config();
+    // Cloned: the account confirm below takes &mut on the wizard, and a
+    // borrow held across it would conflict.
+    let cfg = wizard.config().clone();
     let project = if cfg.cloudflare_project.is_empty() {
         bv_export::pages_wizard::suggest_project_name(bundle)
     } else {
         cfg.cloudflare_project.clone()
     };
-    println!("Deploying to Cloudflare Pages...");
-    println!("  -> Project: {project}");
+    // Go shows the account and asks for confirmation before deploying
+    // (cloudflare.go:455-462), then writes `_headers` (:467-474). Both were
+    // missing: without the first a deploy could land on an account the
+    // operator never saw, and without the second the bundle ships without the
+    // COOP/COEP headers its WASM viewer needs to run.
+    if let Some(name) = wizard.cloudflare_account() {
+        println!();
+        println!("Cloudflare account: {name}");
+        if let Some(id) = wizard.cloudflare_account_id() {
+            println!("Account ID: {id}");
+        }
+        if !wizard.prompt_deploy_confirm("Deploy to this account?") {
+            eprintln!("Error: deployment cancelled");
+            return ExitCode::from(1);
+        }
+    }
+
+    println!();
+    println!("  -> Generating _headers file...");
+    if let Err(e) = generate_cloudflare_headers(bundle) {
+        // Go treats this as non-fatal and only warns (cloudflare.go:471-473).
+        println!("  Warning: {e}");
+    }
+
+    println!();
+    println!("  -> Deploying to Cloudflare Pages (project: {project})...");
+    // Go passes `--branch` (cloudflare.go:479-483). Without it wrangler
+    // publishes under a generated preview branch and `pages.dev` keeps serving
+    // whatever the account had before, so the URL reported afterwards is not
+    // the URL that was just uploaded.
+    let branch = if cfg.cloudflare_branch.is_empty() {
+        "main"
+    } else {
+        cfg.cloudflare_branch.as_str()
+    };
     let out = std::process::Command::new("wrangler")
         .args([
             "pages",
@@ -4296,6 +4359,8 @@ fn deploy_to_cloudflare(
             &bundle.to_string_lossy(),
             "--project-name",
             &project,
+            "--branch",
+            branch,
         ])
         .status();
     match out {

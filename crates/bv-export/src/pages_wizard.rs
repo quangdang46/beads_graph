@@ -490,6 +490,15 @@ fn check_wrangler_config_file() -> bool {
             .join(".wrangler")
             .join("config")
             .join("default.toml"),
+        // macOS wrangler (verified with 4.143.0) writes here. Go's list
+        // (cloudflare.go:132-136) does not include it, so `wrangler login`
+        // on a Mac leaves a token file the check cannot see and every run
+        // reports "not authenticated" despite a successful login.
+        home.join("Library")
+            .join("Preferences")
+            .join(".wrangler")
+            .join("config")
+            .join("default.toml"),
     ];
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         candidates.push(
@@ -798,6 +807,18 @@ pub struct Wizard {
 }
 
 impl Wizard {
+    /// Go's `status.AccountName` / `status.AccountID` from the Step 4 probe
+    /// (cloudflare.go:456-459), used to name the account before deploying.
+    /// Re-probed rather than cached: `wrangler login` may have run since.
+    pub fn cloudflare_account(&self) -> Option<String> {
+        check_wrangler_status().account_name
+    }
+
+    /// Go's `status.AccountID` (cloudflare.go:457-459).
+    pub fn cloudflare_account_id(&self) -> Option<String> {
+        check_wrangler_status().account_id
+    }
+
     /// A bare yes/no prompt outside the form sequence, the way Go reuses
     /// `newForm` for the Step 6 and Step 7 confirms
     /// (wizard.go:582-592, :5866-5874).
