@@ -69,6 +69,17 @@ fn json_in(dir: &str, args: &[&str]) -> Value {
     serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout is JSON ({e}): {stdout}"))
 }
 
+/// Present a path with `/` separators whatever the platform produced.
+///
+/// Paths in the payload come from `Path::join` and Go's `filepath.Join`, so
+/// they carry `\` on Windows. A literal like `.beads/issues.jsonl` is then
+/// false there — not because the port resolved anything differently, but
+/// because the assertion hardcoded a separator. Comparing normalized copies
+/// keeps the assertion about resolution rather than about the host.
+fn to_slashes(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 fn json(args: &[&str]) -> Value {
     json_in(SELF, args)
 }
@@ -186,8 +197,11 @@ fn profile_json_data_path_resolves_through_beads_dir() {
     // at the `.beads` directory, so the JSONL inside it is the answer.
     let out = json(&["--profile-startup", "--profile-json"]);
     let data_path = out["data_path"].as_str().expect("data_path is a string");
+    // Separators are normalized before the comparison: Go's `filepath.Join`
+    // uses `\` on Windows, so the path really does end `.beads\issues.jsonl`
+    // there and only the literal in this assertion is wrong.
     assert!(
-        data_path.ends_with(".beads/issues.jsonl"),
+        to_slashes(data_path).ends_with(".beads/issues.jsonl"),
         "data_path resolved through GetBeadsDir, got {data_path}"
     );
 }
@@ -256,9 +270,10 @@ fn profile_json_matches_go_field_for_field_on_medium_tree() {
     }
     // `data_path` is an absolute path, so only its tail is portable; the
     // fixture stores the redacted form and the run re-derives the same tail.
+    // Normalized first, because the runner's separator decides the split —
+    // without it the tail came back empty on Windows.
     let tail = |v: &Value| -> String {
-        v.as_str()
-            .expect("data_path is a string")
+        to_slashes(v.as_str().expect("data_path is a string"))
             .rsplit_once("tests/fixtures/")
             .map(|(_, t)| t.to_string())
             .unwrap_or_default()
