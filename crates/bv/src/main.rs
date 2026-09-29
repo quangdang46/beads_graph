@@ -3802,6 +3802,7 @@ fn source_stamp(path: &std::path::Path) -> (Option<std::time::SystemTime>, Optio
 /// does the printing.
 static STOP_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn on_stop_signal(_: libc::c_int) {
     STOP_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
@@ -3811,6 +3812,7 @@ extern "C" fn on_stop_signal(_: libc::c_int) {
 /// Installing a handler is what makes the graceful path reachable at all: on the
 /// default disposition Ctrl+C kills the process with 130 before any watch code
 /// runs, so the loop could never print its farewell.
+#[cfg(unix)]
 fn install_stop_handler() {
     use std::sync::atomic::Ordering;
     STOP_REQUESTED.store(false, Ordering::SeqCst);
@@ -3824,6 +3826,30 @@ fn install_stop_handler() {
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }
+}
+
+/// The Windows counterpart, and the second place this port knowingly diverges
+/// from Go.
+///
+/// `libc` defines `signal`, `sighandler_t`, `SIGINT` and `SIGTERM` only for
+/// `unix/`, `vxworks/`, `solid/` and `fuchsia/` — there is no `windows/` entry
+/// for any of them, so the unix version above does not compile there:
+///
+///     error[E0432]: unresolved import `libc::sighandler_t`
+///
+/// Go's `signal.Notify` does work on Windows, so Ctrl+C stops `--watch-export`
+/// gracefully in Go and kills the process here instead. The faithful fix is
+/// `SetConsoleCtrlHandler` from `windows-sys`, which is a new platform
+/// dependency and code that cannot be compiled or exercised from here — so
+/// this clears the flag and installs nothing, rather than shipping an
+/// unverifiable handler.
+///
+/// The flag is still cleared, so the watch loop's poll is identical; only the
+/// thing that sets it is missing.
+#[cfg(not(unix))]
+fn install_stop_handler() {
+    use std::sync::atomic::Ordering;
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
 }
 
 /// Go `runPagesWizard` (cmd/bv/main.go:5799-6026), the `--pages` wizard.
