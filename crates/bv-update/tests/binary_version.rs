@@ -65,8 +65,19 @@ fn the_reported_version_must_itself_parse() {
 // --- running a synthetic "binary" -----------------------------------------
 
 /// Write an executable shell script that stands in for a built `bvr`.
+///
+/// The file is fsync'd before the chmod, not just closed. These tests write a
+/// script and immediately `exec` it, and on a runner whose temp directory is
+/// overlayfs-backed the close can return while the write-back is still in
+/// flight — `execve` then fails with `ETXTBSY`, and the test reports it as
+///
+///     Err("run --version: Text file busy (os error 26)")
+///
+/// which says nothing about version verification at all. Syncing makes the
+/// bytes durable before anything tries to run them.
 #[cfg(unix)]
 fn fake_binary(tag: &str, body: &str) -> PathBuf {
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
@@ -76,7 +87,11 @@ fn fake_binary(tag: &str, body: &str) -> PathBuf {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, body).unwrap();
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(body.as_bytes()).unwrap();
+    file.sync_all()
+        .expect("fake binary is durable before it is executed");
+    drop(file);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
