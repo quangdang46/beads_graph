@@ -189,10 +189,7 @@ pub fn url_hostname(raw: &str) -> Option<String> {
     };
     let host = if let Some(rest) = host_port.strip_prefix('[') {
         // IPv6 literal: host ends at the closing bracket.
-        match rest.find(']') {
-            Some(i) => &rest[..i],
-            None => return None,
-        }
+        &rest[..rest.find(']')?]
     } else {
         match host_port.rfind(':') {
             Some(i) if host_port[i + 1..].bytes().all(|b| b.is_ascii_digit()) => &host_port[..i],

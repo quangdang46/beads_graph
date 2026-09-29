@@ -241,12 +241,10 @@ struct ParsedUrl {
 /// expose for the release URLs this crate handles. The `url` crate is not a
 /// workspace dependency.
 fn parse_url(raw: &str) -> Option<ParsedUrl> {
-    let (scheme, rest) = match raw.find("://") {
-        Some(i) => (raw[..i].to_string(), &raw[i + 3..]),
-        // A schemeless URL has no authority; Go treats it as a path only,
-        // which then fails the https check anyway.
-        None => return None,
-    };
+    // A schemeless URL has no authority; Go treats it as a path only, which
+    // then fails the https check anyway.
+    let i = raw.find("://")?;
+    let (scheme, rest) = (raw[..i].to_string(), &raw[i + 3..]);
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let tail = &rest[authority_end..];
@@ -255,6 +253,7 @@ fn parse_url(raw: &str) -> Option<ParsedUrl> {
         Some(i) => (authority[..i].to_string(), &authority[i + 1..]),
         None => (String::new(), authority),
     };
+
     let (host, port) = if let Some(after_bracket) = host_port.strip_prefix('[') {
         match after_bracket.find(']') {
             Some(i) => {
