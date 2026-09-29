@@ -698,12 +698,11 @@ pub fn guard_stdin() -> Result<Option<Vec<u8>>, WizardError> {
         // the wizard proceeds.
         return Ok(None);
     }
-    // `st_mode` and the S_IF* constants do not share a type: on Windows
-    // `st_mode` is u16 while the constants are u16 too, and on unix the
-    // field is u32. `st_mode & S_IFMT` therefore failed to compile on
-    // Windows with `no implementation for u16 & i32`. Casting both sides to
-    // u32 types the comparison on every target, and every S_IF* value fits
-    // in 16 bits so nothing is lost.
+    // `st_mode` is u16 on Windows and u32 on unix, and the `S_IF*` constants
+    // are not the same width on either, so `st_mode & S_IFMT` compiles on unix
+    // and fails on Windows with `no implementation for u16 & i32`. Casting both
+    // sides to u32 types the comparison everywhere; every `S_IF*` value fits in
+    // 16 bits, so the widening is lossless.
     let file_type = (libc::S_IFMT as u32) & (st.st_mode as u32);
     let is_regular = file_type == (libc::S_IFREG as u32);
     if is_regular && st.st_size == 0 {
