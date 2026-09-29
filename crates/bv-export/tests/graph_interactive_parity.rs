@@ -74,7 +74,7 @@ fn issue(
                 depends_on_id: (*depends_on).to_string(),
                 depends_on_legacy: String::new(),
                 target_id_legacy: String::new(),
-                r#type: *kind,
+                r#type: kind.clone(),
                 created_at: None,
                 created_by: String::new(),
             })

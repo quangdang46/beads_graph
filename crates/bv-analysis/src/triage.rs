@@ -369,7 +369,7 @@ impl<'a> Readiness<'a> {
             let deps: Vec<(&'a str, bv_core::model::DependencyType)> = issue
                 .dependencies
                 .iter()
-                .map(|d| (d.effective_depends_on(), d.r#type))
+                .map(|d| (d.effective_depends_on(), d.r#type.clone()))
                 .collect();
             // readiness.go:114-116 — parent-child is a rollup edge; record
             // the reverse index here so the queue phase can walk children.

@@ -117,7 +117,17 @@ impl Status {
 
 /// Dependency type. Legacy compat: an EMPTY type string is blocking,
 /// same as `blocks` (Go: `DependencyType.IsBlocking`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+/// `Other` carries a custom relationship verbatim. Go models the type as a
+/// plain `string` whose `IsValid` accepts anything non-blank (types.go:431), so
+/// a br workspace's own relationship type survives loading and is hashed as
+/// itself. Without this variant an unrecognized type was mapped onto
+/// `Related`, so `data_hash` hashed `"related"` where the oracle hashes the
+/// real string and the two diverged.
+///
+/// The variant costs `Copy`, which is why the issue recorded the change as
+/// touching ~20 call sites. The methods below take `self` by reference and
+/// return borrowed strings, so the common path is unaffected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum DependencyType {
     #[default]
     Blocks,
@@ -126,10 +136,13 @@ pub enum DependencyType {
     Related,
     ParentChild,
     DiscoveredFrom,
+    /// A relationship type `br` defines and this build does not know.
+    Other(String),
 }
 
 impl DependencyType {
-    pub fn as_str(self) -> &'static str {
+    /// The wire form, which for `Other` is the type `br` wrote.
+    pub fn as_str(&self) -> &str {
         match self {
             DependencyType::Blocks => "blocks",
             DependencyType::ConditionalBlocks => "conditional-blocks",
@@ -137,6 +150,7 @@ impl DependencyType {
             DependencyType::Related => "related",
             DependencyType::ParentChild => "parent-child",
             DependencyType::DiscoveredFrom => "discovered-from",
+            DependencyType::Other(raw) => raw,
         }
     }
 
@@ -146,7 +160,7 @@ impl DependencyType {
     ///
     /// The two typed conditional relationships are blocking even though their
     /// names do not say so — they gate readiness exactly like `blocks` does.
-    pub fn is_blocking(self) -> bool {
+    pub fn is_blocking(&self) -> bool {
         matches!(
             self,
             DependencyType::Blocks | DependencyType::ConditionalBlocks | DependencyType::WaitsFor
@@ -167,7 +181,11 @@ impl DependencyType {
             // them. A non-blocking variant is therefore the faithful mapping
             // for anything unrecognized; `raw_is_valid` records the difference
             // so the loader can still tell a known type from a custom one.
-            _ => DependencyType::Related,
+            // Go's `IsValid` accepts any non-blank type so br's custom
+            // relationships survive loading, and `IsBlocking` is false for
+            // them. `Other` is the faithful mapping: non-blocking, and it
+            // round-trips the original string instead of rewriting it.
+            other => DependencyType::Other(other.to_string()),
         }
     }
 

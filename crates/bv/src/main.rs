@@ -2530,7 +2530,7 @@ fn main() -> ExitCode {
                 .map(|(i, d)| bv_export::pages_data::BlockingDep {
                     issue_id: i.id.clone(),
                     depends_on_id: d.effective_depends_on().to_string(),
-                    dep_type: d.r#type,
+                    dep_type: d.r#type.clone(),
                 })
                 .collect();
 

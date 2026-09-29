@@ -501,7 +501,7 @@ pub fn build_graph_centrality(issue_ids: &[String], deps: &[BlockingDep]) -> Val
             issue.dependencies.push(bv_core::model::Dependency {
                 issue_id: dep.issue_id.clone(),
                 depends_on_id: dep.depends_on_id.clone(),
-                r#type: dep.dep_type,
+                r#type: dep.dep_type.clone(),
                 depends_on_legacy: String::new(),
                 target_id_legacy: String::new(),
                 created_at: None,
