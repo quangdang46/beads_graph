@@ -130,8 +130,12 @@ impl Canvas {
             }
             crossings.sort_by(|a, b| a.partial_cmp(b).unwrap());
             // Even-odd: fill between the 1st/2nd, 3rd/4th, ... crossings.
-            let mut pair = crossings.chunks_exact(2);
-            for span in pair.by_ref() {
+            // `as_chunks`, not `chunks_exact`: the chunk size is the
+            // constant 2, and clippy asks for the array-chunk API there.
+            // `as_chunks` yields (chunks, remainder); the remainder is the odd
+            // crossing out, and the even-odd rule only consumes pairs.
+            let (pair, _odd) = crossings.as_chunks::<2>();
+            for span in pair {
                 let from = span[0].ceil() as i32;
                 let to = (span[1] - f64::EPSILON).floor() as i32;
                 for x in from..=to {

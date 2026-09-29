@@ -255,15 +255,13 @@ fn parse_url(raw: &str) -> Option<ParsedUrl> {
     };
 
     let (host, port) = if let Some(after_bracket) = host_port.strip_prefix('[') {
-        match after_bracket.find(']') {
-            Some(i) => {
-                let host = after_bracket[..i].to_string();
-                let rest = &after_bracket[i + 1..];
-                let port = rest.strip_prefix(':').unwrap_or("").to_string();
-                (host, port)
-            }
-            None => return None,
-        }
+        let i = after_bracket.find(']')?;
+        let host = after_bracket[..i].to_string();
+        let port = after_bracket[i + 1..]
+            .strip_prefix(':')
+            .unwrap_or("")
+            .to_string();
+        (host, port)
     } else {
         match host_port.find(':') {
             Some(i) => (host_port[..i].to_string(), host_port[i + 1..].to_string()),
