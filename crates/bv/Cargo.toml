@@ -35,6 +35,22 @@ regex = "1"
 # is the feature that turns its `Report` into a `protos::Profile` to encode.
 # The protobuf-codegen half is a pure-Rust `.proto` parser, so this needs no
 # `protoc` on the build machine (the prost-codec alternative would).
+#
+# **Unix only, and that is a parity gap on Windows.** pprof-rs 0.15 reaches for
+# `nix::errno`, `nix::unistd`, `libc::pthread_t`, `libc::siginfo_t` and
+# `libc::ucontext_t`, none of which exist for `x86_64-pc-windows-msvc`, so an
+# unconditional dependency does not merely lack the feature there — the crate
+# fails to compile:
+#
+#     error[E0432]: unresolved imports `nix::errno`, `nix::unistd`
+#     error[E0425]: cannot find type `pthread_t` in crate `libc`
+#
+# Go's `runtime/pprof.StartCPUProfile` does work on Windows, so `--cpu-profile`
+# is a real divergence there, not a bug in this port. The alternative is not
+# building the whole binary for Windows at all, so the flag is gated and
+# `start_cpu_profile` reports the limitation instead of failing the build.
+# Lifting it needs a Windows-capable sampling profiler, not a cfg.
+[target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15.0", features = ["protobuf-codec"] }
 # Go's `pprof.StartCPUProfile` gzips what it writes; pprof-rs hands back a bare
 # `Profile` and leaves serialization to the caller, so the gzip wrapper is ours.

@@ -835,6 +835,12 @@ use std::process::ExitCode;
 // `--cpu-profile` serialises pprof-rs's `Report` into the same
 // `perftools.profiles.Profile` protobuf Go's `runtime/pprof` writes, then
 // gzips it. The trait supplies `Profile::encode_to_vec`.
+//
+// Unix only: pprof-rs 0.15 does not build for `*-pc-windows-msvc` (see the
+// `[target.'cfg(unix)'.dependencies]` entry in this crate's Cargo.toml). The
+// Windows `start_cpu_profile` below reports the gap rather than pretending the
+// flag worked.
+#[cfg(unix)]
 use pprof::protos::Message as _;
 
 /// Go `strconv.ParseBool` — the exact set `flag.Bool` accepts.
@@ -7867,6 +7873,7 @@ const GO_CPU_PROFILE_HZ: i32 = 100;
 /// closure handed to `RobotContext.FinalizeBeforeExit`; `Drop` fires exactly
 /// once, which is the `profileActive` latch in Go's `stopCPUProfile` closure
 /// (main.go:1919-1928) stated in a form the compiler enforces.
+#[cfg(unix)]
 struct CpuProfileGuard {
     /// The sampler. Reporting has to happen while this is still alive —
     /// pprof-rs reads the sample buffer off the guard, and the guard's own
@@ -7876,6 +7883,7 @@ struct CpuProfileGuard {
     path: String,
 }
 
+#[cfg(unix)]
 impl Drop for CpuProfileGuard {
     fn drop(&mut self) {
         // Go's order (main.go:1924-1929): stop the sampler, then close the
@@ -7956,6 +7964,7 @@ fn go_path_error(op: &str, path: &str, e: &std::io::Error) -> String {
 /// ones Go exits 1 on, with Go's message text: a create failure is
 /// `Could not create CPU profile: %v`, a start failure is
 /// `Could not start CPU profile: %v` after the file has been closed again.
+#[cfg(unix)]
 fn start_cpu_profile(path: Option<&str>) -> Result<Option<CpuProfileGuard>, String> {
     let path = match path.filter(|p| !p.is_empty()) {
         Some(p) => p,
@@ -7989,6 +7998,31 @@ fn start_cpu_profile(path: Option<&str>) -> Result<Option<CpuProfileGuard>, Stri
         file,
         path: path.to_string(),
     }))
+}
+
+/// The Windows counterpart, and the one place this port knowingly diverges
+/// from Go.
+///
+/// Go's `runtime/pprof.StartCPUProfile` works on Windows; the sampling here
+/// comes from pprof-rs, which does not build for `*-pc-windows-msvc` at all
+/// (it wants `nix::errno`, `libc::pthread_t`, `libc::ucontext_t`). The choice
+/// is between a binary that builds for Windows with the flag unsupported, and
+/// no Windows build at all, so this reports the gap.
+///
+/// Reporting beats `Ok(None)`: an absent guard would make `--cpu-profile
+/// out.pprof` exit 0 having written nothing, which is a silent wrong answer.
+/// The caller prints this and exits 1, the same way Go exits 1 on a profiler
+/// that cannot start.
+#[cfg(not(unix))]
+fn start_cpu_profile(path: Option<&str>) -> Result<Option<std::convert::Infallible>, String> {
+    match path.filter(|p| !p.is_empty()) {
+        None => Ok(None),
+        Some(_) => Err(
+            "Could not start CPU profile: --cpu-profile is not supported on this platform \
+             (the pprof sampler is unix-only); Go's runtime/pprof supports Windows"
+                .to_string(),
+        ),
+    }
 }
 
 /// Go reads the top-N metric lists from a baseline's sibling `top_metrics`

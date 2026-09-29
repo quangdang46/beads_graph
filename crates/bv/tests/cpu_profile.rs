@@ -45,6 +45,13 @@
 //! file appears and holds a real pprof CPU profile, and the failure paths
 //! carry Go's message and Go's exit code.
 
+// Unix only. The sampler is pprof-rs, which does not build for
+// `*-pc-windows-msvc` (see the `[target.'cfg(unix)'.dependencies]` entry in
+// `crates/bv/Cargo.toml`), so `--cpu-profile` is gated and every assertion
+// below describes behaviour Windows does not have. The Windows path is covered
+// by the error `start_cpu_profile` returns there, not by these tests.
+#![cfg(unix)]
+
 use std::io::Read as _;
 use std::process::Command;
 
