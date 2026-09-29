@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 
 use bv_core::model::{Comment, Dependency, DependencyType, Issue, Status};
 use bv_export::sqlite_export::{
-    copy_vendor_assets, MetricTables, SqliteExportConfig, SqliteExporter, VENDOR_ASSETS,
+    copy_vendor_assets, MetricTables, SqliteExportConfig, SqliteExporter, GITHUB_ACTIONS_WORKFLOW,
+    VENDOR_ASSETS,
 };
 use bv_export::sqlite_schema::count_rows;
 use rusqlite::Connection;
@@ -401,12 +402,30 @@ fn vendor_assets_are_sixteen_files_written_verbatim() {
     let out = scratch("vendor");
     let written = copy_vendor_assets(&out).unwrap();
 
-    assert_eq!(written.len(), 16);
-    assert_eq!(written.len(), VENDOR_ASSETS.len());
+    // Sixteen vendored files, plus the GitHub Actions workflow that Go writes
+    // from a string constant rather than from the embed (github.go:787-801) —
+    // so it is not a VENDOR_ASSETS entry and the return list is one longer
+    // than the table. This test predated that file and asserted 16, which made
+    // it fail on every run; the oracle settles it, since both binaries write
+    // 16 vendor files and one static.yml for `--export-pages`.
+    assert_eq!(VENDOR_ASSETS.len(), 16);
+    assert_eq!(written.len(), VENDOR_ASSETS.len() + 1);
     for (rel, bytes) in VENDOR_ASSETS {
         let path = out.join(rel);
         assert_eq!(std::fs::read(&path).unwrap(), *bytes, "{rel} was rewritten");
     }
+
+    // The seventeenth file is written verbatim from Go's constant, `${{ }}`
+    // tokens and all.
+    assert!(
+        written.contains(&".github/workflows/static.yml".to_string()),
+        "{written:?}"
+    );
+    assert_eq!(
+        std::fs::read(out.join(".github/workflows/static.yml")).unwrap(),
+        GITHUB_ACTIONS_WORKFLOW,
+        "workflow was rewritten"
+    );
 
     // Sizes are the acceptance list's; a reflowed or re-minified asset would
     // move here first. The per-file sha256 test above is the tighter gate.

@@ -9149,6 +9149,28 @@ mod pages_deploy_git_tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Prepare the bundle directory as a git repository with a committer
+    /// identity, so `git commit` inside `git_init_and_push` has one.
+    ///
+    /// Without this the tests only pass on a machine whose *global* git config
+    /// carries a `user.name`/`user.email` — which is why they went red on the
+    /// GitHub runner and green here:
+    ///
+    /// ```text
+    /// git commit failed: Author identity unknown
+    /// fatal: empty ident name (for <runner@...>) not allowed
+    /// ```
+    ///
+    /// `git_init_and_push` runs `git init` itself, but `git init` on an existing
+    /// repository reinitializes rather than replaces, so the local config set
+    /// here survives. The wizard's real behaviour is unchanged: it still relies
+    /// on the user's own git identity, exactly as Go's does.
+    fn bundle_with_identity(dir: &Path) {
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "bvr-test@example.invalid"]);
+        git(dir, &["config", "user.name", "bvr test"]);
+    }
+
     /// The wizard's Step 7 against a LOCAL bare remote.
     ///
     /// `gh api` and the Pages enablement cannot be exercised without creating a
@@ -9165,6 +9187,7 @@ mod pages_deploy_git_tests {
         std::fs::create_dir_all(&bundle).unwrap();
         git(&remote, &["init", "--bare", "-q", "."]);
         std::fs::write(bundle.join("index.html"), "<html>bundle</html>").unwrap();
+        bundle_with_identity(&bundle);
 
         let remote_url = remote.to_string_lossy().into_owned();
         git_init_and_push(&bundle, &remote_url, false).expect("init and push");
@@ -9207,6 +9230,7 @@ mod pages_deploy_git_tests {
         std::fs::create_dir_all(&bundle).unwrap();
         git(&remote, &["init", "--bare", "-q", "."]);
         std::fs::write(bundle.join("index.html"), "<html>bundle</html>").unwrap();
+        bundle_with_identity(&bundle);
 
         let remote_url = remote.to_string_lossy().into_owned();
         git_init_and_push(&bundle, &remote_url, false).expect("first run");
@@ -9238,6 +9262,7 @@ mod pages_deploy_git_tests {
         }
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::write(bundle.join("index.html"), "<html>bundle</html>").unwrap();
+        bundle_with_identity(&bundle);
 
         let a = remote_a.to_string_lossy().into_owned();
         let b = remote_b.to_string_lossy().into_owned();

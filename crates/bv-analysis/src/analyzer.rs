@@ -860,6 +860,24 @@ fn run_with_timeout<T: Send + 'static>(
     budget: Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ()> {
+    // A zero budget is an already-fired timer, not a race. Go arms
+    // `time.NewTimer(config.PageRankTimeout)` and selects against it
+    // (graph.go:2020-2022); a zero duration arms a timer that is firing now,
+    // so the timeout branch is taken without the worker having been given a
+    // chance to run.
+    //
+    // `recv_timeout(Duration::ZERO)` does not model that — it degrades to a
+    // non-blocking `try_recv`, which *loses* whenever the worker happens to
+    // win the scheduler. On an 8-node graph that is a genuine coin-flip, and
+    // the metric it flips is the parity-visible `pagerank_timeout` flag. It
+    // failed intermittently here for exactly that reason.
+    //
+    // `AnalysisBudget::timeout_for` never returns zero, so this is reached only
+    // by an explicit zero in `AnalysisConfigReport`, which is the case Go's
+    // timer also resolves as a timeout.
+    if budget.is_zero() {
+        return Err(());
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         // Panic inside f is caught by converting the join result.
