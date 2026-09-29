@@ -11,32 +11,34 @@ pub mod prefs;
 /// Current blurb version. Increment when making breaking changes.
 /// v4: rename Go `bv` references to Rust `bvr` + fix repo links
 /// (quangdang46/beads_viewer_rust) so the injected instructions match this binary.
-pub const BLURB_VERSION: i32 = 4;
-pub const BLURB_START_MARKER: &str = "<!-- bv-agent-instructions-v4 -->";
+pub const BLURB_VERSION: i32 = 7;
+pub const BLURB_START_MARKER: &str = "<!-- bv-agent-instructions-v7 -->";
 pub const BLURB_END_MARKER: &str = "<!-- end-bv-agent-instructions -->";
 
 pub const SUPPORTED_AGENT_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "agents.md", "claude.md"];
 
-/// The full v4 agent blurb content.
-pub const AGENT_BLURB: &str = r#"<!-- bv-agent-instructions-v4 -->
+/// Go `pkg/agents.AgentBlurb` v7, verbatim (blurb.go:29).
+pub const AGENT_BLURB: &str = r#"<!-- bv-agent-instructions-v7 -->
 
 ---
 
 ## Beads Workflow Integration
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking and [beads_viewer_rust](https://github.com/quangdang46/beads_viewer_rust) (`bvr`) for graph-aware triage. Issues are stored in `.beads/` and tracked in git. Current `br` workspaces normally export `.beads/issues.jsonl`; older `bd`/legacy workspaces may use `.beads/beads.jsonl`. `bvr` auto-discovers the supported JSONL files, so agents should use `br`/`bvr` commands instead of hard-coding a single filename.
+This project uses a Beads tracker—either the Go `bd` CLI or the Rust `br` CLI—for issue tracking, plus [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (`bv`) for graph-aware triage. Issues are stored in `.beads/`. `bv` auto-discovers supported JSONL exports, including `.beads/issues.jsonl` and legacy `.beads/beads.jsonl`.
 
-### Using bvr as an AI sidecar
+**Choose the tracker CLI from this repository's instructions and configuration.** Use `bd` commands in a Go Beads workspace and `br` commands in a beads_rust workspace. Do not run both trackers against the same workspace or infer the tracker solely from the JSONL filename.
 
-bvr is a graph-aware triage engine for Beads projects. Instead of parsing .beads/issues.jsonl / .beads/beads.jsonl directly or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
+### Using bv as an AI sidecar
 
-**Scope boundary:** bvr handles *what to work on* (triage, priority, planning). `br` handles creating, modifying, and closing beads.
+bv is a graph-aware triage engine for Beads projects. Instead of parsing .beads/issues.jsonl / .beads/beads.jsonl directly or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
 
-**CRITICAL: Use ONLY --robot-* flags. Bare bvr launches an interactive TUI that blocks your session.**
+**Scope boundary:** bv handles *what to work on* (triage, priority, planning). The selected tracker CLI (`bd` or `br`) handles creating, claiming, modifying, and closing beads.
+
+**CRITICAL: Use ONLY --robot-* flags. Bare bv launches an interactive TUI that blocks your session.**
 
 #### The Workflow: Start With Triage
 
-**`bvr --robot-triage` is your single entry point.** It returns everything you need in one call:
+**`bv --robot-triage` is your single entry point.** Its `triage` object contains:
 - `quick_ref`: at-a-glance counts + top 3 picks
 - `recommendations`: ranked actionable items with scores, reasons, unblock info
 - `quick_wins`: low-effort high-impact items
@@ -45,40 +47,100 @@ bvr is a graph-aware triage engine for Beads projects. Instead of parsing .beads
 - `commands`: copy-paste shell commands for next steps
 
 ```bash
-bvr --robot-triage        # THE MEGA-COMMAND: start here
-bvr --robot-next          # Minimal: just the single top pick + claim command
+bv --robot-triage        # THE MEGA-COMMAND: start here
+bv --robot-next          # Minimal: just the single top pick + claim command
+
+# TOON output (--format toon): a compact tabular encoding. Measured on this
+# repository it is 7% smaller than JSON for --robot-graph but 9-15% LARGER for
+# nested payloads (--robot-triage, --robot-plan, --robot-insights,
+# --robot-label-health); use --stats to see both sizes before adopting it.
+# TOON encoding shells out to the tru binary. With no encoder installed,
+# --format toon prints a fallback warning, emits JSON with output_format "json",
+# and --stats prints no sizes at all.
+bv --robot-graph --format toon
+bv --robot-triage --format toon --stats
 ```
 
-Before claiming, verify current state with `br show <id> --json` or `br ready --json`. `recommendations` can include graph-important blocked or assigned work; only `quick_ref.top_picks` and non-empty `claim_command` fields represent claimable work.
+Recommendations can include blocked or assigned work; `triage.quick_ref.top_picks` reflects snapshot readiness. A suggested action records its original local ID, working directory, and tracker route. Use that route rather than a namespaced display ID or an unrelated current directory. Inspect current tracker state before execution: analysis does not reserve work or guarantee that a later claim succeeds.
 
-#### Other bvr Commands
+#### Other bv Commands
 
-| Command | Purpose |
+| Command | Returns |
 |---------|---------|
-| `bvr --robot-insights` | Deep graph analysis: PageRank, betweenness, HITS, k-core, critical path |
-| `bvr --robot-plan` | Dependency-respecting execution plan with parallel tracks |
-| `bvr --robot-priority` | Priority misalignment detection |
-| `bvr --robot-alerts` | Stale issues, blocking cascades |
-| `bvr --robot-suggest` | Smart suggestions: duplicates, missing dependencies, labels |
-| `bvr --robot-graph` | Dependency graph export (JSON/DOT/Mermaid) |
-| `bvr --robot-search <query>` | Semantic search over issue titles/descriptions |
-| `bvr --robot-history` | Bead-to-commit correlation from git history |
-| `bvr --robot-label-health` | Per-label health metrics |
-| `bvr --robot-schema` | JSON Schema definitions for all robot outputs |
+| `--robot-plan` | Parallel execution tracks with unblocks lists |
+| `--robot-priority` | Priority misalignment detection with confidence |
+| `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core |
+| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |
+| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions, cycle breaks |
+| `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues |
+| `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
 
-#### br Quick Reference
+Robot analysis commands default to JSON; `--format toon` selects TOON, and `--robot-help` defaults to text. In JSON mode, `--graph-format=dot` or `mermaid` puts diagram text in the `graph` field (`bv --robot-graph --graph-format=dot | jq -r .graph`).
+
+#### Scoping & Filtering
 
 ```bash
-br list                          # List all beads
-br ready                         # Actionable beads (no open blockers)
-br show <id>                     # View bead details
-br update <id> --status in_progress  # Claim work
-br update <id> --status closed   # Complete work
-br dep add <id> <target>         # Add dependency
-br sync --flush-only             # Sync changes to issues.jsonl
+bv --robot-plan --label backend              # Scope to label's subgraph
+bv --robot-insights --as-of HEAD~30          # Historical point-in-time
+bv --recipe actionable --robot-plan          # Pre-filter: ready to work (no blockers)
+bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
 ```
-<!-- end-bv-agent-instructions -->
-"#;
+
+### Tracker Commands for Issue Management
+
+Use exactly one command family, matching the tracker configured for the repository.
+
+#### Rust beads_rust (`br`)
+
+Use `br` 0.6.0 or newer when executing saved claim commands. It rechecks
+deferred status and future `defer_until` values when the claim runs, so a
+recommendation captured before a deferral cannot bypass it. This requirement
+applies to executing tracker claims.
+
+```bash
+br ready --json                       # Show issues ready to work (no blockers)
+br list --status=open --json          # All open issues
+br show <id> --json                   # Full issue details with dependencies
+br create --title="..." --type=task --priority=2 --json
+br update <id> --claim --json         # Claim for the current actor and start work
+br close <id> --reason="Completed" --json
+br close <id1> <id2> --reason="Completed" --json
+br sync --flush-only                  # Export DB to JSONL after Beads mutations
+```
+
+#### Go Beads (`bd`)
+
+```bash
+bd ready --json                       # Show issues ready to work
+bd show <id> --json                   # Full issue details
+bd create "..." -t task -p 2 --json
+bd update <id> --claim --json         # Atomically claim work
+bd close <id> --json
+bd dep add <issue> <depends-on>
+bd export -o .beads/issues.jsonl        # Refresh the compatibility export read by bv
+```
+
+### Workflow Pattern
+
+1. **Triage**: Run `bv --robot-triage` to find the highest-impact actionable work
+2. **Verify**: Check the selected tracker's `show`/`ready` output before claiming
+3. **Claim**: Use `br update <id> --claim --json` or `bd update <id> --claim --json`
+4. **Work**: Implement the task
+5. **Complete**: Use the selected tracker's `close` command
+6. **Refresh for bv**: Run `br sync --flush-only` or the `bd export` command above so the JSONL export is current
+
+### Key Concepts
+
+- **Dependencies**: Issues can block other issues. `br ready --json` and `bd ready --json` show unblocked work.
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers 0-4, not words)
+- **Types**: task, bug, feature, epic, chore, docs, question
+- **Blocking**: Use `br dep add <issue> <depends-on>` or `bd dep add <issue> <depends-on>` to add dependencies
+
+### Git Policy
+
+Tracker commands do not grant permission to commit or push application code. Follow this repository's own git and tracker instructions before staging, committing, syncing, or pushing. If the repository says "commit only when asked," that rule overrides any generic workflow advice.
+
+<!-- end-bv-agent-instructions -->"#;
 
 /// Get the preferred agent file path for a new file.
 /// Returns AGENTS.md in the project root.
@@ -202,6 +264,9 @@ pub fn remove_blurb(content: &str) -> String {
     if let Some(start) = content.find(BLURB_START_MARKER) {
         if let Some(end) = content[start..].find(BLURB_END_MARKER) {
             let end_pos = start + end + BLURB_END_MARKER.len();
+            // `trim_end`/`trim_start` ate the file's trailing newline, so
+            // removing the blurb from a one-line file left it without one,
+            // where Go's rewrite keeps the original bytes either side.
             let before = content[..start].trim_end().to_string();
             let after = if end_pos < content.len() {
                 content[end_pos..].trim_start().to_string()
@@ -212,6 +277,12 @@ pub fn remove_blurb(content: &str) -> String {
             if !after.is_empty() {
                 result.push_str("\n\n");
                 result.push_str(&after);
+            }
+            // Go keeps the file's trailing newline. Returning the trimmed
+            // prefix alone left a one-line file without one, so
+            // `--agents-remove` produced a file a byte short of the oracle's.
+            if !result.ends_with('\n') {
+                result.push('\n');
             }
             return result;
         }
@@ -269,8 +340,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_4() {
-        assert_eq!(BLURB_VERSION, 4);
+    fn version_is_7() {
+        assert_eq!(BLURB_VERSION, 7);
     }
 
     #[test]
@@ -297,16 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn v3_blurb_needs_upgrade_to_v4() {
-        // The old v3 content (Go `bv` commands) must be detected as outdated
-        // so the TUI offers an upgrade and `update_blurb` replaces it.
+    fn an_older_blurb_is_detected_and_upgraded() {
+        // An older blurb must be detected as outdated so the TUI offers an
+        // upgrade and `update_blurb` replaces it with the current one.
         let v3 = "<!-- bv-agent-instructions-v3 -->\nbv --robot-triage\n<!-- end-bv-agent-instructions -->";
         assert!(contains_any_blurb(v3));
         assert_eq!(get_blurb_version(v3), 3);
         assert!(get_blurb_version(v3) < BLURB_VERSION);
         let upgraded = update_blurb(v3);
         assert!(verify_blurb_present(&upgraded));
-        assert!(upgraded.contains("bvr --robot-triage"));
+        assert!(upgraded.contains("bv --robot-triage"));
         assert!(!upgraded.contains("bv-agent-instructions-v3"));
     }
 
