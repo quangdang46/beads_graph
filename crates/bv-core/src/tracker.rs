@@ -647,7 +647,17 @@ pub fn resolve_issue_origin(source_path: &str, local_id: &str) -> IssueOrigin {
         } else {
             beads_dir.join(p)
         };
-        std::fs::canonicalize(&joined).ok()
+        // Normalized exactly as `path` is, and that is the whole point: the
+        // anti-hijack comparison below is `path != database && Some(&path) !=
+        // export`, a byte comparison of two PathBufs. A bare `canonicalize`
+        // here returns a `\\?\` verbatim path on Windows while
+        // `resolve_executable` strips that prefix from `path`, so on Windows
+        // the two sides were never equal and the tracker refused its own
+        // metadata-declared live export with "source is not the
+        // metadata-declared live database or export".
+        std::fs::canonicalize(&joined)
+            .ok()
+            .map(|resolved| resolve_executable(&resolved))
     };
 
     origin.tracker_directory = beads_dir.to_string_lossy().to_string();
@@ -959,7 +969,10 @@ mod resolution_tests {
         assert_eq!(o.tracker, "bd");
         // `beads` comes from a temp path that may be a symlink (macOS
         // /var -> /private/var); the origin records the resolved directory.
-        let expected = std::fs::canonicalize(&beads).unwrap_or(beads.clone());
+        // `resolve_executable` rather than a bare `canonicalize`, because the
+        // latter yields a `\\?\` verbatim path on Windows while the origin
+        // stores the stripped form.
+        let expected = resolve_executable(&beads);
         assert_eq!(o.database, expected.to_string_lossy());
     }
 
