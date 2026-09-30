@@ -5520,15 +5520,28 @@ fn tui_event_loop(
         Ok(())
     };
 
-    // Restore first, report the loop's error after. A restore that itself
-    // fails must not mask why the loop stopped.
-    crossterm::execute!(
+    // Run the loop, THEN restore — in that order.
+    //
+    // The restore used to be written above this call, which inverted it: the
+    // terminal was dropped out of the alternate screen, mouse capture was
+    // turned off and raw mode was disabled *before* the first frame, so the
+    // TUI painted to the normal screen with the terminal in canonical mode
+    // and echo on. Clicks did nothing at all, because `?1000h`/`?1006h` had
+    // already been undone by the time the loop was listening. Caught by
+    // reading the raw pty byte stream: `?1049h ?1000h ... ?1006h` followed
+    // immediately by `?1049l ?1006l ... ?1000l` and only then the first
+    // paint. The unit tests could not see it — they call `handle_mouse`
+    // directly and never touch the terminal.
+    let result = run();
+    let restore = crossterm::execute!(
         io::stdout(),
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture
-    )?;
-    crossterm::terminal::disable_raw_mode()?;
-    run()
+    )
+    .and_then(|()| crossterm::terminal::disable_raw_mode());
+    // Report why the loop stopped; fall back to the restore's own error only
+    // when the loop itself succeeded, so a failed restore cannot mask it.
+    result.and(restore)
 }
 
 #[cfg(test)]
