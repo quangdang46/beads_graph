@@ -1,0 +1,23 @@
+# Files that must arrive byte-identical to the blob they were committed from.
+
+# The bytes under crates/bv-export/assets are embedded with `include_bytes!`
+# and asserted against the Go oracle by exact size and sha256. A fresh Git for
+# Windows installs with `core.autocrlf=true`, so a checkout rewrites LF to CRLF
+# in anything it considers text, and every embedded asset came back a few bytes
+# longer than the blob:
+#
+#     assertion `left == right` failed: vendor/alpine-collapse.min.js length
+#     assertion `left == right` failed: viewer.js size
+#     assertion `left == right` failed: index.html size
+#     assertion failed: html.starts_with("<!DOCTYPE html>\n<html lang=\"en\">")
+#
+# None of those files had changed. `-text` turns off line-ending conversion in
+# both directions, which is what `include_bytes!` needs — and unlike a
+# `core.autocrlf=false` step in the workflow, it holds for every checkout
+# regardless of how the machine is configured.
+crates/bv-export/assets/** -text
+
+# The golden corpus is byte-parity data as well. The JSON cases tolerate CRLF
+# because the gate parses them, but the TOON corpus is compared as text and the
+# whole point of the corpus is that it is exactly what the oracle wrote.
+golden/** -text
