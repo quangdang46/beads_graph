@@ -170,6 +170,51 @@ pub struct LabelDrilldown {
     pub cursor: usize,
 }
 
+/// One issue's semantic-search document, in the two forms semantic search
+/// reads it.
+///
+/// Both are pure functions of the issue, so both are built once per `App`
+/// rather than once per keystroke. See [`App::semantic_docs`].
+#[derive(Clone)]
+pub struct SemanticDoc {
+    /// Exactly what `bv_search::query::issue_document` returns: the text the
+    /// vector index content-hashes and embeds.
+    pub text: String,
+    /// The same text pre-lowercased, for the literal-match boost.
+    pub lexical: bv_search::query::LexicalMatchDoc,
+}
+
+impl App {
+    /// The per-issue semantic documents, built on first use.
+    ///
+    /// `OnceCell::get_or_init` keeps the "build once per `App`" guarantee
+    /// while leaving `App::new` free of the 15 ms lowercasing pass, and works
+    /// through `&self` for `fresh_text_scores`.
+    pub fn semantic_docs(&self) -> &std::collections::HashMap<String, SemanticDoc> {
+        self.semantic_docs.get_or_init(|| {
+            self.issue_map
+                .iter()
+                .map(|(id, issue)| (id.clone(), SemanticDoc::new(issue)))
+                .collect()
+        })
+    }
+}
+
+impl SemanticDoc {
+    fn new(issue: &bv_core::model::Issue) -> Self {
+        let text = bv_search::query::issue_document(
+            &issue.id,
+            &issue.title,
+            &issue.labels,
+            &issue.description,
+        );
+        Self {
+            lexical: bv_search::query::LexicalMatchDoc::new(&text),
+            text,
+        }
+    }
+}
+
 pub struct App {
     pub rows: Vec<ListRow>,
     /// Full issue data keyed by ID (for detail pane rendering)
@@ -213,6 +258,46 @@ pub struct App {
     /// check — Go re-syncs when the issue set changes; we compare against
     /// the live `data_hash` the same way `watched_mtime` guards reloads).
     pub semantic_index_hash: Option<String>,
+    /// Go `IssueDocument` text per issue, built once in [`App::new`].
+    ///
+    /// Go builds the same map once at model init (`pkg/ui/model.go:1863-1871`)
+    /// and reads it per keystroke (`pkg/ui/semantic_search.go:475`), reusing
+    /// the previous string for any issue the snapshot diff says is unchanged
+    /// (`pkg/ui/snapshot.go:715-738`). Porting that lazy map was missed, so
+    /// each character typed rebuilt the document, lowercased it and tokenized
+    /// it into ~500k `String`s for every issue in the set.
+    ///
+    /// Valid for the life of the `App`: `issue_map` is only ever replaced
+    /// wholesale by `App::new` (via `reload_from_disk`), never mutated in
+    /// place, so this always describes exactly the data in `issue_map`.
+    ///
+    /// Populated on first Ctrl+S, not in `App::new`. Building it lowercases
+    /// every document, which costs 15 ms and ~3.4 MB on the 171-issue
+    /// ultraworkers dataset — real money for a session that never opens
+    /// semantic search. `OnceCell` rather than `Option` because
+    /// `fresh_text_scores` reads it through `&self`; the deferred-cost
+    /// pattern is the same one `semantic_index` already documents.
+    pub semantic_docs: std::cell::OnceCell<std::collections::HashMap<String, SemanticDoc>>,
+    /// The slice of `filtered_indices` the list pane painted last frame.
+    ///
+    /// `handle_mouse` used to recompute this window from `self.height` while
+    /// `render_list` computed it from the framebuffer's real height. Those
+    /// two disagreed whenever the terminal was not exactly 120x40 — which is
+    /// always, now that `handle_resize` works — so a click selected a
+    /// different row than the one painted. One field, written by the
+    /// renderer and read by the click handler: they cannot drift.
+    pub list_window: std::ops::Range<usize>,
+    /// `data_hash` of [`Self::issue_map`], computed on first use and kept.
+    ///
+    /// Same reasoning as `semantic_docs`: the input cannot change without a
+    /// new `App`, so recomputing it per keystroke only ever re-hashed the
+    /// same megabytes to reach the same answer.
+    semantic_data_hash: Option<String>,
+    /// Project directory the `.bvvi` index lives under, resolved once by
+    /// [`Self::refresh_watch_target`]. `None` when datasource discovery
+    /// failed, in which case semantic search stays index-less and falls back
+    /// to fresh embedding.
+    semantic_project_dir: Option<std::path::PathBuf>,
     pub show_sidebar: bool,
     /// Which panel has focus: false = list, true = detail
     pub focus_detail: bool,
@@ -759,6 +844,11 @@ impl App {
     pub fn new(issues: Vec<bv_core::model::Issue>) -> Self {
         let issue_map: std::collections::HashMap<String, bv_core::model::Issue> =
             issues.iter().map(|i| (i.id.clone(), i.clone())).collect();
+        // Built lazily on first semantic search — see `semantic_docs`. `App::new`
+        // has already moved `issues` into `issue_map` by here, so the closure
+        // reads the map rather than the local slice.
+        let semantic_docs: std::cell::OnceCell<std::collections::HashMap<String, SemanticDoc>> =
+            std::cell::OnceCell::new();
         // Compute proactive alerts (Go computeAlerts): cycles-driven drift
         let g_alerts = bv_analysis::build_graph(&issues);
         let has_cycle = bv_graph_core::algorithms::cycles::has_cycles(&g_alerts);
@@ -890,6 +980,10 @@ impl App {
             semantic_preset: "default".to_string(),
             semantic_index: None,
             semantic_index_hash: None,
+            semantic_docs,
+            list_window: 0..0,
+            semantic_data_hash: None,
+            semantic_project_dir: None,
             show_sidebar: false,
             focus_detail: false,
             show_help: false,
@@ -946,19 +1040,33 @@ impl App {
         app
     }
 
-    /// (Re)discover the `.beads/*.jsonl` path and record its current mtime,
-    /// for live-reload polling (Go `fsnotify`, `p` — see `check_for_reload`
-    /// below and TUI_UX_PARITY_PLAN.md Phase F). Best-effort: if discovery
-    /// fails (e.g. no `.beads` dir, or the active datasource is SQLite —
-    /// out of scope here, matching Go's own `.beads/issues.jsonl`-specific
-    /// watch target), watching is silently disabled rather than surfaced
-    /// as a startup error.
+    /// (Re)discover the datasource: the `.beads/*.jsonl` path to watch for
+    /// live reload (Go `fsnotify`, `p` — see `check_for_reload` below and
+    /// TUI_UX_PARITY_PLAN.md Phase F), and the project directory the
+    /// `.bvvi` semantic index lives under (Go `DefaultIndexPath`).
+    ///
+    /// One discovery pass feeds both, because it is not cheap:
+    /// `get_beads_dir` shells out to `git rev-parse` up to three times when
+    /// the working directory is not itself a Beads root, which measured at
+    /// ~200 ms per call on Windows — and semantic search used to redo it on
+    /// every keystroke. Nothing in the process changes the working directory
+    /// or `BEADS_DIR`, so one pass per `App` is enough; `reload_from_disk`
+    /// replaces the whole `App` and redoes it.
+    ///
+    /// Best-effort: if discovery fails (e.g. no `.beads` dir, or the active
+    /// datasource is SQLite — out of scope here, matching Go's own
+    /// `.beads/issues.jsonl`-specific watch target), watching is silently
+    /// disabled rather than surfaced as a startup error.
     fn refresh_watch_target(&mut self) {
         let cwd = std::env::current_dir().unwrap_or_default();
-        self.watched_path = bv_core::discovery::get_beads_dir(&cwd)
-            .ok()
-            .and_then(|dir| bv_core::discovery::find_jsonl_path_with_warnings(&dir, |_| {}).ok())
-            .flatten();
+        self.watched_path = None;
+        self.semantic_project_dir = None;
+        if let Ok(dir) = bv_core::discovery::get_beads_dir(&cwd) {
+            self.semantic_project_dir = Some(dir.parent().unwrap_or(&cwd).to_path_buf());
+            self.watched_path = bv_core::discovery::find_jsonl_path_with_warnings(&dir, |_| {})
+                .ok()
+                .flatten();
+        }
         self.watched_mtime = self
             .watched_path
             .as_ref()
@@ -1261,18 +1369,13 @@ impl App {
             };
             let mut score = bv_search::hybrid::hybrid_score(text_score, &weights, &components);
             // Go short-query literal boost (added post-threshold, pre-top-k).
-            let issue = self.issue_map.get(&row.id);
-            let doc = issue
-                .map(|iss| {
-                    bv_search::query::issue_document(
-                        &iss.id,
-                        &iss.title,
-                        &iss.labels,
-                        &iss.description,
-                    )
-                })
-                .unwrap_or_default();
-            score += bv_search::query::short_query_lexical_boost(&short_boost_query, &doc);
+            // The document is the one `App::new` built; a row with no
+            // matching issue scored 0.0 before and still does.
+            score += self
+                .semantic_docs()
+                .get(&row.id)
+                .map(|doc| doc.lexical.boost(&short_boost_query))
+                .unwrap_or(0.0);
             if score > 0.0 {
                 // Fixed-point rank key: deterministic across platforms.
                 scored.push(((score * 1_000_000.0) as i64, i));
@@ -1294,24 +1397,35 @@ impl App {
             .iter()
             .enumerate()
             .filter_map(|(i, r)| {
-                let issue = self.issue_map.get(&r.id);
-                let doc = issue.map(|iss| {
-                    bv_search::query::issue_document(
-                        &iss.id,
-                        &iss.title,
-                        &iss.labels,
-                        &iss.description,
-                    )
-                });
                 // Index and fallback must agree: both embed the Go
                 // `IssueDocument` text (ID×3/title×2/labels/desc), not the
                 // old title+description pair.
-                let text = doc.unwrap_or_else(|| format!("{} {}", r.title, r.description));
+                let text: std::borrow::Cow<'_, str> = match self.semantic_docs().get(&r.id) {
+                    Some(doc) => std::borrow::Cow::Borrowed(doc.text.as_str()),
+                    None => std::borrow::Cow::Owned(format!("{} {}", r.title, r.description)),
+                };
                 let issue_vec = bv_search::embedder::hash_embed(&text, dim);
                 let score = bv_search::embedder::cosine_similarity(query_vec, &issue_vec);
                 (score > 0.0).then_some((i, score))
             })
             .collect()
+    }
+
+    /// `data_hash` of `issue_map`, hashed once and memoized.
+    ///
+    /// The only writer of `issue_map` is [`App::new`] (whole-value
+    /// replacement, reached from `reload_from_disk`), so within one `App` the
+    /// answer cannot change. Hashing it per keystroke meant deep-cloning
+    /// every issue and re-running SHA-256 over the whole corpus to recompute
+    /// a digest we already had.
+    fn live_data_hash(&mut self) -> String {
+        if let Some(h) = &self.semantic_data_hash {
+            return h.clone();
+        }
+        let issues: Vec<&bv_core::model::Issue> = self.issue_map.values().collect();
+        let hash = bv_core::data_hash::compute_data_hash_refs(&issues);
+        self.semantic_data_hash = Some(hash.clone());
+        hash
     }
 
     /// Load-or-build the persistent `.bvvi` semantic index (Go
@@ -1320,37 +1434,31 @@ impl App {
     /// Silent no-op when the beads dir can't be discovered (falls back to
     /// fresh embedding in `apply_semantic`).
     fn ensure_semantic_index(&mut self) {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let Ok(beads_dir) = bv_core::discovery::get_beads_dir(&cwd) else {
-            return;
-        };
-        // Project dir = parent of `.beads` (Go `DefaultIndexPath` takes the
-        // project dir and appends `.bv/semantic/...`).
-        let project_dir = beads_dir.parent().unwrap_or(&cwd);
-        let dim = bv_search::embedder::DEFAULT_DIM;
-        let path = bv_search::index_sync::default_index_path(project_dir, dim);
-        let live_hash = bv_core::data_hash::compute_data_hash(
-            &self.issue_map.values().cloned().collect::<Vec<_>>(),
-        );
-        if self.semantic_index.is_some() && self.semantic_index_hash.as_deref() == Some(&live_hash)
+        // Staleness check first, before anything touches the filesystem.
+        // Resolving the Beads directory costs three `git rev-parse`
+        // subprocesses, which is far more than the rest of this function and
+        // used to run on every keystroke. The hash is memoized and the issue
+        // set cannot change within one `App`, so a match means there is
+        // genuinely nothing to do.
+        let live_hash = self.live_data_hash();
+        if self.semantic_index.is_some()
+            && self.semantic_index_hash.as_deref() == Some(live_hash.as_str())
         {
             return;
         }
+        // Project dir = parent of `.beads` (Go `DefaultIndexPath` takes the
+        // project dir and appends `.bv/semantic/...`). `None` when discovery
+        // failed — stay index-less and let `apply_semantic` embed afresh.
+        let Some(project_dir) = self.semantic_project_dir.as_deref() else {
+            return;
+        };
+        let dim = bv_search::embedder::DEFAULT_DIM;
+        let path = bv_search::index_sync::default_index_path(project_dir, dim);
         let (mut idx, _loaded) = bv_search::index_sync::load_or_new(&path, dim);
         let docs: std::collections::BTreeMap<String, String> = self
-            .issue_map
+            .semantic_docs()
             .iter()
-            .map(|(id, iss)| {
-                (
-                    id.clone(),
-                    bv_search::query::issue_document(
-                        &iss.id,
-                        &iss.title,
-                        &iss.labels,
-                        &iss.description,
-                    ),
-                )
-            })
+            .map(|(id, doc)| (id.clone(), doc.text.clone()))
             .collect();
         match bv_search::index_sync::sync_index(&mut idx, &docs, |texts| {
             texts
@@ -1395,23 +1503,104 @@ impl App {
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                let header_lines = 2;
-                if mouse.row > header_lines {
-                    // Click in left 40% → select list item
-                    if mouse.column < (self.width as f64 * 0.4) as u16 {
-                        let idx = (mouse.row - header_lines - 1) as usize;
-                        if idx < self.filtered_indices.len() {
-                            self.cursor = idx;
-                            self.focus_detail = false;
-                        }
-                    } else {
-                        // Click on right panel → focus detail
-                        self.focus_detail = true;
+                // Screen rows 0 and 1 are chrome: the outer frame, then the
+                // list block's own top border. The first item is on row 2.
+                //
+                // This was off by one before (it subtracted 3, not 2), so
+                // clicking the first visible row did nothing at all and every
+                // other click selected the row *above* the one under the
+                // pointer. The offset has to be read off the actual layout:
+                // `render_list` puts its header at `area.y + 1` and the list
+                // body at `area.y + 1` too, so the list block's border takes
+                // row 1 and the body starts at row 2.
+                // Go ignores clicks entirely while any overlay is up
+                // (`handleLeftClick`, model.go:8793-8799): the list is not
+                // drawn behind a modal, so there is nothing to select, and a
+                // click that moved the cursor behind the modal would surface
+                // as the list coming back to a different row.
+                if self.show_quit_confirm
+                    || self.show_agent_prompt
+                    || self.cass_modal.is_some()
+                    || self.show_update_modal
+                    || self.show_label_detail
+                    || self.label_drilldown.is_some()
+                    // Alerts and the tutorial are full-screen views rather
+                    // than overlay flags here, so they are reached through
+                    // `current_view`.
+                    || self.current_view == ViewMode::Alerts
+                    || self.current_view == ViewMode::Tutorial
+                    || self.time_travel_prompt.is_some()
+                    || self.recipe_picker.as_ref().is_some_and(|p| p.visible)
+                    || self.repo_picker.as_ref().is_some_and(|p| p.visible)
+                    || self.label_picker.as_ref().is_some_and(|p| p.visible)
+                    || self.show_help
+                {
+                    return true;
+                }
+                const LIST_TOP: u16 = 2;
+                if mouse.row < LIST_TOP {
+                    return true;
+                }
+                // The list is only drawn beside a detail pane when split view
+                // is actually laid out. `render` uses the same predicate
+                // (`app.split_view && app.width > 100`) to choose a
+                // horizontal split; below that it stacks the panes, and there
+                // is no right-hand pane to focus — so the left/right test must
+                // not run, or every click past 40% of a full-width list row
+                // silently does nothing but steal focus.
+                let detail_pane_visible = self.split_view && self.width > 100;
+                if detail_pane_visible && mouse.column >= (self.width as f64 * 0.4) as u16 {
+                    self.focus_detail = true;
+                    return true;
+                }
+                // Row index within the window the renderer actually painted.
+                // Read `list_window` rather than recomputing it — a second
+                // implementation of the same arithmetic is exactly how this
+                // drifted out of sync with the screen in the first place.
+                let screen_row = usize::from(mouse.row - LIST_TOP);
+                if let Some(idx) = self.list_window.start.checked_add(screen_row) {
+                    if idx < self.filtered_indices.len() {
+                        self.cursor = idx;
+                        self.focus_detail = false;
                     }
                 }
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Go `tea.WindowSizeMsg` arm (bubbletea delivers a `WindowSizeMsg`
+    /// before the first `View` and again on every resize; model.go:2353 and
+    /// :2452 re-`SetSize` the list and re-lay-out the panels against
+    /// `m.width`/`m.height`).
+    ///
+    /// Rust used to drop `CEvent::Resize` on the floor, so `app.width` /
+    /// `app.height` kept their 120x40 constructor values for the life of the
+    /// process. That is load-bearing: the split-view guard
+    /// `app.split_view && app.width > 100` and every modal-centering
+    /// computation in `render_overlays` read those fields, so after a resize
+    /// the panes were laid out for the wrong terminal.
+    ///
+    /// `crossterm::terminal::size()` is the authoritative source here rather
+    /// than the event payload, because the event is emitted before the
+    /// backend has necessarily settled; it is only called on an actual
+    /// resize, so its cost does not land on the frame path. Returns whether
+    /// anything changed.
+    pub fn handle_resize(&mut self) -> bool {
+        match crossterm::terminal::size() {
+            // `size()` already yields `u16` column/row pairs.
+            Ok((w, h)) => {
+                if self.width == w && self.height == h {
+                    return false;
+                }
+                self.width = w;
+                self.height = h;
+                true
+            }
+            // If the query fails, keep the last known geometry; a stale
+            // layout beats panicking mid-session.
+            Err(_) => false,
         }
     }
 
@@ -2958,16 +3147,21 @@ impl App {
     /// ~500ms tick, so a slow `git log -p` walk never blocks a keypress.
     /// A result whose generation is stale is discarded, mirroring Go's
     /// `(dataGeneration, requestGeneration)` fencing (model.go:665-670).
-    pub fn poll_history_load(&mut self) {
+    ///
+    /// Returns whether the panel's visible state changed, so the event loop
+    /// can skip a redraw on the ticks where the background walk is still in
+    /// flight (Go: `View()` is not called until the `HistoryLoadedMsg`
+    /// arrives, because the placeholder text never changes in between).
+    pub fn poll_history_load(&mut self) -> bool {
         if !self.history_loading {
-            return;
+            return false;
         }
         let Some(rx) = &self.history_rx else {
             self.history_loading = false;
-            return;
+            return false;
         };
         let Ok((generation, result)) = rx.try_recv() else {
-            return;
+            return false;
         };
         self.history_loading = false;
         self.history_rx = None;
@@ -2977,7 +3171,7 @@ impl App {
             // load is in flight, so nothing is pending: surface the retry
             // placeholder rather than spinning on "Loading history…".
             self.history_load_failed = true;
-            return;
+            return true;
         }
         match result {
             Ok(report) => {
@@ -2999,6 +3193,7 @@ impl App {
                 self.status_msg = format!("History unavailable: {e}");
             }
         }
+        true
     }
 
     /// Go `y` — copy the selected commit's SHA, in either view mode
@@ -3469,9 +3664,17 @@ fn age_str(created_at: &Option<String>) -> String {
 pub fn render(f: &mut Frame, app: &mut App) {
     match app.current_view {
         ViewMode::Tree => {
-            let issues: Vec<bv_core::model::Issue> = app.issue_map.values().cloned().collect();
+            // Borrow, don't clone: the tree walks `id`/`title`/`dependencies`
+            // only, and `.values().cloned().collect()` was deep-copying every
+            // large text field (~3 MB on ultraworkers) on every frame to do it.
+            let issues: Vec<&bv_core::model::Issue> = app.issue_map.values().collect();
             let nodes = crate::views::tree::build_tree_nodes(&issues, &app.tree_collapsed);
-            let lines = crate::views::tree::render_tree_lines(&nodes);
+            // The tree has no cursor, so the window is always anchored at the
+            // top: build only the rows that fit, which is all a
+            // non-scrolled `Paragraph` would paint anyway.
+            let height = usize::from(f.area().height.saturating_sub(2));
+            let window = crate::views::tree::visible_range(nodes.len(), 0, height);
+            let lines = crate::views::tree::render_tree_lines(&nodes, window);
             let block = ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
                 .title(" TREE VIEW ");
@@ -3579,7 +3782,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
         ViewMode::Sprint => {
             if let Some(ref sprint_state) = app.sprint {
-                let issues: Vec<bv_core::model::Issue> = app.issue_map.values().cloned().collect();
+                // Borrow, don't clone — see `render_sprint`'s signature note.
+                let issues: Vec<&bv_core::model::Issue> = app.issue_map.values().collect();
                 crate::views::sprint::render_sprint(f, sprint_state, &issues, f.area());
             } else {
                 let msg = ratatui::widgets::Paragraph::new("No sprint data available");
@@ -4284,7 +4488,7 @@ fn focus_for_view(view: ViewMode) -> crate::keybindings::Focus {
     }
 }
 
-fn render_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
 
     // Header row matching Go: "  TYPE PRI STATUS      ID                     TITLE"
@@ -4303,12 +4507,54 @@ fn render_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
     f.render_widget(header, header_area);
 
+    // The list body starts one row down (the header) and takes the rest of
+    // `area`. Computed before the items so the visible window is known first.
+    let list_area = ratatui::layout::Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+
+    // Build `ListItem`s only for the rows that can reach the screen.
+    //
+    // Every `ListItem` is one `Line` of ~15 `Span`s, and each row spends six
+    // `format!` calls on it (priority, status, id, title truncation, age, and
+    // the search-rank badge). Constructing all of them cost real time on a
+    // 169-row set even though `List::render` then draws only the window
+    // (`widgets/list/rendering.rs:72-78` does `.skip(offset).take(...)`).
+    //
+    // Go never pays this: `m.list` is a bubbles `list.Model`, which holds
+    // prebuilt `list.Item`s and virtualizes its own rendering per page
+    // (`m.list.View()`, model.go:6509).
+    //
+    // The window is chosen to match what ratatui's `List` would have scrolled
+    // to. `ListState` below is always fresh, so its offset is 0 and
+    // `get_items_bounds` (rendering.rs:129-200) walks `first_visible_index`
+    // forward until the selected row is in view. With every item exactly one
+    // line tall, that resolves to: the last N rows ending at the cursor,
+    // clamped to the list.
+    //
+    // N is the block's *inner* height: `List` renders into
+    // `block.inner_if_some(area)` (rendering.rs:41-50), so the all-borders
+    // block eats two rows.
+    let row_capacity = usize::from(list_area.height).saturating_sub(2);
+    let visible =
+        crate::views::tree::visible_range(app.filtered_indices.len(), app.cursor, row_capacity);
+    // Publish it so `handle_mouse` maps a click onto the same row the user
+    // actually saw, instead of re-deriving the arithmetic.
+    app.list_window = visible.clone();
+    let window_start = visible.start;
+
     // List items
-    let items: Vec<ListItem> = app
-        .filtered_indices
+    let items: Vec<ListItem> = app.filtered_indices[visible]
         .iter()
         .enumerate()
-        .map(|(vis_idx, &row_idx)| {
+        .map(|(local_idx, &row_idx)| {
+            // Rank within the *whole* filtered set, not the window — the
+            // `#n` search badge and the selection test both mean "row N of
+            // the list", not "row N of what happens to be on screen".
+            let vis_idx = window_start + local_idx;
             let row = &app.rows[row_idx];
             let selected = vis_idx == app.cursor;
             let (icon, icon_color) = type_icon(&row.issue_type);
@@ -4529,16 +4775,11 @@ fn render_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol(">");
 
-    // Offset by 1 for the header row
-    let list_area = ratatui::layout::Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
-
+    // The window is already scrolled, so the state's offset is 0 and its
+    // selected index is relative to the window. `app.cursor` is the absolute
+    // row; `window_start` is the first row handed to `List`.
     let mut state = ListState::default();
-    state.select(Some(app.cursor));
+    state.select(app.cursor.checked_sub(window_start));
     f.render_stateful_widget(list, list_area, &mut state);
 }
 
@@ -5053,6 +5294,22 @@ pub fn run_tui(app: &mut App) -> io::Result<()> {
 
     let mut stdout = io::stdout();
     crossterm::terminal::enable_raw_mode()?;
+    // Mouse reporting stays on crossterm's EnableMouseCapture
+    // (`?1000h ?1002h ?1003h ?1015h ?1006h`).
+    //
+    // An earlier revision replaced it with a hand-rolled
+    // `?1000h ?1002h ?1006h` — 1002 but not 1003 — reasoning that `?1003h`
+    // ("report *all* motion events") is pure overhead, since `handle_mouse`
+    // ignores motion and so those events cannot change state. **That was
+    // wrong, and it broke clicking.** The per-motion redraw cost it was
+    // meant to remove was already gone: it was the draw-first loop paying
+    // for it, and the loop now redraws only when a handler reports a
+    // change. Re-emitting a different set of DECSET codes bought nothing
+    // measurable on top of that, while changing the terminal's reporting
+    // mode — which is observable to the user and to anything else reading
+    // the tty. Do not narrow this again without a measurement that it
+    // matters, and without verifying a click still lands on the row under
+    // the pointer.
     crossterm::execute!(
         stdout,
         crossterm::terminal::EnterAlternateScreen,
@@ -5061,10 +5318,66 @@ pub fn run_tui(app: &mut App) -> io::Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let terminal = ratatui::Terminal::new(backend)?;
 
+    // `tui_event_loop` owns the restore path: even if the event loop fails
+    // on an I/O error, the alternate screen is left and raw mode is dropped.
+    // A `?` that returned straight out of the old body skipped both, leaving
+    // the user in a broken terminal.
     let result = tui_event_loop(terminal, app, &update_rx);
 
     release_instance_lock(&beads_dir);
     result
+}
+
+/// Whether a time-animated widget is on screen and needs sub-second repaints.
+fn self_update_modal_animating(app: &App) -> bool {
+    app.show_update_modal && app.update_modal.is_some()
+}
+
+/// Apply one terminal event to `app`. Returns whether the user asked to quit.
+///
+/// `Ctrl+C` is handled here rather than by the caller so the burst-drain
+/// loop can stop on it without unwinding the whole event loop.
+fn handle_one_event(app: &mut App, ev: CEvent) -> bool {
+    match ev {
+        CEvent::Key(key) => {
+            if key.kind != KeyEventKind::Press {
+                return false;
+            }
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('c')
+            {
+                return true;
+            }
+            // `handle_*` return `true` when they changed state. Go's
+            // `Update` has the same shape: every arm that mutates the Model
+            // is what triggers the repaint.
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+            {
+                app.handle_ctrl_key(key.code);
+            } else {
+                app.handle_key(key.code);
+            }
+        }
+        CEvent::Mouse(mouse) => {
+            // Motion events over a region that handles no drag change
+            // nothing, and the burst loop above already collapsed a motion
+            // storm into a single repaint.
+            app.handle_mouse(mouse);
+        }
+        CEvent::Resize(..) => {
+            // Go handles `tea.WindowSizeMsg` and re-sizes its list and every
+            // panel against it (model.go:2353, :2452). Rust previously
+            // dropped this event outright, leaving `app.width`/`app.height`
+            // pinned to the 120x40 defaults for the life of the process.
+            app.handle_resize();
+        }
+        _ => {}
+    }
+    false
 }
 
 fn tui_event_loop(
@@ -5086,75 +5399,136 @@ fn tui_event_loop(
         });
         app.show_agent_prompt = true;
     }
-    loop {
-        terminal.draw(|f| render(f, app))?;
-        if app.quit_requested {
-            break;
-        }
-        // Drain update-check channel (non-blocking). The tag was already
-        // vetted by bv-update semver compare (incl. dev-build rule);
-        // re-verify here in case the binary version changed mid-session.
-        // Go's `UpdateMsg` arm (`model.go:2290-2302`) stores the tag and the
-        // release URL together and drops the notice when the tag is not newer.
-        if let Ok(info) = update_rx.try_recv() {
-            if bv_update::is_newer_than_current(&info.new_version) {
-                app.update_tag = Some(info.new_version.clone());
-                app.update_url = Some(info.release_url.clone());
-                // Auto-notify once per session (Go: update badge + prompt);
-                // `U` reopens afterwards.
-                if !app.update_modal_auto_shown {
-                    app.update_modal_auto_shown = true;
-                    app.show_self_update_modal();
+    // Redraw policy. Go's bubbletea runtime calls `View()` only when a
+    // `tea.Msg` actually arrives (model.go:2206 `Update` returns a Model; the
+    // renderer repaints on change). This loop used to be draw-FIRST: an
+    // unconditional `terminal.draw()` at the top of every iteration, so the
+    // full view was rebuilt on every idle ~500ms tick AND on every single
+    // input event — including every `MouseMoved`, because crossterm's
+    // `EnableMouseCapture` turns on SGR 1003 (report *all* motion) and
+    // `handle_mouse` returns `false` for motion events that changed nothing
+    // (lib.rs `MouseEventKind::Moved` falls through to `_ => false`).
+    //
+    // `dirty` is the Go "did anything change?" signal. It is set when a
+    // handler reports a state change, when an async source lands, and on the
+    // periodic tick — but only when a whole second has elapsed, so the
+    // wall-clock-dependent widgets (freshness badge, relative "Nm ago" ages)
+    // still advance at the same 1Hz they did when the loop drew twice a
+    // second. Everything else stops redrawing.
+    let mut dirty = true;
+    let mut last_tick_millis = jiff::Timestamp::now().as_millisecond();
+    // Seed the geometry from the real terminal before the first frame.
+    // Go's bubbletea sends an initial `WindowSizeMsg` before `View` runs
+    // (tea.go:317-319); without the equivalent, `app.width`/`app.height`
+    // kept their 120x40 constructor defaults until the user happened to
+    // resize, so the split-view threshold, the modal centring and the
+    // click-to-row mapping were all computed for the wrong terminal.
+    app.handle_resize();
+
+    // The event loop is the fallible part; the restore is not. Running it in
+    // a closure means a failed `event::read` or a `draw` error returns out
+    // of here and still falls through to LeaveAlternateScreen +
+    // disable_raw_mode, instead of `?`-ing out of the function with the user
+    // stuck in the alternate screen and raw mode on.
+    let mut run = || -> io::Result<()> {
+        loop {
+            if dirty {
+                terminal.draw(|f| render(f, app))?;
+                dirty = false;
+            }
+            if app.quit_requested {
+                break;
+            }
+            // Drain update-check channel (non-blocking). The tag was already
+            // vetted by bv-update semver compare (incl. dev-build rule);
+            // re-verify here in case the binary version changed mid-session.
+            // Go's `UpdateMsg` arm (`model.go:2290-2302`) stores the tag and the
+            // release URL together and drops the notice when the tag is not newer.
+            if let Ok(info) = update_rx.try_recv() {
+                if bv_update::is_newer_than_current(&info.new_version) {
+                    app.update_tag = Some(info.new_version.clone());
+                    app.update_url = Some(info.release_url.clone());
+                    // Auto-notify once per session (Go: update badge + prompt);
+                    // `U` reopens afterwards.
+                    if !app.update_modal_auto_shown {
+                        app.update_modal_auto_shown = true;
+                        app.show_self_update_modal();
+                    }
+                    dirty = true;
                 }
             }
-        }
-        // Drain the self-update install thread (Go's `UpdateProgressMsg` /
-        // `UpdateCompleteMsg` arms, `model.go:2304-2333`).
-        app.poll_update_modal();
-        // Live reload (Go fsnotify; TUI_UX_PARITY_PLAN.md Phase F): piggyback
-        // on this same ~500ms tick instead of a background notify watcher.
-        app.check_for_reload();
-        // Same trick for the background History correlation walk (Go's
-        // `HistoryLoadedMsg`): drain the channel here so a slow `git log -p`
-        // never blocks a keypress.
-        app.poll_history_load();
-        // Poll events with timeout so freshness badge stays live
-        if event::poll(std::time::Duration::from_millis(500))? {
-            match event::read()? {
-                CEvent::Key(key) => {
-                    if key.kind == KeyEventKind::Press {
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL)
-                            && key.code == KeyCode::Char('c')
-                        {
-                            break;
-                        }
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL)
-                        {
-                            app.handle_ctrl_key(key.code);
-                        } else {
-                            app.handle_key(key.code);
-                        }
+            // Drain the self-update install thread (Go's `UpdateProgressMsg` /
+            // `UpdateCompleteMsg` arms, `model.go:2304-2333`).
+            dirty |= app.poll_update_modal();
+            // Live reload (Go fsnotify; TUI_UX_PARITY_PLAN.md Phase F): piggyback
+            // on this same ~500ms tick instead of a background notify watcher.
+            dirty |= app.check_for_reload();
+            // Same trick for the background History correlation walk (Go's
+            // `HistoryLoadedMsg`): drain the channel here so a slow `git log -p`
+            // never blocks a keypress.
+            dirty |= app.poll_history_load();
+            // Wall-clock widgets. The previous loop redrew twice a second, so a
+            // badge showing "45s ago" refreshed every 500ms; redrawing once per
+            // elapsed second is visually identical and costs 2x less.
+            // The self-update spinner advances one frame per 100 ms over a
+            // 10-frame cycle (`update_modal::render_spinner`), and
+            // 1000 ms % 1000 == 0 lands on frame 0 every single time — a frozen
+            // glyph where Go animates, because Go re-ticks at 100 ms. So while
+            // that modal is up, keep the old half-second cadence; otherwise the
+            // once-a-second tick is enough for the age and freshness badges.
+            let tick_ms = if self_update_modal_animating(app) {
+                500
+            } else {
+                1000
+            };
+            let now_millis = jiff::Timestamp::now().as_millisecond();
+            if now_millis - last_tick_millis >= tick_ms {
+                last_tick_millis = now_millis;
+                dirty = true;
+            }
+            // Poll events with timeout so freshness badge stays live.
+            //
+            // Drain the whole pending burst before painting, not one event per
+            // frame. A wheel gesture and a held arrow key both deliver a stream
+            // of events, and one frame per event is what made scrolling crawl:
+            // a scrolled detail pane already rewrites ~34% of the screen
+            // (3394 of 10000 cells, measured), so ten queued wheel events meant
+            // ten full-screen repaints to produce a ten-line scroll. Applying
+            // every queued event first and then painting once collapses that to
+            // a single repaint, and it drops no input — the events are all
+            // handled, just before the pixels move rather than between each one.
+            if event::poll(std::time::Duration::from_millis(500))? {
+                let mut quit = false;
+                loop {
+                    quit |= handle_one_event(app, event::read()?);
+                    if quit || !event::poll(std::time::Duration::ZERO)? {
+                        break;
                     }
                 }
-                CEvent::Mouse(mouse) => {
-                    app.handle_mouse(mouse);
+                if quit {
+                    // Route through `quit_requested`, which the top of this loop
+                    // already tests. Breaking out of the drain loop directly would
+                    // only end the drain, and the outer loop would spin on
+                    // forever with Ctrl+C swallowed.
+                    app.quit_requested = true;
                 }
-                _ => {}
+                // Force the repaint: a burst that only scrolled the list still
+                // has to reach the screen.
+                dirty = true;
             }
         }
-    }
+        Ok(())
+    };
 
+    // Restore first, report the loop's error after. A restore that itself
+    // fails must not mask why the loop stopped.
     crossterm::execute!(
         io::stdout(),
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture
     )?;
     crossterm::terminal::disable_raw_mode()?;
-    Ok(())
+    run()
 }
 
 #[cfg(test)]

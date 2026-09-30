@@ -114,3 +114,7 @@ report.md
 
 # A --pages wizard run with a single-character output directory.
 /O/
+
+# Scratch benchmark crate used by perf investigations (211 MB of target/).
+# Its findings live in crates/bv-tui/tests/render_cost_test.rs.
+.bvrbench/

@@ -23,8 +23,18 @@ pub struct TreeNode {
 /// makes `child` a child of `parent`. Issues with no valid parent-child
 /// dependency (or whose declared parent doesn't exist in `issues`) are roots.
 /// All nodes start expanded unless their id is in `collapsed`.
-pub fn build_tree_nodes(issues: &[Issue], collapsed: &HashSet<String>) -> Vec<TreeNode> {
-    let by_id: HashMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
+///
+/// Takes `&[&Issue]`, not `&[Issue]`. This walks `id`, `title` and
+/// `dependencies` and nothing else, but the caller used to hand it a freshly
+/// deep-cloned `Vec<Issue>` on every frame — on the ultraworkers dataset that
+/// is ~3 MB of `String` allocation per frame (description 2.3 MB, notes 328
+/// KB, acceptance_criteria 308 KB across only 169 records) to read three
+/// small fields. Measured 1.42-1.66 ms/frame for the clone against <0.001 ms
+/// for the borrowed form. Go avoids this structurally: `IssueTreeNode` holds
+/// `*model.Issue` pointers into a slice built once (`TreeModel.Build`,
+/// tree.go:370-400, which even short-circuits on an unchanged `DataHash`).
+pub fn build_tree_nodes(issues: &[&Issue], collapsed: &HashSet<String>) -> Vec<TreeNode> {
+    let by_id: HashMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), *i)).collect();
     let mut children_of: HashMap<&str, Vec<&Issue>> = HashMap::new();
     let mut has_parent: HashSet<&str> = HashSet::new();
 
@@ -46,6 +56,7 @@ pub fn build_tree_nodes(issues: &[Issue], collapsed: &HashSet<String>) -> Vec<Tr
     let mut roots: Vec<&Issue> = issues
         .iter()
         .filter(|i| !has_parent.contains(i.id.as_str()))
+        .copied()
         .collect();
     roots.sort_by(|a, b| a.id.cmp(&b.id));
     for kids in children_of.values_mut() {
@@ -89,10 +100,22 @@ fn push_node<'a>(
     }
 }
 
-/// Build display lines from a flat list of tree nodes.
-pub fn render_tree_lines(nodes: &[TreeNode]) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for n in nodes {
+/// Build display lines for the nodes that are actually on screen.
+///
+/// `range` is the half-open node window to emit, normally
+/// `(start, end)` as computed by [`visible_range`]. Only the lines that
+/// reach the terminal are built: each `Line` costs an indent `String`, a
+/// `format!` for the prefix, and a clone of both the id and the title, and
+/// `Paragraph` discards everything past the bottom of its area anyway
+/// (ratatui 0.29 `paragraph.rs:483-485` breaks on `y >= area.height`).
+///
+/// Go does the same thing structurally — `TreeModel.View` loops
+/// `for i := start; i < end; i++` over `visibleRange()` (tree.go:558-580,
+/// "bv-db02: windowed rendering") — so a full 169-node tree costs the same
+/// per frame as a 3-node one.
+pub fn render_tree_lines(nodes: &[TreeNode], range: std::ops::Range<usize>) -> Vec<Line<'static>> {
+    let mut lines = Vec::with_capacity(range.len());
+    for n in &nodes[range] {
         let prefix = if n.has_children {
             if n.expanded {
                 "\u{25be} "
@@ -122,6 +145,22 @@ pub fn render_tree_lines(nodes: &[TreeNode]) -> Vec<Line<'static>> {
     lines
 }
 
+/// The node window that fits in `height` rows with the cursor visible.
+///
+/// Mirrors ratatui's `List` scroll rule (which this view is drawn through,
+/// `widgets/list/rendering.rs:129-200`): with every node exactly one line
+/// tall, the window is the last `height` nodes ending at the cursor, clamped
+/// to the ends of the list.
+pub fn visible_range(len: usize, cursor: usize, height: usize) -> std::ops::Range<usize> {
+    if len == 0 || height == 0 {
+        return 0..0;
+    }
+    let start = (cursor + 1)
+        .saturating_sub(height)
+        .min(len.saturating_sub(1));
+    start..(start + height).min(len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,7 +183,7 @@ mod tests {
                 expanded: false,
             },
         ];
-        let lines = render_tree_lines(&nodes);
+        let lines = render_tree_lines(&nodes, 0..nodes.len());
         assert_eq!(lines.len(), 2);
     }
 
@@ -157,7 +196,7 @@ mod tests {
             has_children: true,
             expanded: false,
         }];
-        let lines = render_tree_lines(&nodes);
+        let lines = render_tree_lines(&nodes, 0..nodes.len());
         assert!(!lines.is_empty());
     }
 }

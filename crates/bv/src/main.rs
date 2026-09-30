@@ -16334,11 +16334,24 @@ fn resolve_correlated_commit<'a>(
 /// wrapper key (robot_registry.go:2871-2887). The report is the *raw* one, so
 /// a rejected pair can still be explained; the stored decision is attached to
 /// the explanation and overrides its recommendation.
-/// Open `/dev/tty` the way Go's bubbletea does before it starts a program.
+/// Reproduce Go's up-front "is there a terminal?" check before starting the
+/// TUI.
 ///
-/// This is a reachability check, not a handle anyone uses afterwards: it
-/// reproduces Go's up-front failure for a run with no controlling terminal,
-/// which is the case for every agent, CI job and cron entry.
+/// This is a reachability check, not a handle anyone uses afterwards. It
+/// catches runs with no controlling terminal — every agent, CI job and cron
+/// entry — and reports it as one clear line instead of letting the run get
+/// far enough to fail as "TUI error: Device not configured", which names
+/// neither the cause nor the way out.
+///
+/// On Unix that check is literally Go's: bubbletea opens `/dev/tty` before
+/// starting a program, so we open it too and surface the same error text.
+/// Go's bubbletea does **no** such thing on Windows — it drives the console
+/// through the Win32 API, and `/dev/tty` does not exist there — so
+/// replicating the Unix probe unconditionally made every Windows launch die
+/// with `could not open a new TTY: open /dev/tty: the system cannot find the
+/// path specified` before the TUI ever started. The Windows equivalent of
+/// "has a controlling terminal" is "is stdout a terminal".
+#[cfg(unix)]
 fn open_tty() -> Result<(), String> {
     std::fs::OpenOptions::new()
         .read(true)
@@ -16346,6 +16359,16 @@ fn open_tty() -> Result<(), String> {
         .open("/dev/tty")
         .map(|_| ())
         .map_err(|e| go_path_error("open", "/dev/tty", &e))
+}
+
+#[cfg(windows)]
+fn open_tty() -> Result<(), String> {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        Ok(())
+    } else {
+        Err("stdout is not a terminal".to_string())
+    }
 }
 
 fn run_robot_explain_correlation(args: &[String]) -> ExitCode {

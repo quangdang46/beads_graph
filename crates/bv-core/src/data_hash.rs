@@ -271,6 +271,19 @@ fn normalize_time_for_hash(raw: &str) -> String {
 /// (encounter order breaks duplicate-ID ties), and hashes the whole list.
 /// The result is a full 64-char SHA-256 hex digest.
 pub fn compute_data_hash(issues: &[Issue]) -> String {
+    let borrowed: Vec<&Issue> = issues.iter().collect();
+    compute_data_hash_refs(&borrowed)
+}
+
+/// [`compute_data_hash`] over borrowed issues.
+///
+/// Byte-for-byte identical output: the encoder below only ever reads through
+/// the `&Issue`, and `position` — the only input-order-sensitive value — is
+/// the slice index, which a `&[&Issue]` in the same order reproduces
+/// exactly. The TUI keeps its issues in a `HashMap<String, Issue>` and was
+/// deep-cloning the whole map (megabytes of prose) just to throw the copy
+/// away after hashing it.
+pub fn compute_data_hash_refs(issues: &[&Issue]) -> String {
     if issues.is_empty() {
         return "empty".to_string();
     }
@@ -438,6 +451,33 @@ mod tests {
     #[test]
     fn empty_input_yields_empty_sentinel() {
         assert_eq!(compute_data_hash(&[]), "empty");
+        assert_eq!(compute_data_hash_refs(&[]), "empty");
+    }
+
+    /// The borrowed entry point exists so callers holding a `HashMap` of
+    /// issues can hash without deep-cloning first. It is only safe because
+    /// it feeds the encoder exactly the same bytes in exactly the same order;
+    /// this pins that, including the duplicate-ID encounter-order tiebreak
+    /// that is the one place slice order can reach the digest.
+    #[test]
+    fn borrowed_variant_matches_the_owned_one() {
+        let issues: Vec<Issue> = ["B", "A", "C", "A"].into_iter().map(issue).collect();
+        let borrowed: Vec<&Issue> = issues.iter().collect();
+        assert_eq!(
+            compute_data_hash(&issues),
+            compute_data_hash_refs(&borrowed)
+        );
+
+        let mut dupes = vec![issue("A"), issue("A"), issue("A")];
+        dupes[0].title = "first".into();
+        dupes[1].title = "second".into();
+        dupes[2].title = "third".into();
+        let borrowed_dupes: Vec<&Issue> = dupes.iter().collect();
+        assert_eq!(
+            compute_data_hash(&dupes),
+            compute_data_hash_refs(&borrowed_dupes),
+            "duplicate IDs must still be ordered by encounter position"
+        );
     }
 
     #[test]
