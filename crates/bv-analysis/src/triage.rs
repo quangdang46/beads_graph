@@ -61,7 +61,8 @@ pub struct ProjectCounts {
 
 pub fn compute_counts(
     issues: &[Issue],
-    blocked_set: &std::collections::HashSet<String>,
+    readiness: &Readiness<'_>,
+    now: jiff::Timestamp,
 ) -> (ProjectCounts, QuickRef) {
     let mut c = ProjectCounts::default();
     let mut qr = QuickRef::default();
@@ -79,32 +80,44 @@ pub fn compute_counts(
         }
         // non-closed from here on
         c.not_closed += 1;
-        match i.status {
-            Status::Open => {
-                c.open += 1;
-                qr.open_count += 1;
-            }
-            Status::Blocked => {
-                c.blocked += 1;
-                qr.blocked_count += 1;
-            }
-            _ => {}
-        }
-        let blocked_here = blocked_set.contains(&i.id);
-        if blocked_here {
+
+        // Go `ReadinessIndex.Ready` (readiness.go:175-179), reached through
+        // `getActionableIssuesAfterCompletions`:
+        //
+        //     exists && isActionableStatus(status)
+        //           && !isDeferredAt(now) && DependencyState == Satisfied
+        //
+        // `dependency_blocked` is the *complement within the non-closed set*,
+        // not membership of a blocked set (triage.go:850-860). Counting
+        // readiness-blocked ids instead made the two unrelated quantities: a
+        // deferred or parked issue was in neither bucket, so
+        // `not_closed == actionable + not_actionable` stopped being checkable.
+        let ready = i.status.is_open()
+            && !readiness.is_deferred_at(i.id.as_str(), now)
+            && readiness.dependency_state(i.id.as_str()) == DepState::Satisfied;
+        if ready {
+            c.actionable += 1;
+        } else {
             c.dependency_blocked += 1;
         }
-        // actionable = open-like with no open blockers (Go definition)
-        if i.status.is_open() && !blocked_here {
-            c.actionable += 1;
-        }
     }
+    // Strict status counts (Go triage.go:865-867, issue #165): Open and Blocked
+    // are read back out of ByStatus rather than tallied in the loop, so
+    // counts.open == by_status.open holds by construction.
+    c.open = c.by_status.get("open").copied().unwrap_or(0);
+    c.blocked = c.by_status.get("blocked").copied().unwrap_or(0);
+
     qr.open_count = c.open;
     qr.blocked_count = c.blocked;
+    // Go `InProgressCount: counts.ByStatus["in_progress"]` (triage.go:722). The
+    // field was declared on QuickRef and never assigned, so it reported 0 for
+    // every repository — including one with work in flight.
+    qr.in_progress_count = c.by_status.get("in_progress").copied().unwrap_or(0);
     qr.actionable_count = c.actionable;
     qr.not_closed_count = c.not_closed;
-    qr.not_actionable_count = qr.not_closed_count - qr.actionable_count;
-    c.not_actionable_count = qr.not_actionable_count;
+    // Go `NotActionableCount: counts.DependencyBlocked` (triage.go:724).
+    qr.not_actionable_count = c.dependency_blocked;
+    c.not_actionable_count = c.dependency_blocked;
     (c, qr)
 }
 
@@ -392,6 +405,19 @@ impl<'a> Readiness<'a> {
         }
         r.compute();
         r
+    }
+
+    /// Go `ReadinessIndex.Ready` (readiness.go:175-179), the `defer_until`
+    /// gate on its own: `DeferUntil != nil && DeferUntil.After(now)`.
+    ///
+    /// Go's `Ready` is `open|in_progress AND !deferred AND satisfied`. The
+    /// status gate and the readiness gate both have Rust equivalents that were
+    /// already applied; this defer gate was not, so an issue parked until next
+    /// quarter still counted as actionable work.
+    pub fn is_deferred_at(&self, id: &str, now: jiff::Timestamp) -> bool {
+        self.issues
+            .get(id)
+            .is_some_and(|issue| issue.is_deferred_at(now))
     }
 
     /// Go `ReadinessIndex.compute` (readiness.go:109-161).
@@ -1220,8 +1246,8 @@ fn build_triage_inner(
             .then(a.id.cmp(&b.id))
     });
 
-    let blocked_set = compute_blocked_set(issues);
-    let (counts, quick_ref) = compute_counts(issues, &blocked_set);
+    let readiness = Readiness::new(issues);
+    let (counts, quick_ref) = compute_counts(issues, &readiness, now);
     let velocity = compute_project_velocity(issues, now);
     TriageOutput {
         recommendations,
@@ -1252,6 +1278,10 @@ mod tests {
 
     /// Minimal dependency-free open issue, for graph/readiness unit tests.
     fn bare_issue(id: &str) -> Issue {
+        bare_issue_with(id, Status::Open, None)
+    }
+
+    fn bare_issue_with(id: &str, status: Status, defer_until: Option<&str>) -> Issue {
         Issue {
             id: id.to_string(),
             content_hash: String::new(),
@@ -1260,7 +1290,7 @@ mod tests {
             design: String::new(),
             acceptance_criteria: String::new(),
             notes: String::new(),
-            status: Status::Open,
+            status,
             priority: 2,
             issue_type: "task".into(),
             assignee: String::new(),
@@ -1268,7 +1298,7 @@ mod tests {
             created_at: None,
             updated_at: None,
             due_date: None,
-            defer_until: None,
+            defer_until: defer_until.map(str::to_string),
             closed_at: None,
             external_ref: None,
             compaction_level: 0,
@@ -1280,6 +1310,69 @@ mod tests {
             comments: vec![],
             source_repo: String::new(),
         }
+    }
+
+    /// `quick_ref.in_progress_count` is `ByStatus["in_progress"]`
+    /// (Go triage.go:722). It was declared on the struct and never assigned,
+    /// so every repository reported 0 — including one with work in flight,
+    /// which also turned the in-progress bead's recommendation reason into
+    /// "Currently unclaimed - available for work".
+    #[test]
+    fn in_progress_count_reports_work_in_flight() {
+        let issues = vec![
+            bare_issue("A-1"),
+            bare_issue_with("A-2", Status::InProgress, None),
+            bare_issue_with("A-3", Status::InProgress, None),
+            bare_issue_with("A-4", Status::Deferred, None),
+        ];
+        let readiness = Readiness::new(&issues);
+        let (counts, qr) = compute_counts(&issues, &readiness, jiff::Timestamp::UNIX_EPOCH);
+
+        assert_eq!(qr.in_progress_count, 2);
+        assert_eq!(counts.by_status.get("in_progress"), Some(&2));
+        assert_eq!(
+            qr.not_closed_count, 4,
+            "open + in_progress + deferred are all non-closed"
+        );
+    }
+
+    /// Go `ReadinessIndex.Ready` (readiness.go:175-179) gates on
+    /// `DeferUntil.After(now)`. Without that gate an issue parked until next
+    /// quarter counted as actionable work, and — because
+    /// `dependency_blocked` is the complement within the non-closed set
+    /// (triage.go:850-860) — it was counted in neither bucket.
+    #[test]
+    fn a_deferred_issue_is_neither_actionable_nor_ignored() {
+        let parked = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 30);
+        let issues = vec![
+            bare_issue("A-1"),
+            bare_issue_with("A-2", Status::Open, Some(&parked.to_string())),
+            // A defer_until already in the past does not park anything.
+            bare_issue_with(
+                "A-3",
+                Status::Open,
+                Some(
+                    &(jiff::Timestamp::UNIX_EPOCH + jiff::SignedDuration::from_hours(1))
+                        .to_string(),
+                ),
+            ),
+        ];
+        let readiness = Readiness::new(&issues);
+        let now = jiff::Timestamp::now();
+        let (counts, qr) = compute_counts(&issues, &readiness, now);
+
+        assert_eq!(qr.actionable_count, 2, "A-1 and the expired A-3");
+        assert_eq!(
+            qr.not_actionable_count, 1,
+            "A-2 is parked, so it belongs to the complement — not nowhere"
+        );
+        assert_eq!(counts.dependency_blocked, 1);
+        assert_eq!(
+            qr.not_closed_count,
+            qr.actionable_count + qr.not_actionable_count,
+            "the partition invariant has to hold for the numbers to mean anything"
+        );
+        assert!(qr.validate_invariant());
     }
 
     #[test]
@@ -1358,7 +1451,8 @@ mod tests {
     fn large_cyclic_counts_match_go_golden() {
         let issues = fixture_issues("large_cyclic_600");
         let blocked = compute_blocked_set(&issues);
-        let (counts, _) = compute_counts(&issues, &blocked);
+        let readiness = Readiness::new(&issues);
+        let (counts, _) = compute_counts(&issues, &readiness, jiff::Timestamp::UNIX_EPOCH);
         assert_eq!(counts.total, 600);
         assert_eq!(counts.actionable, 149);
         assert_eq!(counts.dependency_blocked, 451);
