@@ -159,3 +159,57 @@ fn frame_cost_on_a_real_repository() {
         println!("  {name:<7} {ms:6.2} ms/frame");
     }
 }
+
+/// The frame cost of a detail pane showing the biggest issue in the repo.
+///
+/// `frame_cost_on_a_real_repository` renders whatever issue happens to be
+/// selected first. The detail pane is the one part of a frame that re-derives
+/// the *selected* issue's whole body — `render_detail` calls
+/// `build_detail_lines` on every frame — so its cost tracks the size of that
+/// one issue rather than the dataset. Selecting the largest record reproduces
+/// the worst case: a Beads project accumulates multi-tens-of-KB `notes` and
+/// `acceptance_criteria`.
+///
+/// The scroll offset does not appear in the measurement because it does not
+/// change the cost: the body is rebuilt in full whichever page is showing.
+/// Holding the offset still is the honest way to time it.
+#[test]
+#[ignore = "needs a real repo; set BV_BENCH_REPO to a project root"]
+fn detail_pane_cost_tracks_the_selected_issue_size() {
+    let Ok(repo) = std::env::var("BV_BENCH_REPO") else {
+        panic!("set BV_BENCH_REPO to a project root containing .beads/issues.jsonl");
+    };
+    let cwd = std::path::PathBuf::from(&repo);
+    let (issues, _stats) = bv_core::discovery::load_issues_from_repo(&cwd)
+        .unwrap_or_else(|e| panic!("load {repo}: {e}"));
+
+    let text_len = |i: &bv_core::model::Issue| {
+        i.description.len() + i.notes.len() + i.acceptance_criteria.len() + i.title.len()
+    };
+    let (biggest, size) = issues
+        .iter()
+        .max_by_key(|i| text_len(i))
+        .map(|i| (i.id.clone(), text_len(i)))
+        .expect("dataset has issues");
+
+    let mut app = App::new(issues);
+    app.current_view = bv_tui::ViewMode::List;
+    let pos = app
+        .filtered_indices
+        .iter()
+        .position(|&i| app.rows[i].id == biggest)
+        .expect("biggest issue is in the filtered set");
+    app.cursor = pos;
+    // Focused, so the pane is the one being scrolled rather than the list.
+    app.focus_detail = true;
+
+    let ms = frame_ms(&mut app, 30);
+    println!("\n{repo}: detail pane on the largest issue");
+    println!("  {biggest}: {size} bytes of text");
+    println!("  {ms:6.2} ms/frame");
+
+    assert!(
+        ms < Duration::from_millis(16).as_secs_f64() * 1000.0,
+        "a detail pane showing {biggest} took {ms:.2} ms/frame, over the 60fps budget"
+    );
+}

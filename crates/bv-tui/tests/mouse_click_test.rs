@@ -164,3 +164,55 @@ fn clicking_the_border_or_header_selects_nothing() {
         );
     }
 }
+
+/// The redraw policy asks `handle_mouse` whether anything changed, and
+/// repaints on its answer rather than on "an event arrived".
+///
+/// `EnableMouseCapture` turns on SGR 1003, so the terminal reports every
+/// pointer movement. If motion reported `true` the TUI would rebuild and
+/// repaint the whole view on every sweep of the mouse across the window —
+/// which is what the caller used to do unconditionally. Conversely, if an
+/// event that really does move the cursor reported `false`, the screen would
+/// freeze on it, so both directions are pinned here.
+#[test]
+fn only_mouse_events_that_change_something_report_a_change() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let ev = |kind| MouseEvent {
+        kind,
+        column: 20,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+
+    // Events that change nothing: motion, drag, release, the horizontal
+    // wheels, and the buttons the TUI does not bind.
+    for kind in [
+        MouseEventKind::Moved,
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Middle),
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::ScrollLeft,
+        MouseEventKind::ScrollRight,
+    ] {
+        let mut app = make_app(40, 120, 20);
+        assert!(
+            !app.handle_mouse(ev(kind)),
+            "{kind:?} changes nothing, so it must not ask for a repaint"
+        );
+    }
+
+    // Events that do change something.
+    for kind in [
+        MouseEventKind::ScrollDown,
+        MouseEventKind::ScrollUp,
+        MouseEventKind::Down(MouseButton::Left),
+    ] {
+        let mut app = make_app(40, 120, 20);
+        assert!(
+            app.handle_mouse(ev(kind)),
+            "{kind:?} moves the selection, so it must ask for a repaint"
+        );
+    }
+}

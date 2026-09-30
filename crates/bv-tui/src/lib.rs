@@ -5292,8 +5292,6 @@ pub fn run_tui(app: &mut App) -> io::Result<()> {
         });
     }
 
-    let mut stdout = io::stdout();
-    crossterm::terminal::enable_raw_mode()?;
     // Mouse reporting stays on crossterm's EnableMouseCapture
     // (`?1000h ?1002h ?1003h ?1015h ?1006h`).
     //
@@ -5301,31 +5299,91 @@ pub fn run_tui(app: &mut App) -> io::Result<()> {
     // `?1000h ?1002h ?1006h` — 1002 but not 1003 — reasoning that `?1003h`
     // ("report *all* motion events") is pure overhead, since `handle_mouse`
     // ignores motion and so those events cannot change state. **That was
-    // wrong, and it broke clicking.** The per-motion redraw cost it was
-    // meant to remove was already gone: it was the draw-first loop paying
-    // for it, and the loop now redraws only when a handler reports a
-    // change. Re-emitting a different set of DECSET codes bought nothing
-    // measurable on top of that, while changing the terminal's reporting
-    // mode — which is observable to the user and to anything else reading
-    // the tty. Do not narrow this again without a measurement that it
-    // matters, and without verifying a click still lands on the row under
-    // the pointer.
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    // wrong, and it broke clicking**, though not for the reason it assumed:
+    // the clicks were dying because the restore ran *before* the event loop
+    // and undid these very codes (see `TerminalSession`). Narrowing the mode
+    // is a separate question from fixing that, and it is not the way to buy
+    // back the per-motion repaint — `handle_one_event` not treating motion
+    // as a change is. Re-emitting a different set of DECSET codes would
+    // change the terminal's reporting mode, which is observable to the user
+    // and to anything else reading the tty. Do not narrow this again
+    // without a measurement that it matters, and without verifying with
+    // `scripts/mouse_probe.py` that a click still lands on the row under the
+    // pointer.
+    let mut session = TerminalSession::enter()?;
+    let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
     let terminal = ratatui::Terminal::new(backend)?;
 
-    // `tui_event_loop` owns the restore path: even if the event loop fails
-    // on an I/O error, the alternate screen is left and raw mode is dropped.
-    // A `?` that returned straight out of the old body skipped both, leaving
-    // the user in a broken terminal.
     let result = tui_event_loop(terminal, app, &update_rx);
 
+    // Restore explicitly rather than leaning on the drop at the end of the
+    // function, so a failure to restore is reported. The guard is the backstop
+    // for the paths that cannot report: an early `?` or a panic.
+    let restored = session.restore();
     release_instance_lock(&beads_dir);
-    result
+    // Report why the loop stopped; a failing restore only surfaces when the
+    // loop itself succeeded, so it cannot mask the real cause.
+    result.and(restored)
+}
+
+/// Restores the terminal on the way out, whenever that happens.
+///
+/// This exists because the restore used to be ordinary statements sitting
+/// next to the `run()` call, and an edit put them *above* it. The TUI then
+/// left the alternate screen, dropped mouse capture and disabled raw mode
+/// before the first frame: the screen was painted to the normal buffer with
+/// `ICANON` and echo on, so clicks did nothing and keys were line-buffered.
+/// Nothing in the unit tests could see it, because they call `handle_mouse`
+/// and never touch a terminal — reading the raw pty byte stream is what
+/// showed `?1049h ?1000h ... ?1006h` immediately followed by `?1049l
+/// ?1006l ... ?1000l`, and the first paint after both.
+///
+/// A guard makes the ordering structural instead of conventional: the session
+/// is entered before the loop and leaves when it goes out of scope, so
+/// "restore before running" is no longer expressible.
+struct TerminalSession {
+    restored: bool,
+}
+
+impl TerminalSession {
+    /// Put the terminal into the state the TUI needs: alternate screen, mouse
+    /// reporting, raw mode. On any failure the modes already set are undone
+    /// before returning, so a half-entered session is not left behind.
+    fn enter() -> io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        let setup = crossterm::execute!(
+            io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture
+        );
+        if let Err(e) = setup {
+            let _ = crossterm::terminal::disable_raw_mode();
+            return Err(e);
+        }
+        Ok(Self { restored: false })
+    }
+
+    /// Leave the alternate screen, stop reporting the mouse and drop raw mode.
+    /// Idempotent, so it is safe to call explicitly and still have `Drop` as a
+    /// backstop for an early return or a panic.
+    fn restore(&mut self) -> io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        self.restored = true;
+        crossterm::execute!(
+            io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        )
+        .and_then(|()| crossterm::terminal::disable_raw_mode())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
 }
 
 /// Whether a time-animated widget is on screen and needs sub-second repaints.
@@ -5333,22 +5391,32 @@ fn self_update_modal_animating(app: &App) -> bool {
     app.show_update_modal && app.update_modal.is_some()
 }
 
-/// Apply one terminal event to `app`. Returns whether the user asked to quit.
+/// Apply one terminal event to `app`. Returns `(quit, changed)`.
 ///
 /// `Ctrl+C` is handled here rather than by the caller so the burst-drain
 /// loop can stop on it without unwinding the whole event loop.
-fn handle_one_event(app: &mut App, ev: CEvent) -> bool {
+///
+/// `changed` is the "does the screen need repainting" signal, and it has to
+/// be the handler's answer rather than "an event arrived". `EnableMouseCapture`
+/// turns on SGR 1003 — *report all motion* — and `handle_mouse` deliberately
+/// ignores motion (`MouseEventKind::Moved` falls through to `_ => false`, as
+/// do drag, button-up and the horizontal wheels). Counting those as changes
+/// made every sweep of the pointer across the terminal repaint all 200x50
+/// cells, which is precisely the cost this policy exists to avoid: you move
+/// the mouse to reach the wheel, and the TUI redraws continuously while you
+/// do it.
+fn handle_one_event(app: &mut App, ev: CEvent) -> (bool, bool) {
     match ev {
         CEvent::Key(key) => {
             if key.kind != KeyEventKind::Press {
-                return false;
+                return (false, false);
             }
             if key
                 .modifiers
                 .contains(crossterm::event::KeyModifiers::CONTROL)
                 && key.code == KeyCode::Char('c')
             {
-                return true;
+                return (true, true);
             }
             // `handle_*` return `true` when they changed state. Go's
             // `Update` has the same shape: every arm that mutates the Model
@@ -5361,12 +5429,20 @@ fn handle_one_event(app: &mut App, ev: CEvent) -> bool {
             } else {
                 app.handle_key(key.code);
             }
+            // A keypress counts as a change even when the handler reports
+            // none. Keys arrive one per deliberate user action, so the
+            // repaint is free, and some bindings change nothing visible (a
+            // filter that was already active, `?` re-opening open help).
+            // Assuming "changed" can cost one redundant frame; assuming
+            // "unchanged" would freeze the screen on a binding that mutates
+            // state without reporting it.
+            (false, true)
         }
         CEvent::Mouse(mouse) => {
-            // Motion events over a region that handles no drag change
-            // nothing, and the burst loop above already collapsed a motion
-            // storm into a single repaint.
-            app.handle_mouse(mouse);
+            // The one arm that trusts the handler: motion is the flood, and
+            // `handle_mouse` already reports accurately which events change
+            // anything.
+            (false, app.handle_mouse(mouse))
         }
         CEvent::Resize(..) => {
             // Go handles `tea.WindowSizeMsg` and re-sizes its list and every
@@ -5374,10 +5450,10 @@ fn handle_one_event(app: &mut App, ev: CEvent) -> bool {
             // dropped this event outright, leaving `app.width`/`app.height`
             // pinned to the 120x40 defaults for the life of the process.
             app.handle_resize();
+            (false, true)
         }
-        _ => {}
+        _ => (false, false),
     }
-    false
 }
 
 fn tui_event_loop(
@@ -5497,13 +5573,27 @@ fn tui_event_loop(
             // every queued event first and then painting once collapses that to
             // a single repaint, and it drops no input — the events are all
             // handled, just before the pixels move rather than between each one.
+            //
+            // The drain is bounded anyway. SGR 1003 means the terminal reports
+            // every pointer movement, so a hand resting on a trackpad can keep
+            // the queue non-empty for as long as it is moving; draining "until
+            // empty" would then not return to the paint for the whole gesture
+            // and the pixels would lag the pointer. The cap guarantees a repaint
+            // per frame however fast events arrive, and whatever is left stays
+            // queued for the next frame, which coalesces it just the same.
+            const MAX_EVENTS_PER_FRAME: u32 = 512;
             if event::poll(std::time::Duration::from_millis(500))? {
                 let mut quit = false;
+                let mut changed = false;
+                let mut budget = MAX_EVENTS_PER_FRAME;
                 loop {
-                    quit |= handle_one_event(app, event::read()?);
-                    if quit || !event::poll(std::time::Duration::ZERO)? {
+                    let (q, c) = handle_one_event(app, event::read()?);
+                    quit |= q;
+                    changed |= c;
+                    if quit || budget == 0 || !event::poll(std::time::Duration::ZERO)? {
                         break;
                     }
+                    budget -= 1;
                 }
                 if quit {
                     // Route through `quit_requested`, which the top of this loop
@@ -5512,36 +5602,23 @@ fn tui_event_loop(
                     // forever with Ctrl+C swallowed.
                     app.quit_requested = true;
                 }
-                // Force the repaint: a burst that only scrolled the list still
-                // has to reach the screen.
-                dirty = true;
+                // Repaint only what the burst actually changed. A burst of pure
+                // pointer motion changes nothing, and repainting for it is the
+                // cost this whole policy exists to avoid.
+                dirty |= changed;
             }
         }
         Ok(())
     };
 
-    // Run the loop, THEN restore — in that order.
-    //
-    // The restore used to be written above this call, which inverted it: the
-    // terminal was dropped out of the alternate screen, mouse capture was
-    // turned off and raw mode was disabled *before* the first frame, so the
-    // TUI painted to the normal screen with the terminal in canonical mode
-    // and echo on. Clicks did nothing at all, because `?1000h`/`?1006h` had
-    // already been undone by the time the loop was listening. Caught by
-    // reading the raw pty byte stream: `?1049h ?1000h ... ?1006h` followed
-    // immediately by `?1049l ?1006l ... ?1000l` and only then the first
-    // paint. The unit tests could not see it — they call `handle_mouse`
-    // directly and never touch the terminal.
-    let result = run();
-    let restore = crossterm::execute!(
-        io::stdout(),
-        crossterm::terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
-    )
-    .and_then(|()| crossterm::terminal::disable_raw_mode());
-    // Report why the loop stopped; fall back to the restore's own error only
-    // when the loop itself succeeded, so a failed restore cannot mask it.
-    result.and(restore)
+    // The loop owns no restore. `run_tui` holds a `TerminalSession`, which
+    // puts the terminal into TUI mode before this is called and takes it back
+    // out afterwards — so "restore before running" is not expressible here,
+    // which is the whole point: it was exactly that inversion, once, that
+    // left the TUI painting to the normal screen with mouse capture off and
+    // `ICANON` set. See `TerminalSession` for what the broken byte stream
+    // looked like and why no unit test could see it.
+    run()
 }
 
 #[cfg(test)]
