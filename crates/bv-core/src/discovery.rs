@@ -299,6 +299,9 @@ pub fn load_issues_from_repo(
                     valid: count,
                     errors: 0,
                     skipped: 0,
+                    // The SQLite reader already excludes tombstoned rows
+                    // (`sqlite.rs:92`), so none survive to count here.
+                    tombstones: 0,
                 },
             ));
         }
@@ -316,6 +319,7 @@ pub fn load_issues_from_repo(
 
 struct CacheEntry {
     issues: Vec<Issue>,
+    stats: crate::loader::ParseStats,
     loaded_at: Instant,
 }
 
@@ -434,29 +438,43 @@ impl GitLoader {
 
     /// Load issues at a revision (SHA / branch / tag / HEAD~N / date string).
     pub fn load_at(&self, revision: &str) -> Result<Vec<Issue>, DiscoveryError> {
+        self.load_at_with_stats(revision).map(|(issues, _)| issues)
+    }
+
+    /// As `load_at`, but keeping the parse stats so `--as-of` can report
+    /// `source_authority.tombstones` the way Go does (main.go:2649 reads
+    /// `len(historical.TombstoneIDs)`) instead of reporting a flat zero.
+    pub fn load_at_with_stats(
+        &self,
+        revision: &str,
+    ) -> Result<(Vec<Issue>, crate::loader::ParseStats), DiscoveryError> {
         let sha = self.resolve_revision(revision)?;
         if let Ok(cache) = self.cache.lock() {
             if let Some(entry) = cache.get(&sha) {
                 if entry.loaded_at.elapsed() < self.max_age {
-                    return Ok(entry.issues.clone());
+                    return Ok((entry.issues.clone(), entry.stats));
                 }
             }
         }
-        let issues = self.load_from_git(&sha)?;
+        let (issues, stats) = self.load_from_git(&sha)?;
         if let Ok(mut cache) = self.cache.lock() {
             cache.insert(
                 sha.clone(),
                 CacheEntry {
                     issues: issues.clone(),
+                    stats,
                     loaded_at: Instant::now(),
                 },
             );
         }
-        Ok(issues)
+        Ok((issues, stats))
     }
 
     /// Go: `loadFromGit` — try `.beads/<preferred>` paths in order via git show.
-    fn load_from_git(&self, sha: &str) -> Result<Vec<Issue>, DiscoveryError> {
+    fn load_from_git(
+        &self,
+        sha: &str,
+    ) -> Result<(Vec<Issue>, crate::loader::ParseStats), DiscoveryError> {
         for name in PREFERRED_JSONL_NAMES {
             let path = format!(".beads/{name}");
             if let Ok(raw) = self.git_show(sha, &path) {
@@ -464,13 +482,11 @@ impl GitLoader {
                     continue;
                 }
                 let mut rdr = raw.as_bytes();
-                let (issues, _) =
-                    parse_issues_with_options(&mut rdr, &ParseOptions::default(), |_| {})
-                        .map_err(|e| DiscoveryError::Git(e.to_string()))?;
-                return Ok(issues);
+                return parse_issues_with_options(&mut rdr, &ParseOptions::default(), |_| {})
+                    .map_err(|e| DiscoveryError::Git(e.to_string()));
             }
         }
-        Ok(Vec::new())
+        Ok((Vec::new(), crate::loader::ParseStats::default()))
     }
 
     fn git_show(&self, sha: &str, path: &str) -> Result<String, DiscoveryError> {

@@ -217,11 +217,28 @@ fn empty_file_no_errors() {
 }
 
 // === Go: tombstone filtered after load ===
+///
+/// Go `pkg/workspace/loader.go:519-527` walks the parsed records and routes
+/// `status: "tombstone"` into `TombstoneIDs`, so a deleted issue never reaches
+/// a view, a count, or the `data_hash`. The split runs *after* parsing, which is
+/// why `valid` still counts the record and only `visible` excludes it.
 #[test]
-fn tombstone_status_parsed_correctly() {
-    let (issues, _, _) =
-        parse(r#"{"id":"DEAD","title":"Gone","status":"tombstone","issue_type":"task"}"#);
-    // Tombstone is a valid status — it parses but gets filtered by datasource layer
-    assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].status, Status::Tombstone);
+fn tombstones_are_kept_out_of_the_issue_set() {
+    let (issues, stats, _) = parse(concat!(
+        r#"{"id":"LIVE","title":"Real","status":"open","issue_type":"task"}"#,
+        "\n",
+        r#"{"id":"DEAD","title":"Gone","status":"tombstone","issue_type":"task"}"#,
+    ));
+
+    let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, ["LIVE"], "the deleted record must not be analysable");
+    assert!(!issues.iter().any(|i| i.status == Status::Tombstone));
+
+    assert_eq!(stats.tombstones, 1);
+    assert_eq!(
+        stats.valid, 2,
+        "a tombstone is a well-formed record, not a parse error — Go's split runs after parsing"
+    );
+    assert_eq!(stats.visible(), 1);
+    assert_eq!(stats.errors, 0, "dropping a tombstone is not an error");
 }

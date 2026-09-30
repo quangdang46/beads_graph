@@ -22,6 +22,15 @@ pub struct ParseStats {
     pub valid: usize,
     pub errors: usize,
     pub skipped: usize,
+    /// Records that parsed cleanly but describe a *deleted* issue, and so were
+    /// kept out of every view. Go: `LoadResult.TombstoneIDs`
+    /// (`pkg/workspace/loader.go:521`), surfaced as the envelope's
+    /// `source_authority.tombstones`.
+    ///
+    /// These still count towards `valid`: a tombstone is a well-formed record,
+    /// not a parse failure, and Go runs the split after parsing. Only `visible`
+    /// excludes them.
+    pub tombstones: usize,
 }
 
 impl ParseStats {
@@ -33,6 +42,12 @@ impl ParseStats {
         } else {
             self.errors as f64 / total as f64
         }
+    }
+
+    /// The records that reach analysis: everything that parsed, less the
+    /// deleted ones Go routes into `TombstoneIDs`.
+    pub fn visible(&self) -> usize {
+        self.valid.saturating_sub(self.tombstones)
     }
 }
 
@@ -194,6 +209,29 @@ pub fn parse_issues_with_options(
             line = strip_bom(line);
         }
         process_line(line, line_num, &mut issues, &mut stats, &mut warn);
+    }
+
+    // Go `pkg/workspace/loader.go:519-527` walks the freshly parsed records
+    // and routes every `status: "tombstone"` into `TombstoneIDs`, keeping the
+    // rest as the visible set. The split happens *after* parsing — a tombstone
+    // is a valid record — so `stats.valid` above still counts them.
+    //
+    // Doing this here rather than at each call site is what makes it total:
+    // `load_issues_from_repo`, `Repository::load_from_git` (`--as-of`) and the
+    // standalone loader in `bv` all come through this function, and every one of
+    // them used to hand tombstones to the analyzers. They then reached
+    // `issue_count`, `--robot-history`, the sqlite export and — worst of all —
+    // the `data_hash`, which the compatibility contract pins byte-for-byte.
+    if issues.iter().any(|i| i.status.is_tombstone()) {
+        let mut visible = Vec::with_capacity(issues.len());
+        for issue in issues {
+            if issue.status.is_tombstone() {
+                stats.tombstones += 1;
+            } else {
+                visible.push(issue);
+            }
+        }
+        issues = visible;
     }
 
     Ok((issues, stats))
@@ -455,7 +493,8 @@ mod tests {
             ParseStats {
                 valid: 12,
                 errors: 0,
-                skipped: 0
+                skipped: 0,
+                tombstones: 0
             }
         );
     }

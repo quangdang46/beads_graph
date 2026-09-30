@@ -3324,6 +3324,19 @@ struct SourceMeta {
     valid: usize,
     errors: usize,
     skipped: usize,
+    /// Records that parsed but described deleted issues. Go
+    /// `LoadResult.TombstoneIDs` (`pkg/workspace/loader.go:521`), reported as
+    /// the envelope's `source_authority.tombstones`.
+    tombstones: usize,
+}
+
+impl SourceMeta {
+    /// What actually reached analysis. Go's authority reports `visible` beside
+    /// `valid` precisely so the two can differ; they only ever matched while
+    /// nothing was tombstoned, so hardcoding one to the other hid the gap.
+    fn visible(&self) -> usize {
+        self.valid.saturating_sub(self.tombstones)
+    }
 }
 
 /// Build the Go `RobotSourceAuthority` for a single-source load
@@ -3341,8 +3354,8 @@ fn source_authority(meta: &SourceMeta, data_hash: &str) -> bv_robot::RobotSource
         errors: meta.errors,
         skipped: meta.skipped,
         read_errors: 0,
-        visible: meta.valid,
-        tombstones: 0,
+        visible: meta.visible(),
+        tombstones: meta.tombstones,
         stale: false,
         warning_count: 0,
         warnings: Vec::new(),
@@ -3360,8 +3373,8 @@ fn source_authority(meta: &SourceMeta, data_hash: &str) -> bv_robot::RobotSource
         errors: meta.errors,
         skipped: meta.skipped,
         read_errors: 0,
-        visible: meta.valid,
-        tombstones: 0,
+        visible: meta.visible(),
+        tombstones: meta.tombstones,
         warning_count: 0,
         sources: vec![report],
     }
@@ -3758,9 +3771,15 @@ fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
                 path: jsonl.to_string_lossy().to_string(),
                 envelope_path: String::new(),
                 kind: "jsonl_local".to_string(),
+                // This fallback never saw the parse stats — it is handed a
+                // finished issue set by handlers that did their own load. The
+                // slice is already past the tombstone split, so `visible` is
+                // exact; `valid` is reported as equal to it because the parse
+                // count is genuinely not available here.
                 valid: issues.len(),
                 errors: 0,
                 skipped: 0,
+                tombstones: 0,
             };
         }
     }
@@ -4697,7 +4716,7 @@ fn load_issues_auto_meta_raw(
             Ok(r) => r,
             Err(e) => return Err(as_of_load_failure(revision, &e.to_string())),
         };
-        let issues = match loader.load_at(revision) {
+        let (issues, stats) = match loader.load_at_with_stats(revision) {
             Ok(i) => i,
             Err(e) => return Err(as_of_load_failure(revision, &e.to_string())),
         };
@@ -4713,7 +4732,6 @@ fn load_issues_auto_meta_raw(
             );
         }
         let hash = bv_core::data_hash::compute_data_hash(&issues);
-        let valid = issues.len();
         // Built before the tuple: `Some(resolved)` moves `resolved` when the
         // third element is evaluated, which is before the fourth.
         //
@@ -4725,9 +4743,13 @@ fn load_issues_auto_meta_raw(
             path: format!(".beads/issues.jsonl@{resolved}"),
             envelope_path: format!(".beads@{revision}"),
             kind: "git".to_string(),
-            valid,
-            errors: 0,
-            skipped: 0,
+            // Go main.go:2649 reads `Tombstones: len(historical.TombstoneIDs)`
+            // for this path, so a historical snapshot reports the same split as
+            // a live load.
+            valid: stats.valid,
+            errors: stats.errors,
+            skipped: stats.skipped,
+            tombstones: stats.tombstones,
         };
         return Ok((issues, hash, Some(resolved), source));
     }
@@ -4747,6 +4769,8 @@ fn load_issues_auto_meta_raw(
         {
             Ok((issues, _)) => {
                 let hash = bv_core::data_hash::compute_data_hash(&issues);
+                // Hoisted: the tuple moves `issues` into its first slot before
+                // the fourth element is evaluated.
                 let valid = issues.len();
                 return Ok((
                     issues,
@@ -4756,9 +4780,17 @@ fn load_issues_auto_meta_raw(
                         path: ws_path.to_string_lossy().to_string(),
                         envelope_path: String::new(),
                         kind: "workspace".to_string(),
+                        // The per-repo tombstone counts live in `LoadResult`,
+                        // which this call discards — the joined vector has
+                        // already been past the split inside each repo's load,
+                        // so what lands here is the visible set. Reported as
+                        // `visible` with no tombstone tally; Go's workspace
+                        // authority (main.go:7374-7391) aggregates the same
+                        // numbers across reports, which this path does not keep.
                         valid,
                         errors: 0,
                         skipped: 0,
+                        tombstones: 0,
                     },
                 ));
             }
@@ -4789,7 +4821,6 @@ fn load_issues_auto_meta_raw(
         .map_err(|e| e.to_string())?
     };
     let hash = bv_core::data_hash::compute_data_hash(&issues);
-    let valid = issues.len();
     Ok((
         issues,
         hash,
@@ -4798,9 +4829,13 @@ fn load_issues_auto_meta_raw(
             path: jsonl.to_string_lossy().to_string(),
             envelope_path: String::new(),
             kind: "jsonl_local".to_string(),
-            valid,
+            // Go main.go:7379 reports `ParseStats.Valid` (every record that
+            // parsed, tombstones included) beside `Visible: len(Issues)`. The
+            // two only ever coincided while nothing was tombstoned.
+            valid: stats.valid,
             errors: stats.errors,
             skipped: stats.skipped,
+            tombstones: stats.tombstones,
         },
     ))
 }
