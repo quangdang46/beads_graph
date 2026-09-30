@@ -1403,7 +1403,7 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
         output_path.to_string()
     };
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (issues, stats) = match bv_core::discovery::load_issues_from_repo(&cwd) {
+    let (issues, stats) = match load_issues_tracked(&cwd) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
@@ -1870,7 +1870,7 @@ fn main() -> ExitCode {
         // Go main.go:2494-2512 needs the issue's impact score and breakdown, so
         // the issues have to load for accept/ignore even though reset/show do
         // not.
-        let issues = match bv_core::discovery::load_issues_from_repo(&cwd) {
+        let issues = match load_issues_tracked(&cwd) {
             Ok((issues, _)) => issues,
             Err(e) => {
                 eprintln!("Error loading issues: {e}");
@@ -1941,7 +1941,7 @@ fn main() -> ExitCode {
             .cloned()
             .unwrap_or_else(|| "report.md".to_string());
         let cwd = std::env::current_dir().unwrap_or_default();
-        let (issues, stats) = match bv_core::discovery::load_issues_from_repo(&cwd) {
+        let (issues, stats) = match load_issues_tracked(&cwd) {
             Ok(x) => x,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
@@ -3148,7 +3148,7 @@ fn main() -> ExitCode {
         }
     }
 
-    match bv_core::discovery::load_issues_from_repo(&cwd) {
+    match load_issues_tracked(&cwd) {
         Ok((issues, _)) => {
             // Go main.go:2792 — the TUI is scoped like everything else.
             let (issues, _) = apply_scope(&issues);
@@ -3586,7 +3586,7 @@ fn is_unresolved_source_error(e: &str) -> bool {
 /// git repository" instead, which names a different problem than the one an
 /// agent will actually hit.
 fn unresolved_source_probe(cwd: &std::path::Path) -> bool {
-    bv_core::discovery::load_issues_from_repo(cwd)
+    load_issues_tracked(cwd)
         .err()
         .is_some_and(|e| is_unresolved_source_error(&e.to_string()))
 }
@@ -3619,6 +3619,47 @@ fn load_issues_auto_unscoped(
 /// long spellings only in the rewritten vector — so `-l tui` and `--label tui`
 /// would produce different scopes.
 static SCOPE_FLAGS: std::sync::OnceLock<[String; 3]> = std::sync::OnceLock::new();
+
+/// The parse facts of the current load: `(ParseStats.valid, tombstone_ids)`.
+///
+/// The discovery chain returns only an issue vector, so the records the parser
+/// split out have nowhere to ride. `SCOPE_FLAGS` and `AS_OF` are process-wide
+/// for the same reason, but a tombstone count is not a scope decision: dropping
+/// the deleted records is correct everywhere, and the count has to follow them
+/// to every envelope or `source_authority` describes a file that is not the
+/// one on disk. Handlers that build an envelope through
+/// [`full_envelope_for`] never see a `SourceMeta`, and they are the majority —
+/// `--robot-graph`, `--robot-suggest` and `--robot-label-attention` were all
+/// reporting `tombstones: 0` against a file with two.
+static SOURCE_PARSE_FACTS: std::sync::OnceLock<(usize, Vec<String>)> = std::sync::OnceLock::new();
+
+/// [`bv_core::discovery::load_issues_from_repo`], publishing the parse facts
+/// on the way past.
+///
+/// Every envelope names the file it came from, so a handler that loads issues
+/// directly and then builds its own `SourceMeta` still has to be able to say
+/// how many of the file's records were deleted. Routing all of them through
+/// one wrapper is cheaper than remembering the call at each of eight sites —
+/// and the site that dropped the stats is exactly the kind that reads fine
+/// right up until someone diffs the envelope.
+fn load_issues_tracked(
+    cwd: &std::path::Path,
+) -> Result<
+    (Vec<bv_core::model::Issue>, bv_core::loader::ParseStats),
+    bv_core::discovery::DiscoveryError,
+> {
+    let loaded = bv_core::discovery::load_issues_from_repo(cwd)?;
+    set_source_parse_facts(loaded.1.valid, loaded.1.tombstone_ids.clone());
+    Ok(loaded)
+}
+
+fn set_source_parse_facts(valid: usize, tombstone_ids: Vec<String>) {
+    let _ = SOURCE_PARSE_FACTS.set((valid, tombstone_ids));
+}
+
+fn source_parse_facts() -> Option<&'static (usize, Vec<String>)> {
+    SOURCE_PARSE_FACTS.get()
+}
 
 /// The `--as-of` ref and its resolved SHA, published for the envelope builder.
 ///
@@ -3821,6 +3862,12 @@ fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
     let cwd = go_working_dir();
     if let Ok(dir) = bv_core::discovery::get_beads_dir(&cwd) {
         if let Ok(Some(jsonl)) = bv_core::discovery::find_jsonl_path_with_warnings(&dir, |_| {}) {
+            let (valid, tombstone_ids) = match source_parse_facts() {
+                Some((valid, ids)) => (*valid, ids.clone()),
+                // No load recorded: the slice is all that is known, so report
+                // it as the whole file rather than inventing a split.
+                None => (issues.len(), Vec::new()),
+            };
             return SourceMeta {
                 path: jsonl.to_string_lossy().to_string(),
                 envelope_path: String::new(),
@@ -3830,11 +3877,15 @@ fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
                 // slice is already past the tombstone split, so `visible` is
                 // exact; `valid` is reported as equal to it because the parse
                 // count is genuinely not available here.
-                valid: issues.len(),
+                valid,
                 errors: 0,
                 skipped: 0,
-                tombstones: 0,
-                file_hash: String::new(),
+                tombstones: tombstone_ids.len(),
+                file_hash: if tombstone_ids.is_empty() {
+                    String::new()
+                } else {
+                    bv_core::data_hash::source_issues_hash(issues, &tombstone_ids)
+                },
             };
         }
     }
@@ -4879,6 +4930,7 @@ fn load_issues_auto_meta_raw(
     };
     let hash = bv_core::data_hash::compute_data_hash(&issues);
     let file_hash = bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids);
+    set_source_parse_facts(stats.valid, stats.tombstone_ids.clone());
     Ok((
         issues,
         hash,
@@ -9548,7 +9600,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
             }
         }
     } else {
-        match bv_core::discovery::load_issues_from_repo(&cwd) {
+        match load_issues_tracked(&cwd) {
             Ok((issues, _)) => issues,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
@@ -18100,7 +18152,7 @@ fn run_robot_metrics() -> ExitCode {
     // `metrics.Timer(metrics.LoaderParse)` around the issue-file parse.
     let collect = bv_analysis::metrics::metrics_enabled();
     let started = std::time::Instant::now();
-    let loaded = bv_core::discovery::load_issues_from_repo(&cwd);
+    let loaded = load_issues_tracked(&cwd);
     let parse_ns = started.elapsed().as_nanos();
     let issues = match loaded {
         Ok((issues, _stats)) => issues,
@@ -18461,9 +18513,7 @@ fn build_attention_reason(s: &bv_analysis::label_health::LabelAttentionScore) ->
 }
 
 fn run_robot_label_attention() -> ExitCode {
-    let (issues, hash) = match bv_core::discovery::load_issues_from_repo(
-        &std::env::current_dir().unwrap_or_default(),
-    ) {
+    let (issues, hash) = match load_issues_tracked(&std::env::current_dir().unwrap_or_default()) {
         Ok((issues, _)) => {
             let h = bv_core::data_hash::compute_data_hash(&issues);
             (issues, h)
