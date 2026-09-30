@@ -342,12 +342,14 @@ fn short_date(s: &str) -> String {
     let months = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    if s.len() >= 10 {
-        if let (Ok(y), Ok(m), Ok(d)) = (
-            s[0..4].parse::<i32>(),
-            s[5..7].parse::<usize>(),
-            s[8..10].parse::<usize>(),
-        ) {
+    // `str::get` returns `None` for a range that is not on a character
+    // boundary, so a non-ASCII date degrades to the raw string instead of
+    // panicking. The length test alone was not enough: `s.len() >= 10`
+    // measures BYTES, and a date like "2026年01月15日" is 16 bytes, which put
+    // `s[5..7]` in the middle of the `年` and took the process down with it.
+    // The sprint file is user data, so any encoding can reach here.
+    if let (Some(y), Some(m), Some(d)) = (s.get(0..4), s.get(5..7), s.get(8..10)) {
+        if let (Ok(y), Ok(m), Ok(d)) = (y.parse::<i32>(), m.parse::<usize>(), d.parse::<usize>()) {
             if y > 0 && (1..=12).contains(&m) {
                 return format!("{} {}", months[m - 1], d);
             }
@@ -372,6 +374,34 @@ fn truncate_sprint_str(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use bv_core::model::Issue;
+
+    /// `short_date` used to slice by byte index behind a `s.len() >= 10` guard,
+    /// which is a length check, not a boundary check. A sprint file is user
+    /// data, so a date written as "2026年01月15日" is 16 bytes with `s[5..7]`
+    /// landing inside the `年` — a slice panic at any terminal size.
+    ///
+    /// The pre-existing "not a date" case could never have caught this: it is
+    /// 10 ASCII bytes, all of them boundaries.
+    #[test]
+    fn short_date_survives_non_ascii_input() {
+        for input in [
+            "2026年01月15日",
+            "2026-01-15T00:00:00Z",
+            "2026-01-15",
+            "",
+            "x",
+            "2026年",
+            "日本語のadine",
+        ] {
+            // Must not panic; a date-shaped ASCII prefix still formats.
+            let out = short_date(input);
+            if input == "2026-01-15T00:00:00Z" {
+                assert_eq!(out, "Jan 15");
+            }
+        }
+        assert_eq!(short_date("2026-01-15T00:00:00Z"), "Jan 15");
+        assert_eq!(short_date("2026-12-31"), "Dec 31");
+    }
 
     #[allow(dead_code)]
     fn make_issue(id: &str, status: Status) -> Issue {

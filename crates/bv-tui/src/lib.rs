@@ -4871,7 +4871,10 @@ fn render_sidebar(f: &mut Frame, _app: &App) {
 fn render_status_bar(f: &mut Frame, app: &App) {
     let area = ratatui::layout::Rect {
         x: 0,
-        y: f.area().height - 1,
+        // `saturating_sub`, like every other extent in this file: a plain `- 1`
+        // underflows at height 0, and in release `0u16 - 1` wraps to 65535,
+        // which panics ratatui's buffer index rather than the subtraction.
+        y: f.area().height.saturating_sub(1),
         width: f.area().width,
         height: 1,
     };

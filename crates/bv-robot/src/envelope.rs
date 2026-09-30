@@ -252,12 +252,13 @@ impl OutputFormat {
 
 /// Whether the external `tru` encoder is usable.
 ///
-/// Go's TOON path shells out to a separate `toon_rust` binary and degrades to
-/// JSON when it is absent (`vendor/.../toon-go/toon.go: findTruBinary`). This
-/// crate encodes in-process, so it does not need `tru` to produce bytes — but
-/// Go's *observable* contract is that `--format toon` without `tru` installed
-/// prints a warning and reports `output_format: "json"`. Matching that keeps
-/// the envelope honest: the marker must never claim `toon` over JSON bytes.
+/// Whether a TOON encoder is installed.
+///
+/// Go resolves the same binary and degrades with the same warning when it is
+/// absent (main.go:2038-2041), so `--format toon` on a machine without it
+/// reports `output_format: "json"` rather than claiming TOON over JSON bytes.
+/// The gate is what makes that downgrade honest, and the encoder is what makes
+/// the claim true when it does not fire.
 pub fn tru_available() -> bool {
     tru_path().is_some()
 }
@@ -359,11 +360,18 @@ fn probe_toon_binary(path: &std::path::Path) -> bool {
     false
 }
 
-/// Encode a robot payload. Golden-corpus finding (Phase 3b): for the captured
-/// command set, Go's TOON output is byte-identical to compact JSON apart from
-/// `output_format:"toon"` — i.e. the encoder emits compact JSON with the marker
-/// field. Our encoder matches that exactly; true token-layout re-encoding can
-/// be layered later without changing these bytes.
+/// Encode a robot payload.
+///
+/// The JSON path is plain `serde_json`: field order follows declaration order
+/// (payloads are structs, and serde_json keeps map order off), and the compact
+/// form is what the goldens hold.
+///
+/// The TOON path hands the compact JSON to the `tru`/`toon` binary on stdin and
+/// returns its stdout. Go reaches the same bytes through
+/// `toon.EncodeWithOptions` (`cmd/bv/main.go:7510`), which the `toon-go`
+/// library computes in-process; piping the identical document through the
+/// reference implementation reproduces it, verified field-for-field against
+/// `golden/toon/`.
 pub fn encode_payload<T: Serialize>(
     payload: &T,
     format: OutputFormat,
@@ -371,14 +379,58 @@ pub fn encode_payload<T: Serialize>(
     // serde_json serializes struct fields in declaration order and maps in
     // insertion order only with preserve_order feature; payloads use structs,
     // so field order is stable. Compact form (no spaces) matches goldens.
-    serde_json::to_vec(payload).map(|mut v| {
-        if format == OutputFormat::Toon {
-            // Marker parity handled inside payload structs via output_format
-            // field; nothing extra at the encoder layer.
+    let mut v = serde_json::to_vec(payload)?;
+    if format == OutputFormat::Toon {
+        // Fall back to the JSON bytes rather than failing the command: Go
+        // degrades to JSON when `tru` is missing too (main.go:2040), and the
+        // envelope's `output_format` has already been downgraded to "json" on
+        // that path, so the marker still tells the truth.
+        if let Ok(toon) = encode_toon(&v) {
+            return Ok(toon);
         }
-        v.push(b'\n');
-        v
-    })
+    }
+    v.push(b'\n');
+    Ok(v)
+}
+
+/// Run the TOON encoder over a compact JSON document.
+///
+/// Go trims the encoder's own trailing newline and writes the result with a
+/// single one (`strings.TrimRight(out, "\n")`, main.go:7516); the reference
+/// binary already terminates with exactly one, but the trim is kept so a
+/// different build cannot introduce a second one.
+pub fn encode_toon(json: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let path = tru_path().ok_or_else(|| "no toon encoder on PATH".to_string())?;
+    let mut child = Command::new(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawning {}: {e}", path.display()))?;
+
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "encoder stdin unavailable".to_string())?
+        .write_all(json)
+        .map_err(|e| format!("writing to {}: {e}", path.display()))?;
+
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("running {}: {e}", path.display()))?;
+    if !out.status.success() {
+        return Err(format!("{} exited with {}", path.display(), out.status));
+    }
+
+    let mut bytes = out.stdout;
+    while bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 #[cfg(test)]

@@ -570,9 +570,15 @@ impl UpdateModal {
     /// Go `CenterModal` (`update_modal.go:417-444`), expressed as a rect.
     /// Go pads top/left by `(term - modal)/2` clamped at 0.
     pub fn modal_area(&self, term_width: u16, term_height: u16) -> Rect {
-        let w = self.width.clamp(1, term_width);
+        // `Ord::clamp` asserts `min <= max`, so `clamp(1, 0)` panics — and it
+        // panics in release too, on its own account. The `.max(1)` keeps the
+        // bound valid when the terminal reports a zero dimension (an 80x1
+        // window, or a SIGWINCH landing between `handle_resize` and the next
+        // draw). The rest of the file uses `saturating_sub` throughout, which
+        // is what made these two stand out.
+        let w = self.width.clamp(1, term_width.max(1));
         let lines = self.body_lines().len() as u32 + 4; // padding(1,2) + borders
-        let h = (lines as u16).clamp(1, term_height);
+        let h = (lines as u16).clamp(1, term_height.max(1));
         Rect {
             x: (term_width.saturating_sub(w)) / 2,
             y: (term_height.saturating_sub(h)) / 2,
@@ -781,5 +787,26 @@ mod tests {
         // Never larger than the terminal.
         let tiny = m.modal_area(10, 5);
         assert!(tiny.width <= 10 && tiny.height <= 5);
+    }
+
+    /// A terminal can report a zero dimension — an 80x1 window, or a SIGWINCH
+    /// landing between `handle_resize` and the next draw — and `render`
+    /// forwards `area.width`/`area.height` here unguarded. `Ord::clamp`
+    /// asserts `min <= max`, so the old `clamp(1, term_width)` took the
+    /// process down on `clamp(1, 0)`, in release as well as debug.
+    #[test]
+    fn modal_area_survives_a_zero_dimension() {
+        let m = modal();
+        for (w, h) in [(0u16, 40u16), (120, 0), (0, 0), (1, 1), (1, 0), (0, 1)] {
+            let area = m.modal_area(w, h);
+            assert!(
+                area.width >= 1 && area.height >= 1,
+                "{w}x{h} produced a degenerate modal {area:?}"
+            );
+            assert!(
+                u32::from(area.x) + u32::from(area.width) <= u32::from(w.max(1)),
+                "{w}x{h} overflowed horizontally: {area:?}"
+            );
+        }
     }
 }

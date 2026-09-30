@@ -275,6 +275,61 @@ pub fn compute_data_hash(issues: &[Issue]) -> String {
     compute_data_hash_refs(&borrowed)
 }
 
+/// Go `sourceIssuesHash` (cmd/bv/main.go:7354-7356).
+///
+/// The envelope publishes two digests over the same load, and they are meant
+/// to differ: the top-level one names the set that was *analysed*, while
+/// `source_authority.sources[].data_hash` names the file that was *read*. Go
+/// keeps them apart by hashing the visible issues together with a bare
+/// `{id, status: tombstone}` stub for every deleted record — `issuesWithTombstones`,
+/// main.go:7340-7352 — so the authority's digest still accounts for every id
+/// the file holds.
+///
+/// Hashing the visible set alone made the two digests identical, which erased
+/// the distinction the split exists for and changed `authority_hash` (and
+/// through it `scope_hash`) on any repository that had deleted a bead.
+///
+/// Stub order follows `tombstone_ids`, which the loader collects in file order
+/// — the same order Go appends them in, and `compute_data_hash` sorts by ID
+/// anyway.
+pub fn source_issues_hash(issues: &[Issue], tombstone_ids: &[String]) -> String {
+    let mut all: Vec<Issue> = issues.to_vec();
+    let seen: std::collections::HashSet<String> = all.iter().map(|i| i.id.clone()).collect();
+    for id in tombstone_ids {
+        if !seen.contains(id) {
+            all.push(Issue {
+                id: id.clone(),
+                content_hash: String::new(),
+                title: String::new(),
+                description: String::new(),
+                design: String::new(),
+                acceptance_criteria: String::new(),
+                notes: String::new(),
+                status: crate::model::Status::Tombstone,
+                priority: 0,
+                issue_type: String::new(),
+                assignee: String::new(),
+                estimated_minutes: None,
+                created_at: None,
+                updated_at: None,
+                due_date: None,
+                defer_until: None,
+                closed_at: None,
+                external_ref: None,
+                compaction_level: 0,
+                compacted_at: None,
+                compacted_at_commit: None,
+                original_size: 0,
+                labels: vec![],
+                dependencies: vec![],
+                comments: vec![],
+                source_repo: String::new(),
+            });
+        }
+    }
+    compute_data_hash(&all)
+}
+
 /// [`compute_data_hash`] over borrowed issues.
 ///
 /// Byte-for-byte identical output: the encoder below only ever reads through

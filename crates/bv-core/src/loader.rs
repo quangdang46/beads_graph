@@ -17,7 +17,10 @@ pub const PARALLEL_PARSE_MIN_BYTES: u64 = 4 * 1024 * 1024;
 pub const PARALLEL_PARSE_MIN_LINES: usize = 512;
 
 /// Go: `ParseStats`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: it carries the deleted ids Go keeps in `TombstoneIDs`, and a
+/// caller that only wants a count should call [`ParseStats::tombstones`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ParseStats {
     pub valid: usize,
     pub errors: usize,
@@ -27,10 +30,15 @@ pub struct ParseStats {
     /// (`pkg/workspace/loader.go:521`), surfaced as the envelope's
     /// `source_authority.tombstones`.
     ///
+    /// The ids are kept, not just the count: Go's file-level digest folds each
+    /// deleted record back in as a bare `{id, status: tombstone}` stub
+    /// (`main.go:7354-7356`), so a caller that wants to describe the *file*
+    /// rather than the analysed set needs to know which ones went missing.
+    ///
     /// These still count towards `valid`: a tombstone is a well-formed record,
     /// not a parse failure, and Go runs the split after parsing. Only `visible`
     /// excludes them.
-    pub tombstones: usize,
+    pub tombstone_ids: Vec<String>,
 }
 
 impl ParseStats {
@@ -44,10 +52,15 @@ impl ParseStats {
         }
     }
 
+    /// How many records were dropped as deleted issues.
+    pub fn tombstones(&self) -> usize {
+        self.tombstone_ids.len()
+    }
+
     /// The records that reach analysis: everything that parsed, less the
     /// deleted ones Go routes into `TombstoneIDs`.
     pub fn visible(&self) -> usize {
-        self.valid.saturating_sub(self.tombstones)
+        self.valid.saturating_sub(self.tombstones())
     }
 }
 
@@ -226,7 +239,7 @@ pub fn parse_issues_with_options(
         let mut visible = Vec::with_capacity(issues.len());
         for issue in issues {
             if issue.status.is_tombstone() {
-                stats.tombstones += 1;
+                stats.tombstone_ids.push(issue.id.clone());
             } else {
                 visible.push(issue);
             }
@@ -494,7 +507,7 @@ mod tests {
                 valid: 12,
                 errors: 0,
                 skipped: 0,
-                tombstones: 0
+                tombstone_ids: Vec::new()
             }
         );
     }

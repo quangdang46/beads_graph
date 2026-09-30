@@ -300,8 +300,8 @@ pub fn load_issues_from_repo(
                     errors: 0,
                     skipped: 0,
                     // The SQLite reader already excludes tombstoned rows
-                    // (`sqlite.rs:92`), so none survive to count here.
-                    tombstones: 0,
+                    // (`sqlite.rs:92`), so none survive to record here.
+                    tombstone_ids: Vec::new(),
                 },
             ));
         }
@@ -452,7 +452,7 @@ impl GitLoader {
         if let Ok(cache) = self.cache.lock() {
             if let Some(entry) = cache.get(&sha) {
                 if entry.loaded_at.elapsed() < self.max_age {
-                    return Ok((entry.issues.clone(), entry.stats));
+                    return Ok((entry.issues.clone(), entry.stats.clone()));
                 }
             }
         }
@@ -462,7 +462,7 @@ impl GitLoader {
                 sha.clone(),
                 CacheEntry {
                     issues: issues.clone(),
-                    stats,
+                    stats: stats.clone(),
                     loaded_at: Instant::now(),
                 },
             );

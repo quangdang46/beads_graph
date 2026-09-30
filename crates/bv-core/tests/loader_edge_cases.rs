@@ -234,7 +234,7 @@ fn tombstones_are_kept_out_of_the_issue_set() {
     assert_eq!(ids, ["LIVE"], "the deleted record must not be analysable");
     assert!(!issues.iter().any(|i| i.status == Status::Tombstone));
 
-    assert_eq!(stats.tombstones, 1);
+    assert_eq!(stats.tombstone_ids, ["DEAD"]);
     assert_eq!(
         stats.valid, 2,
         "a tombstone is a well-formed record, not a parse error — Go's split runs after parsing"

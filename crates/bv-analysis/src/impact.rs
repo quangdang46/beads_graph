@@ -766,12 +766,44 @@ pub fn compute_impact_scores_with_weights(
         //    reason (triage.go:1605 then 1625), so the ordering matters; the
         //    predicate itself (QuickWinBoost > 0.05) lives in the triage layer
         //    and is applied there, in position.
-        // 6. Claim status — Go parity: isOpenStatus guard.
-        //    Go inserts the quick-win reason just above this one
-        //    (triage.go:1605, then 1625), so the two are recorded in that
-        //    order; the quick-win predicate is applied in the triage layer,
-        //    which splices it in ahead of the claim-status entry.
-        if issue.status.is_open() && issue.assignee.is_empty() {
+        // 6. Claim status — Go triage.go:1636-1688. The chain is an if/else-if
+        //    ladder and the order is load-bearing in two ways: a deferral
+        //    outranks every claim hint (the bead must not be called
+        //    "available for work" while the scheduler has it parked), and
+        //    `in_progress` is tested *before* the open hint so a bead someone
+        //    is already working never reads as free.
+        //
+        //    Only the "Currently unclaimed" arm existed here, and it was
+        //    guarded by `is_open()` — which is `Open | InProgress`, not Go's
+        //    `isOpenStatus` (`status == open`). So an in-progress bead was
+        //    told it was available for work. Go's own comment (triage.go:
+        //    1630-1634) names that exact contradiction as a bug they fixed.
+        //
+        //    Go appends a "👤 Claimed by <agent>" line to these branches when
+        //    its claim store has an entry. That store has no Rust counterpart
+        //    yet, so those arms are simply absent rather than half-emitted.
+        let is_in_progress = issue.status == Status::InProgress;
+        let is_blocked_status = issue.status == Status::Blocked;
+        let is_open_status = issue.status == Status::Open;
+        let is_non_open_status = !is_in_progress && !is_blocked_status && !is_open_status;
+        let defer_until = bv_core::model::parse_ts(&issue.defer_until);
+        let is_future_deferred = defer_until.is_some_and(|d| d > inputs.now);
+
+        if is_future_deferred {
+            reasons.push(format!(
+                "⏸️ Deferred until {} - not ready to claim",
+                defer_until.expect("checked above")
+            ));
+        } else if is_in_progress {
+            reasons.push("🚧 In progress - already being worked".to_string());
+        } else if is_blocked_status {
+            reasons.push("⛔ Status is blocked - not ready to claim".to_string());
+        } else if is_non_open_status {
+            reasons.push(format!(
+                "⏸️ Status is {} - not ready to claim",
+                issue.status.as_str()
+            ));
+        } else if is_open_status && issue.assignee.is_empty() {
             reasons.push("✅ Currently unclaimed - available for work".to_string());
         }
 

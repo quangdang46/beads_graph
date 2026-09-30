@@ -22,10 +22,73 @@ fn next_payload_key_order_matches_golden() {
         actionable: true,
         phase2_ready: true,
     };
-    let bytes = encode_payload(&p, OutputFormat::Toon).unwrap();
+    // The JSON path is what this pins — field order and presence, nothing
+    // about the format.
+    let bytes = encode_payload(&p, OutputFormat::Json).unwrap();
     let s = String::from_utf8(bytes).unwrap().trim_end().to_string();
     let expected_prefix = r#"{"generated_at":"T","data_hash":"H","output_format":"toon","version":"v0.20.0","actionable":true,"phase2_ready":true}"#;
     assert_eq!(s, expected_prefix);
+}
+
+/// `--format toon` must emit TOON, not JSON wearing TOON's marker.
+///
+/// This assertion used to be the exact opposite — it called
+/// `encode_payload(…, OutputFormat::Toon)` and expected the JSON above, on the
+/// strength of a comment claiming Go "emits compact JSON with the marker
+/// field". `golden/toon/selfrepo__robot_next.toon` disproves that: Go's first
+/// line is `generated_at: "…"`, not `{`. So the encoder had a test pinning the
+/// bug and no test pinning the behaviour, which is how it shipped.
+#[test]
+fn toon_format_emits_toon_not_json() {
+    if !bv_robot::envelope::tru_available() {
+        // Go degrades to JSON without an encoder too (main.go:2038-2040), and
+        // says so on stderr. `emit_json` warns; here the fallback is silent by
+        // design, since this crate's job is the encoding, not the warning.
+        return;
+    }
+    let p = NextPayload {
+        generated_at: "T".into(),
+        data_hash: "H".into(),
+        output_format: "toon".into(),
+        version: "v0.20.0".into(),
+        actionable: true,
+        phase2_ready: true,
+    };
+    let out = String::from_utf8(encode_payload(&p, OutputFormat::Toon).unwrap()).unwrap();
+    assert!(
+        !out.trim_start().starts_with('{'),
+        "the TOON path emitted a JSON document:\n{out}"
+    );
+    // TOON writes `key: value`, and a value that needs no quoting is bare —
+    // `"T"` comes back as `T`, where JSON would have kept the quotes. Asserting
+    // the bare key is the point: it can only come from a TOON encoder.
+    let first = out.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("generated_at:"),
+        "expected TOON's `key: value` shape, got {first:?}"
+    );
+    assert!(
+        !first.contains(": \""),
+        "the value is still quoted, so nothing was re-encoded:\n{out}"
+    );
+    assert!(
+        out.contains("output_format: toon"),
+        "the marker must survive encoding:\n{out}"
+    );
+    // And the keys Go declares are all still there, in order.
+    for key in [
+        "generated_at",
+        "data_hash",
+        "output_format",
+        "version",
+        "actionable",
+        "phase2_ready",
+    ] {
+        assert!(
+            out.lines().any(|l| l.starts_with(&format!("{key}:"))),
+            "TOON output is missing {key}:\n{out}"
+        );
+    }
 }
 
 #[test]

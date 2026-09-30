@@ -2772,17 +2772,51 @@ fn main() -> ExitCode {
             println!("  → Writing database and JSON files...");
             {
                 use bv_export::sqlite_export as sqlite;
-                // Go stores the full dependency set, not the blocking-only
-                // subset the layout file uses, so the rows are rebuilt here
-                // rather than reusing `export_deps`.
+                // Go main.go:3129-3140 keeps only blocking edges:
+                //
+                //     for _, dep := range issue.Dependencies {
+                //         if dep == nil || !dep.Type.IsBlocking() { continue }
+                //         deps = append(deps, &model.Dependency{...})
+                //     }
+                //
+                // A comment here claimed the opposite — that Go stored the
+                // full set — and the unfiltered slice went in. Every
+                // `parent-child` row was written: 171 rows against Go's 24 on
+                // the same input, with the layout file silently disagreeing
+                // with the database it reads.
                 let all_deps: Vec<bv_core::Dependency> = visible
                     .iter()
-                    .flat_map(|i| i.dependencies.iter().cloned())
+                    .flat_map(|i| i.dependencies.iter())
+                    .filter(|d| bv_core::model::DependencyType::is_blocking(&d.r#type))
+                    .cloned()
                     .collect();
                 let metrics = sqlite::MetricTables::default();
+                // Go main.go:3148 hands the exporter the triage it just built
+                // (`export.NewSQLiteExporter(issuePointers, deps, stats, &triage)`).
+                // `with_triage` existed here and had no caller, so
+                // `triage_recommendations` shipped empty — 0 rows where Go
+                // writes 10, and the viewer's triage panel had nothing to read.
+                // Go's `Triage.Recommendations` is already truncated to
+                // `opts.TopN` (default 10, triage.go:594) before the exporter
+                // ever sees it, so the table holds the ranked shortlist rather
+                // than every scored issue.
+                let triage_rows: Vec<sqlite::TriageRow> = export_triage
+                    .recommendations
+                    .iter()
+                    .take(TRIAGE_TOP_N)
+                    .map(|r| sqlite::TriageRow {
+                        issue_id: r.id.clone(),
+                        score: r.score,
+                        action: r.action.clone(),
+                        reasons: (!r.reasons.is_empty()).then(|| r.reasons.clone()),
+                        unblocks_ids: (!r.unblocks_ids.is_empty()).then(|| r.unblocks_ids.clone()),
+                        blocked_by_ids: (!r.blocked_by.is_empty()).then(|| r.blocked_by.clone()),
+                    })
+                    .collect();
                 sqlite::SqliteExporter::new(&visible, &all_deps)
                     .with_title(&title)
                     .with_metrics(&metrics)
+                    .with_triage(&triage_rows)
                     .export(std::path::Path::new(&out_dir))
                     .map_err(|e| format!("exporting: {e}"))?;
                 // Go's `SQLiteExporter.Export` copies the vendored viewer
@@ -3328,6 +3362,26 @@ struct SourceMeta {
     /// `LoadResult.TombstoneIDs` (`pkg/workspace/loader.go:521`), reported as
     /// the envelope's `source_authority.tombstones`.
     tombstones: usize,
+    /// Go `sourceIssuesHash` (main.go:7354-7356): the digest naming the file
+    /// that was *read*, with the deleted records folded back in as bare
+    /// `{id, status: tombstone}` stubs. Empty on loaders that cannot tell —
+    /// the workspace path and the `--as-of` snapshot — where the caller's
+    /// digest stands in.
+    file_hash: String,
+}
+
+impl SourceMeta {
+    /// The digest the authority should publish. Go keeps two apart on purpose:
+    /// the top level names the set that was analysed, this one names the file.
+    /// They coincided whenever nothing had been deleted, which is exactly the
+    /// case where the split looks unnecessary and is not.
+    fn file_hash_or<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.file_hash.is_empty() {
+            fallback
+        } else {
+            &self.file_hash
+        }
+    }
 }
 
 impl SourceMeta {
@@ -3780,6 +3834,7 @@ fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
                 errors: 0,
                 skipped: 0,
                 tombstones: 0,
+                file_hash: String::new(),
             };
         }
     }
@@ -4749,7 +4804,8 @@ fn load_issues_auto_meta_raw(
             valid: stats.valid,
             errors: stats.errors,
             skipped: stats.skipped,
-            tombstones: stats.tombstones,
+            tombstones: stats.tombstones(),
+            file_hash: bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids),
         };
         return Ok((issues, hash, Some(resolved), source));
     }
@@ -4791,6 +4847,7 @@ fn load_issues_auto_meta_raw(
                         errors: 0,
                         skipped: 0,
                         tombstones: 0,
+                        file_hash: String::new(),
                     },
                 ));
             }
@@ -4821,6 +4878,7 @@ fn load_issues_auto_meta_raw(
         .map_err(|e| e.to_string())?
     };
     let hash = bv_core::data_hash::compute_data_hash(&issues);
+    let file_hash = bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids);
     Ok((
         issues,
         hash,
@@ -4835,7 +4893,8 @@ fn load_issues_auto_meta_raw(
             valid: stats.valid,
             errors: stats.errors,
             skipped: stats.skipped,
-            tombstones: stats.tombstones,
+            tombstones: stats.tombstones(),
+            file_hash,
         },
     ))
 }
@@ -6150,7 +6209,13 @@ fn run_robot_triage() -> ExitCode {
         Some(&loaded_source),
         &issues,
     );
-    payload["output_format"] = serde_json::json!(env.output_format);
+    // Read the configured format, not `env.output_format`: the local
+    // `RobotEnvelope` above is built with a hardcoded `OutputFormat::Json` (it
+    // is a carrier for `generated_at` and the source fields), so copying its
+    // marker over the one `full_envelope_json_with_source_and_authority` had
+    // already stamped from the global made every `--format toon` document claim
+    // "json" — even once the encoder started emitting real TOON bytes.
+    payload["output_format"] = serde_json::json!(output_format());
     payload["version"] = serde_json::json!(GO_APP_VERSION);
 
     // Go robot_registry.go:2232-2234 — `--brief` is an EARLY RETURN that
@@ -8975,7 +9040,7 @@ fn full_envelope_json_with_source_and_authority(
                 serde_json::to_value(&scope).unwrap_or(serde_json::Value::Null),
             );
         }
-        let authority = source_authority(meta, authority_hash_input);
+        let authority = source_authority(meta, meta.file_hash_or(authority_hash_input));
         let ahash = bv_robot::authority_hash(&authority);
         env.insert(
             "source_authority".into(),
@@ -8997,43 +9062,65 @@ fn full_envelope_json_with_source_and_authority(
     serde_json::Value::Object(env)
 }
 
+/// Emit a robot payload in the configured structured format.
+///
+/// Go chooses an encoder once, at startup, and every call site writes through
+/// it: `newRobotEncoder` (main.go:7557-7562) returns a TOON encoder or a JSON
+/// one. Rust keeps the decision in `output_format()` — which this crate
+/// already downgrades to "json" when no encoder is installed — and resolves it
+/// in one place here, so the fifty call sites do not each have to know that a
+/// second format exists.
 fn emit_json(v: &serde_json::Value) -> ExitCode {
     let encoded = go_json_string(v);
-    println!("{encoded}");
-    // Go toonRobotEncoder.Encode (main.go:7519-7536) writes the `[stats]`
-    // estimate to stderr after serializing and before emitting. Gating on
-    // `output_format() == "toon"` reproduces Go's gate for free: Rust already
-    // downgrades OUTPUT_FORMAT to "json" when `tru` is missing
-    // (main.go:2040-2042 equivalent), which is exactly the condition under
-    // which Go never selects the encoder that owns this block.
-    if show_toon_stats() && output_format() == "toon" {
-        let json_tokens = estimate_tokens(&encoded);
-        // `encode_payload` (bv-robot/src/envelope.rs:362-367) documents that the
-        // TOON encoder emits byte-identical compact JSON apart from the
-        // `output_format` marker, so today this equals `json_tokens` and the
-        // saving is 0 — Go's `same size` branch. Computed rather than
-        // hard-coded so a genuinely re-encoding TOON path changes the line by
-        // itself.
-        let toon_tokens = estimate_tokens(&encoded);
-        // Go main.go:7531 — signed, so a negative value means TOON is the
-        // larger encoding for this payload.
-        let savings = if json_tokens > 0 {
-            ((1.0 - toon_tokens as f64 / json_tokens as f64) * 100.0) as i64
-        } else {
-            0
-        };
-        match savings.cmp(&0) {
-            std::cmp::Ordering::Greater => eprintln!(
-                "[stats] JSON≈{json_tokens} tok, TOON≈{toon_tokens} tok (TOON {savings}% smaller)"
-            ),
-            std::cmp::Ordering::Less => eprintln!(
-                "[stats] JSON≈{json_tokens} tok, TOON≈{toon_tokens} tok (TOON {}% larger; JSON is the smaller encoding for this payload)",
-                -savings
-            ),
-            std::cmp::Ordering::Equal => eprintln!(
-                "[stats] JSON≈{json_tokens} tok, TOON≈{toon_tokens} tok (same size)"
-            ),
+
+    // Go toonRobotEncoder.Encode (main.go:7504-7536) serializes with TOON and
+    // writes THAT, not the JSON. Emitting the JSON here while the envelope
+    // said `output_format: "toon"` produced a document that was JSON in every
+    // byte but its marker.
+    let toon_text = if output_format() == "toon" {
+        match bv_robot::envelope::encode_toon(encoded.as_bytes()) {
+            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(e) => {
+                // Go warns and falls back in the same situation (main.go:7506).
+                eprintln!("warning: {e}; falling back to JSON");
+                None
+            }
         }
+    } else {
+        None
+    };
+
+    // Go writes the `[stats]` estimate to stderr after serializing and before
+    // emitting, measuring both encodings of the same document (main.go:7519-7536).
+    if show_toon_stats() {
+        if let Some(toon_text) = &toon_text {
+            let json_tokens = estimate_tokens(&encoded);
+            let toon_tokens = estimate_tokens(toon_text);
+            // Go main.go:7531 — signed, so a negative value means TOON is the
+            // larger encoding for this payload.
+            let savings = if json_tokens > 0 {
+                ((1.0 - toon_tokens as f64 / json_tokens as f64) * 100.0) as i64
+            } else {
+                0
+            };
+            match savings.cmp(&0) {
+                std::cmp::Ordering::Greater => eprintln!(
+                    "[stats] JSON≈{json_tokens} tok, TOON≈{toon_tokens} tok (TOON {savings}% smaller)"
+                ),
+                std::cmp::Ordering::Less => eprintln!(
+                    "[stats] JSON≈{json_tokens} tok, TOON≈{toon_tokens} tok (TOON {}% larger; JSON is the smaller encoding for this payload)",
+                    -savings
+                ),
+                std::cmp::Ordering::Equal => eprintln!(
+                    "[stats] JSON≈{json_tokens} tok, TOON≈{toon_tokens} tok (same size)"
+                ),
+            }
+        }
+    }
+
+    match toon_text {
+        Some(toon_text) => println!("{}", toon_text.trim_end_matches('\n')),
+        None => println!("{encoded}"),
     }
     ExitCode::from(0)
 }
