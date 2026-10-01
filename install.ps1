@@ -1,4 +1,4 @@
-﻿# bvr installer — Beads Viewer in Rust (Windows)
+# bvr installer -- Beads Viewer in Rust (Windows)
 # Usage: irm "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.ps1" | iex
 $ErrorActionPreference = "Stop"
 # Disables the slow IE-style progress bar in Invoke-WebRequest, which can
@@ -7,7 +7,7 @@ $ProgressPreference = "SilentlyContinue"
 
 # Force TLS 1.2 (and 1.3 if available). Windows PowerShell 5.1 still defaults
 # to TLS 1.0/1.1 for .NET HTTP clients, which GitHub now rejects or which can
-# silently truncate a download mid-stream — surfacing here as a checksum
+# silently truncate a download mid-stream -- surfacing here as a checksum
 # mismatch rather than a connection error. The -bor preserves any newer
 # protocols the runtime already has enabled.
 try {
@@ -39,7 +39,7 @@ foreach ($arg in $args) {
     }
 }
 
-# === Platform (Split with limit 2 — windows_x86_64 must keep _64) ===
+# === Platform (Split with limit 2 -- windows_x86_64 must keep _64) ===
 function Get-Platform {
     $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
         "AMD64" { "x86_64" }
@@ -63,7 +63,7 @@ function Resolve-Version {
 # === From source ===
 function Build-FromSource {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Die "cargo not found — install Rust first: https://rustup.rs"
+        Die "cargo not found -- install Rust first: https://rustup.rs"
     }
     $src = Join-Path $env:TEMP "bvr-src-$(Get-Random)"
     git clone --depth 1 "https://github.com/$Owner/$Repo.git" $src
@@ -96,7 +96,7 @@ if ($FromSource) {
         $sumResp = Invoke-WebRequest -Uri "$url.sha256" -TimeoutSec 60 -UseBasicParsing -ErrorAction Stop
         # GitHub serves this sidecar as application/octet-stream, so
         # Invoke-WebRequest can't infer a text encoding and hands back
-        # .Content as a raw byte[] instead of a string — splitting that on
+        # .Content as a raw byte[] instead of a string -- splitting that on
         # whitespace yields individual bytes-as-decimal (e.g. "102" for 'f'),
         # not the hash. Decode explicitly regardless of what type we got.
         if ($sumResp.Content -is [byte[]]) {
@@ -105,7 +105,7 @@ if ($FromSource) {
             $sumText = $sumResp.Content
         }
         $expected = ($sumText -split '\s+')[0].ToLower()
-    } catch { Log-Warn "Could not fetch .sha256 sidecar ($($_.Exception.Message)) — skipping verification" }
+    } catch { Log-Warn "Could not fetch .sha256 sidecar ($($_.Exception.Message)) -- skipping verification" }
 
     $ok = $false
     for ($i = 1; $i -le $MaxRetries; $i++) {
@@ -119,7 +119,7 @@ if ($FromSource) {
         $actual = (Get-FileHash $tmpZip -Algorithm SHA256).Hash.ToLower()
         if ($actual -eq $expected) { Log-Info "Checksum verified"; $ok = $true; break }
         $size = (Get-Item $tmpZip).Length
-        Log-Warn "Checksum mismatch on attempt $i/$MaxRetries (expected $expected, got $actual, size $size bytes) — retrying..."
+        Log-Warn "Checksum mismatch on attempt $i/$MaxRetries (expected $expected, got $actual, size $size bytes) -- retrying..."
         Start-Sleep 3
     }
     if (-not $ok) {
@@ -141,12 +141,12 @@ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (($userPath -split ";") -notcontains $Dest) {
     if ($EasyMode) {
         [Environment]::SetEnvironmentVariable("Path", "$Dest;$userPath", "User")
-        Log-Warn "PATH updated — restart your terminal."
+        Log-Warn "PATH updated -- restart your terminal."
     } else {
         Log-Warn "Add to PATH manually: $Dest"
     }
 }
 
 Write-Host ""
-Write-Host ("✓ {0} installed → {1}" -f $BinaryName, (Join-Path $Dest $BinaryExe)) -ForegroundColor Green
+Write-Host ("{0} installed -> {1}" -f $BinaryName, (Join-Path $Dest $BinaryExe)) -ForegroundColor Green
 Write-Host "  Quick start: cd your-beads-project && bvr"
