@@ -1,4 +1,4 @@
-# bvr installer — Beads Viewer in Rust (Windows)
+﻿# bvr installer — Beads Viewer in Rust (Windows)
 # Usage: irm "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.ps1" | iex
 $ErrorActionPreference = "Stop"
 # Disables the slow IE-style progress bar in Invoke-WebRequest, which can
