@@ -482,14 +482,29 @@ fn make_stop_set() -> HashSet<&'static str> {
 fn extract_keywords(title: &str, description: &str) -> Vec<String> {
     let text = format!("{} {}", title, description).to_lowercase();
 
-    // Remove common markdown/code artifacts (non-word chars → space).
-    // Go replaces `[^\w\s]` (duplicates.go:15). `\w` includes underscore, so
-    // `agent_prompt_modal` stays a single token; is_alphanumeric() would split
-    // it into three and surface spurious keywords like "agent".
+    // Go replaces `[^\w\s]` with a space (duplicates.go:15) and then calls
+    // `strings.Fields`. Go's `\w` is ASCII-only — `[0-9A-Za-z_]`, NOT
+    // Unicode-aware — so a token is a maximal run of those 63 characters and
+    // every other character ends one.
+    //
+    // The obvious `char::is_alphanumeric()` looks equivalent and is not: it
+    // accepts `à`, `ệ`, `ữ`, so a Vietnamese title yields `của` and `nghiệp`
+    // as single keywords. Go shreds the same text into ASCII fragments —
+    // `của` becomes `c`+`a` (both under the 3-byte floor, so both dropped)
+    // and `nghiệp` becomes `nghi`+`p` — which is why Go reports `nghi` where
+    // this reported nothing. That is not a missing stop word; it is the
+    // tokenizer. Restating the class as explicit ASCII keeps the two in step.
+    //
+    // The underscore is part of Go's `\w`, so `agent_prompt_modal` stays one
+    // token; dropping it would surface the spurious keyword `agent`.
+    //
+    // Whitespace needs no special case: Go's `\s` is ASCII too, and anything
+    // else that is not a word character is already a space by the time
+    // `split_whitespace` runs.
     let cleaned: String = text
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '_' || c.is_whitespace() {
+            if c.is_ascii_alphanumeric() || c == '_' {
                 c
             } else {
                 ' '
@@ -1766,6 +1781,32 @@ mod tests {
         assert!(!kws.contains(&"a".to_string()));
         assert!(!kws.contains(&"bc".to_string()));
         assert!(kws.contains(&"def".to_string()));
+    }
+
+    #[test]
+    fn extract_keywords_splits_non_ascii_into_ascii_fragments() {
+        // Go's `\w` is `[0-9A-Za-z_]`, so a diacritic ends a token. The three
+        // keyword tests above are all ASCII and would sail through a Unicode
+        // tokenizer; only non-ASCII input shows the two apart.
+        //
+        // "nghiệp" -> "nghi" + "p": the 4-byte fragment survives, the 1-byte
+        // one is under the floor. "của" -> "c" + "a": both are under it, so
+        // the whole word yields nothing. A Unicode-aware tokenizer returns
+        // "nghiệp" and "của" instead — 2 spurious keywords here, and 100 of
+        // them across a Vietnamese issue set.
+        let kws = extract_keywords("nghiệp của bài toán", "");
+        assert!(
+            kws.contains(&"nghi".to_string()),
+            "expected the ASCII fragment, got {kws:?}"
+        );
+        assert!(!kws.contains(&"p".to_string()));
+        assert!(!kws.contains(&"nghiệp".to_string()), "kept the whole word");
+        assert!(
+            !kws.contains(&"của".to_string()) && !kws.contains(&"cua".to_string()),
+            "diacritic word survived"
+        );
+        // "bài" -> "b" + "i" -> both dropped; "toán" -> "to" + "n" -> dropped.
+        assert_eq!(kws, vec!["nghi".to_string()]);
     }
 
     #[test]

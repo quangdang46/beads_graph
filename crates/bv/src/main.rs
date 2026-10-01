@@ -1413,7 +1413,54 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // Go narrows the exported set through the same `scopeLoadedIssues` every
+    // other consumer goes through (main.go:3408, `freshContext, err =
+    // scopeLoadedIssues(freshContext, activeRecipe)`), which is what makes
+    // `--recipe`, `--repo` and `--label` reach the report.
+    //
+    // This path loaded the file directly, so all three flags were accepted and
+    // then ignored: five different recipes wrote one byte-identical export, and
+    // `--label` did the same.
+    //
+    // Two sets, because Go has two (main.go:4411-4420). `selected` is what the
+    // recipe chose and is what the report body is about; `context` is the whole
+    // loaded file and is what the dependency graph is drawn from — which is why
+    // Go's export still shows the closed epics a `triage` recipe filters out.
+    // Handing the report one set for both dropped them from the graph.
+    let context = issues.clone();
+    // Go builds the readiness index once, over the whole loaded source, before
+    // any narrowing (`freshContext`, main.go:6110/6155/6291) and hands the
+    // export handler that same index (main.go:4401). The report's claim
+    // commands are decided against it, so it has to be the pre-scope list.
+    let export_readiness = bv_analysis::triage::Readiness::new(&context);
+    let issues = apply_scope(&issues).0;
     let mut options = options;
+    // Go main.go:4401-4402:
+    //   options.Readiness = readiness
+    //   options.AuthorityComplete = robotDispatchContext.claimsProven() && *asOf == ""
+    // and pkg/export/markdown.go:667:
+    //   claimable := options.AuthorityComplete && options.Readiness != nil &&
+    //                options.Readiness.Claimable(issue.ID, options.GeneratedAt)
+    //
+    // `claimable_ids` was never populated, so it was empty on every export and
+    // `actions.claim` came back nil for every issue: the report carried a
+    // "# View full details" block with no claim line, where the oracle emits
+    // "# Atomically claim" for each issue the gate accepts.
+    let authority_complete = source_authority(
+        &source_meta_for(&context),
+        &bv_core::data_hash::compute_data_hash(&context),
+    )
+    .claim_safe
+        && extract_as_of().is_none();
+    if authority_complete {
+        let now = options.generated_at.unwrap_or_else(robot_now);
+        options.claimable_ids.extend(
+            issues
+                .iter()
+                .filter(|i| export_readiness.claimable(&i.id, now))
+                .map(|i| i.id.clone()),
+        );
+    }
     attach_report_origins(&mut options, &issues, &cwd, stats);
     let body = match options.format.as_str() {
         // Go `case "json"` (pkg/export/markdown.go:115-145): a report OBJECT
@@ -1441,7 +1488,7 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
                     }
                 }
             } else {
-                bv_export::markdown::generate_report(&issues, &issues, &options)
+                bv_export::markdown::generate_report(&issues, &context, &options)
             }
         }
     };
@@ -3834,19 +3881,153 @@ fn apply_scope(issues: &[bv_core::model::Issue]) -> (Vec<bv_core::model::Issue>,
     )
 }
 
-/// Go `scopeLoadedIssues` also applies `recipe.Apply` to narrow the issue set
-/// (cmd/bv/main.go:4903-4922). That is not ported: `recipe::apply` takes a
-/// `Metrics` whose `graph` is a `GraphMetrics` trait nothing in the workspace
-/// implements outside a test stub, and whose `triage` map comes from a
-/// `compute_triage_scores` that does not exist here either. So `--recipe
-/// quick-wins` still answers with the whole repository rather than the quick
-/// wins, and `--recipe nosuchrecipe` is now rejected (the name is validated at
-/// the flag site) but a valid name that filters has no effect.
+/// Go main.go:2780-2784 — the recipe narrows the loaded set only for the
+/// robot and export consumers:
+///
+/// ```go
+/// recipeForScope := activeRecipe
+/// if !(envRobot || *exportFile != "" || *exportReport != "" ||
+///      *exportPages != "" || *exportGraph != "") {
+///     recipeForScope = nil
+/// }
+/// ```
+///
+/// The TUI keeps the whole repository and applies a recipe from its own picker
+/// (its comment at :2778 says as much). Narrowing on launch as well would take
+/// away the very list the picker is meant to filter.
+fn recipe_scope_active() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let named = |flag: &str| args.iter().any(|a| a == flag);
+    let valued = |flag: &str| {
+        args.iter().any(|a| {
+            a == flag
+                && args
+                    .iter()
+                    .position(|x| x == flag)
+                    .is_some_and(|i| args.get(i + 1).is_some_and(|v| !v.starts_with('-')))
+        })
+    };
+    named("--robot-help")
+        || named("--robot-capabilities")
+        || named("--robot-docs")
+        || named("--robot-schema")
+        || named("--robot-recipes")
+        || args.iter().any(|a| a.starts_with("--robot-"))
+        || valued("--export")
+        || valued("--export-pages")
+        || named("--export-graph")
+}
+
+/// Go's `*analysis.GraphStats` behind the metric lookups `recipe::apply` needs
+/// (pkg/analysis/graph.go:294-351).
+///
+/// `bv-recipe` takes a trait rather than importing `bv-analysis` — the TUI and
+/// the robot path each hand in whatever stats they already computed — so the
+/// impl belongs here, in the crate that depends on both. Go's contract for an
+/// absent metric is a plain `0`, not a panic, and the map lookups reproduce
+/// that: an id the analysis never scored reads as 0.
+struct RecipeGraphMetrics {
+    pagerank: std::collections::BTreeMap<String, f64>,
+    betweenness: std::collections::BTreeMap<String, f64>,
+    critical_path: std::collections::BTreeMap<String, f64>,
+}
+
+impl bv_recipe::apply::GraphMetrics for RecipeGraphMetrics {
+    fn page_rank_score(&self, id: &str) -> f64 {
+        self.pagerank.get(id).copied().unwrap_or(0.0)
+    }
+    fn betweenness_score(&self, id: &str) -> f64 {
+        self.betweenness.get(id).copied().unwrap_or(0.0)
+    }
+    fn critical_path_score(&self, id: &str) -> f64 {
+        self.critical_path.get(id).copied().unwrap_or(0.0)
+    }
+}
+
+/// Go `scopeLoadedIssues` applies `recipe.Apply` to narrow the issue set
+/// (cmd/bv/main.go:4903-4922, via `applyRecipe` at :4939-4949).
+///
+/// This used to return its input unchanged, so `--recipe <anything-valid>` was
+/// accepted, validated, and then ignored: every recipe answered with the whole
+/// repository, and five different recipes produced one byte-identical export.
+/// `--recipe nosuchrecipe` still fails first, at the flag site, so an unknown
+/// name is not silently accepted — but a name that filters had no effect.
+///
+/// The metrics are computed over `issues` — the repo/label-scoped set Go hands
+/// `applyRecipe` — and before the filter narrows them.
 fn apply_recipe_scope(
     issues: &[bv_core::model::Issue],
-    _recipe: &str,
+    recipe: &str,
 ) -> Vec<bv_core::model::Issue> {
-    issues.to_vec()
+    if recipe.is_empty() || !recipe_scope_active() {
+        return issues.to_vec();
+    }
+    let mut loader =
+        bv_recipe::Loader::new().with_project_dir(go_working_dir().to_string_lossy().to_string());
+    if loader.load().is_err() {
+        return issues.to_vec();
+    }
+    let Ok(resolved) = loader.resolve(recipe) else {
+        // The name was already validated at the flag site, so reaching here
+        // means the recipe file went away between the two reads.
+        return issues.to_vec();
+    };
+
+    let now = robot_now();
+    let g = bv_analysis::analyzer::build_graph(issues);
+    // `analyze_with_profile` takes ownership of the graph, and the triage
+    // scores below still need one. Building twice is cheaper than the two
+    // halves disagreeing about node ordering, which would silently change the
+    // ranking: `build_graph` assigns indices in sorted-id order precisely so
+    // the floating-point results match Go.
+    let build_for_metrics = bv_analysis::analyzer::build_graph(issues);
+
+    // Go only builds the metric sources the recipe's sort chain reads
+    // (`NeedsGraphMetrics` / `NeedsTriageScores`).
+    let graph = if resolved.needs_graph_metrics() {
+        let config = bv_analysis::analyzer::config_for_size(g.len(), g.edge_count(), 0.0);
+        let (analysis, _) = bv_analysis::analyzer::analyze_with_profile(
+            std::sync::Arc::new(build_for_metrics),
+            &config,
+        );
+        Some(RecipeGraphMetrics {
+            pagerank: analysis.page_rank.clone().unwrap_or_default(),
+            betweenness: analysis.betweenness.clone().unwrap_or_default(),
+            critical_path: analysis.critical_path_score.clone().unwrap_or_default(),
+        })
+    } else {
+        None
+    };
+
+    let triage_scores = if resolved.needs_triage_scores() {
+        Some(bv_analysis::triage::compute_triage_scores(issues, &g, now))
+    } else {
+        None
+    };
+
+    let readiness = bv_recipe::readiness::Readiness::new(issues);
+    // Go `recipeMetrics` (cmd/bv/main.go:4950-4966) hands `recipe.Apply` these
+    // three sources. Both are conditional on what the recipe sorts by, and Go's
+    // comment explains the ordering: the scores are taken over *every* issue
+    // handed in, so a blocker hidden by the recipe's own filters still feeds the
+    // PageRank of what remains — the same reading the TUI's stats take. Computing
+    // them after the filter would rank a narrowed set differently.
+    let metrics = bv_recipe::apply::Metrics {
+        graph: graph
+            .as_ref()
+            .map(|g| g as &dyn bv_recipe::apply::GraphMetrics),
+        triage: triage_scores.as_ref(),
+        readiness: Some(&readiness),
+    };
+
+    match bv_recipe::apply::apply(issues, &metrics, &resolved, Some(now)) {
+        Ok(scoped) => scoped,
+        // A malformed filter is a recipe bug, not a user error: Go's
+        // `scopeLoadedIssues` propagates it, and so does this. Until that
+        // surfaces, answering with the unfiltered set keeps the command
+        // working, which is what it did before.
+        Err(_) => issues.to_vec(),
+    }
 }
 
 fn full_envelope_for(data_hash: &str, issues: &[bv_core::model::Issue]) -> serde_json::Value {
@@ -4956,7 +5137,7 @@ fn load_issues_auto_meta_raw(
 /// filter (open, non-epic, unassigned, no open blockers) and fail-closed
 /// degraded output when no pick is claim-safe.
 fn run_robot_next() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let as_of = extract_as_of();
     let (issues, hash, as_of_commit, source) = match load_issues_auto_meta(&cwd, as_of.as_deref()) {
         Ok(x) => x,
@@ -5097,6 +5278,19 @@ fn run_robot_next() -> ExitCode {
     // site for the full reasoning.
     let cleared_status = {
         let mut s = out.metric_status.clone();
+        // Go `stabilizeRobotTriageForPinnedClock(&triage)` (robot_registry.go:2480,
+        // defined main.go:1183-1188) zeroes every `ms` under SOURCE_DATE_EPOCH.
+        //
+        // This was missing, and it is not the same object the analyzer
+        // stabilizes: `MetricStatus::stabilize_for_pinned_clock` is applied
+        // where the analyzer builds `stats.Status()` (robot_registry.go:892,
+        // :1008, :1984 — the plan, priority and insights payloads), but this
+        // block serializes `triage.Status`, which is a separate copy. Under a
+        // pinned clock Rust therefore emitted `status.PageRank.ms` and
+        // `status.Betweenness.ms` on a document the oracle leaves free of
+        // them, which is also a reproducibility defect: a pinned-clock run is
+        // supposed to be byte-stable.
+        s.stabilize_for_pinned_clock();
         let all_phase2_disabled = s.page_rank.reason.as_str().eq("all phase 2 disabled");
         for entry in [
             &mut s.page_rank,
@@ -5114,17 +5308,25 @@ fn run_robot_next() -> ExitCode {
         }
         s.to_json_map()
     };
+    // Go emits `robotNextOutput`'s fields in struct declaration order
+    // (robot_registry.go:2344-2360): actionable, phase2_ready, status, message,
+    // id, title, score, reasons, unblocks, diagnostic_top_pick, claim_command,
+    // show_command, actions, degraded, usage_hints. `serde_json` preserves
+    // insertion order, so the branch below decides *which* fields are present
+    // and this assembly decides the order they appear in. Assigning as the
+    // branch went along put `actions` third, before `actionable`, and pushed
+    // `usage_hints` ahead of `degraded` — same keys, same values, different
+    // bytes, which a key-sorted comparison cannot see.
+    let mut fields: Vec<(&str, serde_json::Value)> = Vec::new();
     match chosen {
         Some(top) => {
-            payload["phase2_ready"] = serde_json::json!(true);
-            payload["status"] = cleared_status.clone();
             let id = top["id"].as_str().unwrap_or_default().to_string();
             // Go v0.25.0: live tracker route suggestions replace the flat
             // claim_command/show_command strings.
             let actions = actions_for_source(&source, &id, true);
             let unavailable_reason = actions.unavailable_reason.clone();
             let has_claim = actions.claim.is_some();
-            payload["actions"] = serde_json::to_value(&actions).unwrap_or(serde_json::Value::Null);
+            let actions_value = serde_json::to_value(&actions).unwrap_or(serde_json::Value::Null);
 
             // Go (robot_registry.go:2558-2566) treats a missing claim route as a
             // degradation, not as an actionable pick: it reports the candidate
@@ -5132,39 +5334,63 @@ fn run_robot_next() -> ExitCode {
             // why. Claimability alone is not enough — a source with no readable
             // tracker metadata (every synthetic fixture) must take this path.
             if !has_claim {
-                payload["actionable"] = serde_json::json!(false);
-                payload["message"] =
-                    serde_json::json!(format!("No claim command emitted: {unavailable_reason}"));
-                payload["diagnostic_top_pick"] = serde_json::json!({
-                    "id": top["id"],
-                    "title": top["title"],
-                    "score": top["score"],
-                    "reasons": top["reasons"],
-                    "unblocks": top.get("unblocks").cloned().unwrap_or(serde_json::json!(0)),
-                });
-                payload["degraded"] = serde_json::json!([{
-                    "code": "live_action_route_unavailable",
-                    "severity": "info",
-                    "message": unavailable_reason,
-                }]);
+                fields.push(("actionable", serde_json::json!(false)));
+                fields.push(("phase2_ready", serde_json::json!(true)));
+                fields.push(("status", cleared_status.clone()));
+                fields.push((
+                    "message",
+                    serde_json::json!(format!("No claim command emitted: {unavailable_reason}")),
+                ));
+                fields.push((
+                    "diagnostic_top_pick",
+                    serde_json::json!({
+                        "id": top["id"],
+                        "title": top["title"],
+                        "score": top["score"],
+                        "reasons": top["reasons"],
+                        "unblocks": top.get("unblocks").cloned().unwrap_or(serde_json::json!(0)),
+                    }),
+                ));
+                fields.push(("actions", actions_value));
+                fields.push((
+                    "degraded",
+                    serde_json::json!([{
+                        "code": "live_action_route_unavailable",
+                        "severity": "info",
+                        "message": unavailable_reason,
+                    }]),
+                ));
             } else {
-                payload["actionable"] = serde_json::json!(true);
-                payload["id"] = top["id"].clone();
-                payload["title"] = top["title"].clone();
-                payload["score"] = top["score"].clone();
-                payload["reasons"] = top["reasons"].clone();
+                fields.push(("actionable", serde_json::json!(true)));
+                fields.push(("phase2_ready", serde_json::json!(true)));
+                fields.push(("status", cleared_status.clone()));
+                fields.push(("id", top["id"].clone()));
+                fields.push(("title", top["title"].clone()));
+                fields.push(("score", top["score"].clone()));
+                fields.push(("reasons", top["reasons"].clone()));
+                // Go carries `Unblocks int json:"unblocks,omitempty"`
+                // (robot_registry.go:2350) and sets it from the top pick on
+                // the actionable branch only (:2572). The omitempty is load
+                // bearing: a pick that unblocks nothing has no `unblocks` key at
+                // all, so emitting `"unblocks": 0` would be a visible
+                // difference from a caller diffing the two payloads.
+                let unblocks = top.get("unblocks").and_then(|v| v.as_i64()).unwrap_or(0);
+                if unblocks != 0 {
+                    fields.push(("unblocks", serde_json::json!(unblocks)));
+                }
                 if let Some(cmd) = &actions.claim {
-                    payload["claim_command"] = serde_json::json!(cmd.shell);
+                    fields.push(("claim_command", serde_json::json!(cmd.shell)));
                 }
                 if let Some(cmd) = &actions.show {
-                    payload["show_command"] = serde_json::json!(cmd.shell);
+                    fields.push(("show_command", serde_json::json!(cmd.shell)));
                 }
+                fields.push(("actions", actions_value));
             }
         }
         None => {
-            payload["actionable"] = serde_json::json!(false);
-            payload["phase2_ready"] = serde_json::json!(true);
-            payload["status"] = cleared_status;
+            fields.push(("actionable", serde_json::json!(false)));
+            fields.push(("phase2_ready", serde_json::json!(true)));
+            fields.push(("status", cleared_status));
             // Go splits this into two different payloads
             // (robot_registry.go:2505-2519 and :2520-2526). An empty
             // `QuickRef.TopPicks` means nothing cleared the claimability
@@ -5176,34 +5402,52 @@ fn run_robot_next() -> ExitCode {
             // workspace — every issue filtered out — told a caller its
             // top pick was unclaimable when there was no top pick to speak of.
             if picks.is_empty() {
-                payload["message"] = serde_json::json!("No proven actionable item available");
-                payload["degraded"] = serde_json::json!([{
-                    "code": "no_actionable_recommendation",
-                    "severity": "info",
-                    "message": "No open, unblocked, unassigned non-epic recommendation passed the robot-next claimability filter.",
-                    "repair": "Use br ready --json or scripts/br_retry.sh actionable --json for authoritative claim candidates.",
-                }]);
+                fields.push((
+                    "message",
+                    serde_json::json!("No proven actionable item available"),
+                ));
+                fields.push((
+                    "degraded",
+                    serde_json::json!([{
+                        "code": "no_actionable_recommendation",
+                        "severity": "info",
+                        "message": "No open, unblocked, unassigned non-epic recommendation passed the robot-next claimability filter.",
+                        "repair": "Use br ready --json or scripts/br_retry.sh actionable --json for authoritative claim candidates.",
+                    }]),
+                ));
             } else {
-                payload["message"] = serde_json::json!(
-                    "No claim command emitted because the top recommendation was not claim-safe"
-                );
+                fields.push((
+                    "message",
+                    serde_json::json!(
+                        "No claim command emitted because the top recommendation was not claim-safe"
+                    ),
+                ));
                 if let Some(first_pick) = picks.first() {
-                    payload["diagnostic_top_pick"] = serde_json::json!({
-                        "id": first_pick["id"],
-                        "title": first_pick["title"],
-                        "score": first_pick["score"],
-                        "reasons": first_pick["reasons"],
-                        "unblocks": first_pick["unblocks"],
-                    });
+                    fields.push((
+                        "diagnostic_top_pick",
+                        serde_json::json!({
+                            "id": first_pick["id"],
+                            "title": first_pick["title"],
+                            "score": first_pick["score"],
+                            "reasons": first_pick["reasons"],
+                            "unblocks": first_pick["unblocks"],
+                        }),
+                    ));
                 }
-                payload["degraded"] = serde_json::json!([{
-                    "code": "robot_next_claim_unsafe",
-                    "severity": "warning",
-                    "message": first_unsafe.unwrap_or_default().join("; "),
-                    "repair": "Use the authoritative Beads actionable queue plus claim gate before claiming work.",
-                }]);
+                fields.push((
+                    "degraded",
+                    serde_json::json!([{
+                        "code": "robot_next_claim_unsafe",
+                        "severity": "warning",
+                        "message": first_unsafe.unwrap_or_default().join("; "),
+                        "repair": "Use the authoritative Beads actionable queue plus claim gate before claiming work.",
+                    }]),
+                ));
             }
         }
+    }
+    for (key, value) in fields {
+        payload[key] = value;
     }
     payload["usage_hints"] = usage_hints;
     emit_json(&payload)
@@ -5834,7 +6078,11 @@ fn triage_views(
                 // which Go credits to nobody.
                 let unblocks_count = r.unblocks_ids.len();
                 let unblocks_ids: Vec<String> = r.unblocks_ids.clone();
-                let unblock_impact = ((unblocks_count as f64) + 1.0).log2();
+                // Go's `math.Log2` (triage.go:983), not `f64::log2` — see
+                // `go_math`. The platform libm rounds `log2(3.0) * 0.4` to
+                // 0.6339850002884625 where Go's own composition gives
+                // 0.6339850002884626, which is what the frozen goldens carry.
+                let unblock_impact = bv_analysis::go_math::go_log2((unblocks_count as f64) + 1.0);
                 // Go compares BlockerRatioNorm (triage.go:988), not the
                 // weighted blocker_ratio. They differ by the 0.13 weight, so
                 // using the weighted value scored every low-blocker item as
@@ -6017,16 +6265,29 @@ fn run_robot_triage() -> ExitCode {
     // from (main.go:4890-4900).
     let data_hash = loaded_hash;
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
+    // Go's `RobotContext.Readiness` is built over the whole loaded source and
+    // survives the recipe narrowing (`buildRobotContext`, main.go:4904-4920);
+    // triage then runs on the narrowed `ctx.Issues` against it
+    // (robot_registry.go:2208-2220). `ComputeTriageWithOptionsAndTime` only
+    // builds its own index when none is supplied (triage.go:466-467).
+    //
+    // `apply_scope` returns only the narrowed set, so the pre-scope list is
+    // needed to reproduce that. Without it every blocker the recipe filtered
+    // away looks absent, a blocking dependency on an absent issue resolves to
+    // `Unknown` rather than `Satisfied`, and a recipe that keeps only epics
+    // reports none of them actionable.
+    let pre_scope_readiness = bv_analysis::triage::Readiness::new(&loaded);
     // Go passes the feedback-adjusted weights into `TriageOptions.Weights`
     // (robot_registry.go:2208-2220), so they are installed before scoring
     // rather than applied to the finished ranking.
     let (feedback_data, feedback_weights) = load_robot_feedback();
-    let mut out = bv_analysis::triage::build_triage_with_weights(
+    let mut out = bv_analysis::triage::build_triage_with_readiness(
         &issues,
         &g,
         robot_now(),
         as_of.is_some(),
         feedback_weights,
+        Some(&pre_scope_readiness),
     );
     // Go stamps every recommendation with `issue.Actions(claimable)`
     // (triage.go:658). The tracker route needs the loaded source path, which
@@ -6232,6 +6493,15 @@ fn run_robot_triage() -> ExitCode {
     // Betweenness is never cleared: `betweennessReason` (graph.go:256-264)
     // returns "approximate", which Go does emit.
     let mut triage_status = out.metric_status.clone();
+    // Go `stabilizeRobotTriageForPinnedClock(&triage)` (robot_registry.go:2222,
+    // defined main.go:1183-1188) zeroes every `ms` under SOURCE_DATE_EPOCH.
+    //
+    // `out.metric_status` is `triage.Status`, a separate copy from the
+    // `stats.Status()` that `MetricStatus::stabilize_for_pinned_clock` is
+    // applied to inside the analyzer, so this path needs its own call — without
+    // it a pinned-clock `--robot-triage` carried `PageRank.ms` and
+    // `Betweenness.ms` and was not byte-reproducible.
+    triage_status.stabilize_for_pinned_clock();
     let all_phase2_disabled = triage_status
         .page_rank
         .reason
@@ -9354,8 +9624,20 @@ fn go_format_f64(f: f64) -> String {
             } else {
                 ("+", exp)
             };
-            let digits = if digits.len() == 2 && digits.starts_with('0') {
-                &digits[1..] // "09" → "9" (Go cleanup e-09 → e-9)
+            // Go's exponent is always at least two digits: `strconv` formats
+            // 1.7266170952673002e-07 as `1.7266170952673002e-07`, and Rust's
+            // `{:e}` gives the bare `1.7266170952673002e-7`. Padding is not a
+            // cosmetic choice — `large_cyclic_600____robot_insights.json` and
+            // `xl_2500____robot_insights.json` carry 119 `e-07` and 131 `e-08`
+            // literals between them, and contract #1 is byte equality.
+            //
+            // (Go 1.26.4's encoding/json had a "clean up e-09 to e-9" step that
+            // would strip this back. The frozen v0.25.0 oracle is go1.26.8 and
+            // does not do it, and neither do the goldens, so the zero stays.)
+            let padded;
+            let digits = if digits.len() == 1 {
+                padded = format!("0{digits}");
+                padded.as_str()
             } else {
                 digits
             };
@@ -9529,10 +9811,48 @@ mod go_json_tests {
         assert_eq!(go_format_f64(30.0), "30");
         assert_eq!(go_format_f64(0.5), "0.5");
         assert_eq!(go_format_f64(0.7415134907189797), "0.7415134907189797");
-        assert_eq!(go_format_f64(1e-7), "1e-7");
         assert_eq!(go_format_f64(1e21), "1e+21");
         assert_eq!(go_format_f64(233.5454), "233.5454");
         assert_eq!(go_format_f64(0.0), "0");
+    }
+
+    /// Go's exponent carries at least two digits; Rust's `{:e}` does not.
+    ///
+    /// The literals below are lifted from the frozen goldens, which is what
+    /// makes this a contract test rather than a formatting preference:
+    /// `large_cyclic_600____robot_insights.json` and
+    /// `xl_2500____robot_insights.json` contain 119 `e-07` and 131 `e-08`
+    /// literals, and contract #1 is byte equality against the Go oracle. A
+    /// one-digit exponent is a silent regression — every value still parses and
+    /// compares equal numerically, so only a byte comparison catches it.
+    #[test]
+    fn exponent_is_padded_to_two_digits() {
+        // (value, the literal the goldens record for it)
+        const GOLDEN: &[(f64, &str)] = &[
+            (1.7266170952673002e-07, "1.7266170952673002e-07"),
+            (8.827479594149969e-07, "8.827479594149969e-07"),
+            (1.053843441935608e-08, "1.053843441935608e-08"),
+            (2.5227410261587908e-11, "2.5227410261587908e-11"),
+            // Three-digit exponents already satisfy the rule and must not grow
+            // a third digit.
+            (3.4728345988084994e-19, "3.4728345988084994e-19"),
+            (1.05e-11, "1.05e-11"),
+        ];
+        for (value, expected) in GOLDEN {
+            assert_eq!(
+                &go_format_f64(*value),
+                expected,
+                "float {value:e} should serialise as {expected}"
+            );
+        }
+    }
+
+    /// The padding applies to the positive exponent too: Rust's `{:e}` writes
+    /// `1e9`-style bare exponents for values at or above `1e21` too.
+    #[test]
+    fn positive_single_digit_exponent_is_padded() {
+        assert_eq!(go_format_f64(1e21), "1e+21");
+        assert_eq!(go_format_f64(1e100), "1e+100");
     }
 
     #[test]
@@ -9552,7 +9872,7 @@ type AnalysisResultFull = (
 );
 
 fn load_full() -> Result<AnalysisResultFull, ExitCode> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let as_of = extract_as_of();
     let issues = if let Some(ref revision) = as_of {
         let loader = bv_core::discovery::GitLoader::new(&cwd);
@@ -9991,65 +10311,90 @@ fn compute_top_what_if_deltas(
             .unwrap_or(true)
     };
 
-    // Go computeUnblocks: dependents that are open and have no OTHER open blocker.
+    // Go computeUnblocks: dependents that would become actionable if this issue
+    // were closed. Same gate as the plan and triage paths — see
+    // `triage::compute_unblocks`, which ports Go's `isActionableAfterCompletions`
+    // (plan.go:118-121) rather than approximating it as "no other open
+    // blocker". The approximation ignored `defer_until` and the parent chain,
+    // so an issue Go reports as unblocking nothing still earned a what-if entry
+    // and pushed the list one past the cap.
+    let whatif_readiness = bv_analysis::triage::Readiness::new(issues);
     let compute_unblocks = |issue_id: &str| -> Vec<String> {
-        let mut unblocks = Vec::new();
-        let Some(node) = g.node_idx(issue_id) else {
-            return unblocks;
-        };
-        for &dep_node in g.predecessors_slice(node) {
-            let dep_id = g.node_id(dep_node).unwrap_or_default();
-            if is_closed(&dep_id) {
-                continue;
-            }
-            let mut still_blocked = false;
-            for &other in g.successors_slice(dep_node) {
-                let other_id = g.node_id(other).unwrap_or_default();
-                if other_id == issue_id {
-                    continue;
-                }
-                if !is_closed(&other_id) {
-                    still_blocked = true;
-                    break;
-                }
-            }
-            if !still_blocked {
-                unblocks.push(dep_id.to_string());
-            }
-        }
-        unblocks.sort();
-        unblocks
+        bv_analysis::triage::compute_unblocks(&whatif_readiness, g, issue_id, robot_now())
     };
 
-    // Go countTransitiveUnblocks: BFS with simulated-closed set.
+    // Go `cascadeCandidates` (priority.go:1013-1037) — the BFS frontier for one
+    // issue: its direct dependents plus its parent-child children, deduped and
+    // sorted. Rust walked raw predecessors, so a parent-child edge was invisible
+    // to the cascade.
+    let children_by_parent: std::collections::HashMap<&str, Vec<&str>> = {
+        let mut m: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+        for i in issues {
+            for d in &i.dependencies {
+                if matches!(d.r#type, bv_core::model::DependencyType::ParentChild) {
+                    m.entry(d.effective_depends_on()).or_default().push(&i.id);
+                }
+            }
+        }
+        for v in m.values_mut() {
+            v.sort_unstable();
+        }
+        m
+    };
+    let cascade_candidates = |issue_id: &str| -> Vec<String> {
+        let mut set: std::collections::BTreeSet<String> = Default::default();
+        if let Some(node) = g.node_idx(issue_id) {
+            for &n in g.predecessors_slice(node) {
+                if let Some(id) = g.node_id(n) {
+                    set.insert(id.to_string());
+                }
+            }
+        }
+        if let Some(kids) = children_by_parent.get(issue_id) {
+            for k in kids {
+                set.insert((*k).to_string());
+            }
+        }
+        set.into_iter().collect()
+    };
+
+    // Go `countTransitiveUnblocks` (priority.go:1041-1077): a BFS over the
+    // cascade frontier with a simulated-closed set.
+    //
+    // Two gates the old local BFS did not have. First the early return: an
+    // issue with neither dependents nor children cannot cascade, and Go says
+    // so before doing any work (priority.go:1047-1049). Second, per candidate,
+    // Go asks twice — `isActionableAfterCompletions(candidate, nil)` and then
+    // the same question with the simulated set — and skips anything already
+    // actionable, because work that was ready before this completion was not
+    // caused by it (priority.go:1062-1067). Counting that inflated the
+    // transitive total and admitted an entry Go does not report.
     let count_transitive = |issue_id: &str| -> usize {
-        let mut simulated: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if !issues.iter().any(|i| i.id == issue_id) || is_closed(issue_id) {
+            return 0;
+        }
+        if g.node_idx(issue_id)
+            .is_none_or(|n| g.predecessors_slice(n).is_empty())
+            && !children_by_parent.contains_key(issue_id)
+        {
+            return 0;
+        }
+        let mut simulated: std::collections::BTreeSet<String> = Default::default();
         simulated.insert(issue_id.to_string());
-        let mut queue = std::collections::VecDeque::new();
+        let mut queue: std::collections::VecDeque<String> = Default::default();
         queue.push_back(issue_id.to_string());
         let mut count = 0usize;
         while let Some(curr) = queue.pop_front() {
-            let Some(node) = g.node_idx(curr.as_str()) else {
-                continue;
-            };
-            for &dep_node in g.predecessors_slice(node) {
-                let dep_id = g.node_id(dep_node).unwrap_or_default().to_string();
-                if simulated.contains(&dep_id) || is_closed(&dep_id) {
+            for candidate in cascade_candidates(&curr) {
+                if simulated.contains(&candidate) {
                     continue;
                 }
-                // Unblocked if ALL blockers are (real or simulated) closed.
-                let mut blocked = false;
-                for &blocker_node in g.successors_slice(dep_node) {
-                    let blocker_id = g.node_id(blocker_node).unwrap_or_default().to_string();
-                    let blocker_closed = simulated.contains(&blocker_id) || is_closed(&blocker_id);
-                    if !blocker_closed {
-                        blocked = true;
-                        break;
-                    }
+                if whatif_readiness.ready_after(&candidate, robot_now(), None) {
+                    continue;
                 }
-                if !blocked {
-                    simulated.insert(dep_id.clone());
-                    queue.push_back(dep_id);
+                if whatif_readiness.ready_after(&candidate, robot_now(), Some(&simulated)) {
+                    simulated.insert(candidate.clone());
+                    queue.push_back(candidate);
                     count += 1;
                 }
             }
@@ -10328,28 +10673,38 @@ fn generate_advanced_insights(
     }
     let topk_limited = candidates.len() as i64;
     let mut topk = serde_json::json!({
-        "status": feature_status(
-            "available",
-            // Go returns early when `potentialCandidates == 0`
-            // (advanced_insights.go:472-482) with this reason; the later
-            // `len(items) == 0` branch (:546-548) is the same wording for the
-            // case where candidates existed but none could be picked.
-            if topk_limited == 0 { "No actionable issues" } else { "" },
-            topk_items.len() as i64 >= 5 && topk_limited > 5,
-            topk_items.len() as i64,
-            topk_limited,
-        ),
-        "how_to_use": "Best k issues to complete for max downstream unlock. Work these in order.",
+    "status": feature_status(
+        "available",
+        // Go returns early when `potentialCandidates == 0`
+        // (advanced_insights.go:472-482) with this reason; the later
+        // `len(items) == 0` branch (:546-548) is the same wording for the
+        // case where candidates existed but none could be picked.
+        if topk_limited == 0 { "No actionable issues" } else { "" },
+        topk_items.len() as i64 >= 5 && topk_limited > 5,
+        topk_items.len() as i64,
+        topk_limited,
+    ),
     });
     // `Items` and `MarginalGain` are `omitempty` on Go's `TopKSetResult`
     // (advanced_insights.go:135, :137) and are left nil by the early return, so
     // both keys are absent there. `TotalGain` is *not* omitempty (:136) and
     // serialises as 0 — an int field always appears, even on the empty path.
-    topk["total_gain"] = serde_json::json!(total_gain);
+    //
+    // The fields are appended rather than declared in one literal because their
+    // presence is conditional, but the order they are appended in is not: Go's
+    // `TopKSetResult` (:133-139) serialises `status, items, total_gain,
+    // marginal_gain, how_to_use`, and `how_to_use` is *last* there. Emitting it
+    // from the literal above put it second.
     if topk_limited != 0 {
         topk["items"] = serde_json::json!(topk_items);
+    }
+    topk["total_gain"] = serde_json::json!(total_gain);
+    if topk_limited != 0 {
         topk["marginal_gain"] = serde_json::json!(marginal_gains);
     }
+    topk["how_to_use"] = serde_json::json!(
+        "Best k issues to complete for max downstream unlock. Work these in order."
+    );
 
     // ---- Coverage Set (greedy vertex cover, limit 5) — Go generateCoverageSet ----
     let mut edges: Vec<(String, String)> = Vec::new();
@@ -10562,45 +10917,49 @@ fn generate_advanced_insights(
         paths.push(p);
     }
     let mut k_paths = serde_json::json!({
-        // Go's KPathsResult.Limited is the number of representative sources
-        // considered (advanced_insights.go:943), not the total path count.
-        //
-        // The empty-node case is checked first, before the cycle gate
-        // (advanced_insights.go:742-752): with no open issue there is nothing
-        // to trace, and Go reports "No open issues" rather than falling
-        // through to the cycle message. Testing `order_available` first would
-        // have claimed a cycle on an all-closed workspace that has no open
-        // path to break.
-        "status": if n == 0 {
-            feature_status("available", "No open issues", false, 0, 0)
-        } else if order_available {
-            feature_status(
-                "available",
-                "",
-                paths.len() >= 5 && total_paths > 5,
-                paths.len() as i64,
-                representative_sources.len() as i64,
-            )
-        } else {
-            // A partial topological order cannot support an honest
-            // longest-path result: paths through or downstream of a cycle
-            // would be silently omitted. Go fails closed and points at the
-            // cycle-break feature (advanced_insights.go:814-822).
-            feature_status(
-                "skipped",
-                "Dependency graph contains a cycle; break cycles before computing critical paths",
-                false,
-                0,
-                0,
-            )
-        },
-        "how_to_use": "Representative longest critical paths. Focus on issues appearing in multiple paths.",
+    // Go's KPathsResult.Limited is the number of representative sources
+    // considered (advanced_insights.go:943), not the total path count.
+    //
+    // The empty-node case is checked first, before the cycle gate
+    // (advanced_insights.go:742-752): with no open issue there is nothing
+    // to trace, and Go reports "No open issues" rather than falling
+    // through to the cycle message. Testing `order_available` first would
+    // have claimed a cycle on an all-closed workspace that has no open
+    // path to break.
+    "status": if n == 0 {
+        feature_status("available", "No open issues", false, 0, 0)
+    } else if order_available {
+        feature_status(
+            "available",
+            "",
+            paths.len() >= 5 && total_paths > 5,
+            paths.len() as i64,
+            representative_sources.len() as i64,
+        )
+    } else {
+        // A partial topological order cannot support an honest
+        // longest-path result: paths through or downstream of a cycle
+        // would be silently omitted. Go fails closed and points at the
+        // cycle-break feature (advanced_insights.go:814-822).
+        feature_status(
+            "skipped",
+            "Dependency graph contains a cycle; break cycles before computing critical paths",
+            false,
+            0,
+            0,
+        )
+    },
     });
     // Go's KPathsResult.Paths is `omitempty` (advanced_insights.go:173), so a
-    // run that found no path omits the key rather than emitting [].
+    // run that found no path omits the key rather than emitting []. It is
+    // declared *before* HowToUse in Go's struct (:172-174), so it has to be
+    // appended before `how_to_use` rather than after.
     if !paths.is_empty() {
         k_paths["paths"] = serde_json::json!(paths);
     }
+    k_paths["how_to_use"] = serde_json::json!(
+        "Representative longest critical paths. Focus on issues appearing in multiple paths."
+    );
 
     // ---- Parallel Cut (limit 5) — Go generateParallelCut ----
     let open_set: std::collections::HashSet<&str> = issues
@@ -10689,19 +11048,29 @@ fn generate_advanced_insights(
         .iter()
         .map(|(id, _, _, _)| id.as_str())
         .collect();
-    let max_parallel = open_set
+    // Go projects the ready width with
+    // `len(getActionableIssuesAfterCompletions(completedCut))`
+    // (advanced_insights.go:1035-1037), which is the same
+    // `IsCandidate && Readiness.ReadyAfter` gate `compute_unblocks` uses.
+    //
+    // Rust instead re-derived the width from its own `blocked_by` adjacency
+    // ("no blocker left that is neither completed nor closed"). That is a
+    // narrower test than ReadyAfter: it ignores `defer_until`, it ignores the
+    // parent chain, and it ignores which issues are candidates at all, so
+    // deferred and excluded work was counted as ready. Over-counting 126 vs
+    // Go's 119 on the ultraworkers set.
+    let insights_readiness = bv_analysis::triage::Readiness::new(issues);
+    let completed_for_readiness: std::collections::BTreeSet<String> =
+        completed_cut.iter().map(|id| (*id).to_string()).collect();
+    let max_parallel = issues
         .iter()
-        .filter(|id| {
-            // A completed issue is no longer a candidate for future work, so
-            // it drops out of the actionable set.
-            if completed_cut.contains(*id) {
-                return false;
-            }
-            blocked_by.get(*id).is_none_or(|blockers| {
-                blockers
-                    .iter()
-                    .all(|b| completed_cut.contains(b) || !open_set.contains(b))
-            })
+        .filter(|i| !completed_cut.contains(i.id.as_str()))
+        .filter(|i| {
+            insights_readiness.ready_after(
+                i.id.as_str(),
+                robot_now(),
+                Some(&completed_for_readiness),
+            )
         })
         .count() as i64;
     // Go emits the cut suggestions themselves (advanced_insights.go:186-199);
@@ -10739,12 +11108,17 @@ fn generate_advanced_insights(
     }
     let mut parallel_cut = serde_json::json!({
         "status": pc_status,
-        "max_parallel": max_parallel,
-        "how_to_use": "Issues that enable parallel work. Complete to maximize team throughput.",
     });
+    // Go's ParallelCutResult (advanced_insights.go:186-192) serialises
+    // `status, suggestions, max_parallel, how_to_use`; the two conditional
+    // fields bracket the unconditional pair, so neither can live in the literal.
     if !pc_suggestions.is_empty() {
         parallel_cut["suggestions"] = serde_json::json!(pc_suggestions);
     }
+    parallel_cut["max_parallel"] = serde_json::json!(max_parallel);
+    parallel_cut["how_to_use"] = serde_json::json!(
+        "Issues that enable parallel work. Complete to maximize team throughput."
+    );
 
     // ---- Parallel Gain — Go generateParallelGain (advanced_insights.go:1063) ----
     let parallel_gain = compute_parallel_gain(issues, 5);
@@ -10957,9 +11331,7 @@ fn plan_priority_status(g: &bv_graph_core::DiGraph) -> serde_json::Value {
     let t0 = std::time::Instant::now();
     let kcore = bv_analysis::algorithms::kcore::kcore(g);
     let kcore_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    let t1 = std::time::Instant::now();
     let articulation = bv_analysis::algorithms::articulation::articulation_points(g);
-    let art_ms = t1.elapsed().as_secs_f64() * 1000.0;
     let t2 = std::time::Instant::now();
     // Go gates Slack on the same Phase 1 topological order (graph.go:2271):
     // when the order does not cover every issue the metric is skipped and the
@@ -10989,7 +11361,12 @@ fn plan_priority_status(g: &bv_graph_core::DiGraph) -> serde_json::Value {
         "Critical": plan_skip(""),
         "Cycles": plan_skip(if force_full_analysis() { "" } else { "not computed for --robot-plan" }),
         "KCore": bv_analysis::analyzer::StatusEntry::computed(ms(kcore_ms)),
-        "Articulation": bv_analysis::analyzer::StatusEntry::computed(ms(art_ms)),
+        // Go reports no Articulation duration anywhere — `profile.Articulation
+        // = 0 // Computed together with k-core` (pkg/analysis/graph.go:2266)
+        // feeds the same `MetricStatus` this block mirrors. `art_ms` was
+        // measured here and made the entry carry an `ms` the oracle never
+        // emits; `statusEntry` drops the key only at exactly zero.
+        "Articulation": bv_analysis::analyzer::StatusEntry::computed(0.0),
         "Slack": if order_available {
             bv_analysis::analyzer::StatusEntry::computed(ms(slack_ms))
         } else {
@@ -11011,7 +11388,7 @@ fn go_track_id(mut n: usize) -> String {
 }
 
 fn run_robot_plan() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     // Same reason as load_and_analyze: the plain discovery call has no
     // revision parameter and no provenance, so `--as-of` was ignored and the
     // plan described the working tree rather than the requested commit.
@@ -11082,45 +11459,24 @@ fn run_robot_plan() -> ExitCode {
         }
     }
 
-    // Go computeUnblocks: dependents that are open and have no OTHER open blocker.
-    let is_closed_like = |id: &str| -> bool {
-        by_id
-            .get(id)
-            .map(|i| {
-                matches!(
-                    i.status,
-                    bv_core::model::Status::Closed | bv_core::model::Status::Tombstone
-                )
-            })
-            .unwrap_or(true)
-    };
+    // Go computeUnblocks: dependents that would become actionable if this issue
+    // were closed.
+    //
+    // This used to be a local approximation — "the dependent is not closed and
+    // every one of its *other* blockers is" — which is a plausible reading of
+    // the name and not what Go computes. Go gates each dependent on
+    // `isActionableAfterCompletions` (plan.go:118-121), i.e. the full
+    // `IsCandidate && Readiness.ReadyAfter` contract. That contract also covers
+    // `defer_until` and the parent chain, neither of which the approximation
+    // looked at, so a deferred dependent was reported as unblocked: one plan
+    // item claimed an `unblocks` entry Go did not give it.
+    //
+    // `triage::compute_unblocks` is the port of that gate and is what the
+    // triage paths already use, so the plan now agrees with them by
+    // construction rather than by coincidence.
+    let plan_readiness = bv_analysis::triage::Readiness::new(&issues);
     let compute_unblocks = |issue_id: &str| -> Vec<String> {
-        let mut unblocks = Vec::new();
-        let Some(node) = g.node_idx(issue_id) else {
-            return unblocks;
-        };
-        for &dep_node in g.predecessors_slice(node) {
-            let dep_id = g.node_id(dep_node).unwrap_or_default();
-            if is_closed_like(&dep_id) {
-                continue;
-            }
-            let mut still_blocked = false;
-            for &other in g.successors_slice(dep_node) {
-                let other_id = g.node_id(other).unwrap_or_default();
-                if other_id == issue_id {
-                    continue;
-                }
-                if !is_closed_like(&other_id) {
-                    still_blocked = true;
-                    break;
-                }
-            }
-            if !still_blocked {
-                unblocks.push(dep_id);
-            }
-        }
-        unblocks.sort();
-        unblocks
+        bv_analysis::triage::compute_unblocks(&plan_readiness, &g, issue_id, robot_now())
     };
 
     // Components grouped by root (all issues, sorted iteration).
@@ -11811,6 +12167,9 @@ fn count_transitive_unblocks(
 /// splits a component or joins its dependents into a new one.
 fn compute_parallel_gain(issues: &[bv_core::model::Issue], limit: usize) -> serde_json::Value {
     const HOW_TO_USE: &str = "Independent work tracks gained by closing each actionable issue now (gain = tracks after - tracks now). Pick high-gain issues to widen parallel work; unblocks lists what opens up.";
+    // Go's `start` (advanced_insights.go:1158), which both `DurationMs` sites
+    // measure from.
+    let pg_start = std::time::Instant::now();
     let is_open = |i: &bv_core::model::Issue| i.status.is_open();
     // Go `ReadinessIndex.Blockers` (pkg/model/readiness.go:199-218) treats a
     // blocking dependency as a blocker when its target is *absent* as well as
@@ -11892,12 +12251,21 @@ fn compute_parallel_gain(issues: &[bv_core::model::Issue], limit: usize) -> serd
     let mut out = serde_json::json!({
         "status": {"state": "computed"},
         "current_parallel": tracks_now,
-        "how_to_use": HOW_TO_USE,
     });
     if actionable.is_empty() {
         // `FeatureStatus.Count` is `omitempty` (advanced_insights.go:127), so a
         // zero count is absent rather than present as 0.
-        out["status"] = serde_json::json!({"state": "computed", "reason": "No actionable issues"});
+        let mut st = serde_json::json!({"state": "computed", "reason": "No actionable issues"});
+        let pg_ms = if bv_analysis::analyzer::source_date_epoch_active() {
+            0
+        } else {
+            pg_start.elapsed().as_millis() as i64
+        };
+        if pg_ms != 0 {
+            st["duration_ms"] = serde_json::json!(pg_ms);
+        }
+        out["status"] = st;
+        out["how_to_use"] = serde_json::json!(HOW_TO_USE);
         return out;
     }
 
@@ -11960,32 +12328,63 @@ fn compute_parallel_gain(issues: &[bv_core::model::Issue], limit: usize) -> serd
     // Go's FeatureStatus carries `count` (returned) and `limited` (original
     // count before capping); both are omitempty and both feed the digest.
     let mut status = serde_json::json!({"state": "computed"});
+    // `FeatureStatus` (advanced_insights.go:123-130) declares State, Reason,
+    // Capped, Count, Limited, DurationMs — `capped` sits *before* the two count
+    // fields, so it is appended first.
+    if total > items.len() {
+        status["capped"] = serde_json::json!(true);
+    }
     if total > 0 {
         status["count"] = serde_json::json!(items.len());
         status["limited"] = serde_json::json!(total);
     }
-    if total > items.len() {
-        status["capped"] = serde_json::json!(true);
+    // `FeatureStatus.DurationMs` (advanced_insights.go:129) is `omitempty`
+    // and Go fills it with `time.Since(start).Milliseconds()` on the success
+    // path (:1234) as well as the no-actionable early return (:1166) — whole
+    // milliseconds, not the fractional `ms` the metric status uses. It is
+    // still a wall-clock number, so it is zeroed under a pinned clock for the
+    // same reason the others are, and then dropped by omitempty.
+    let pg_ms = if bv_analysis::analyzer::source_date_epoch_active() {
+        0
+    } else {
+        pg_start.elapsed().as_millis() as i64
+    };
+    if pg_ms != 0 {
+        status["duration_ms"] = serde_json::json!(pg_ms);
     }
     out["status"] = status;
     if items.is_empty() {
+        out["how_to_use"] = serde_json::json!(HOW_TO_USE);
         return out;
     }
     // Go's field is `metrics`, not `items` (advanced_insights.go:212).
     out["metrics"] = serde_json::json!(items
         .into_iter()
         .map(|(id, title, potential, gain, pct, unblocks)| {
-            serde_json::json!({
+            let mut item = serde_json::json!({
                 "id": id,
                 "title": title,
                 "current_parallel": tracks_now,
                 "potential_parallel": potential,
                 "gain": gain,
                 "gain_percent": pct,
-                "unblocks": unblocks,
-            })
+            });
+            // Go's `ParallelGainItem.Unblocks` is `omitempty`
+            // (advanced_insights.go:224): an issue that opens new work without
+            // naming any of it has no `unblocks` key, not an empty array. An
+            // ep-level pick widens the track count while unblocking nothing by
+            // id, which is the common case here.
+            if !unblocks.is_empty() {
+                item["unblocks"] = serde_json::json!(unblocks);
+            }
+            item
         })
         .collect::<Vec<_>>());
+    // `how_to_use` is the last field of Go's ParallelGainResult
+    // (advanced_insights.go:214), after `metrics`. Both return paths above
+    // (the no-actionable early return and the empty-items return) also end with
+    // it, so it cannot go in the initial literal without losing that position.
+    out["how_to_use"] = serde_json::json!(HOW_TO_USE);
     out
 }
 
@@ -12251,7 +12650,7 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
         .and_then(|i| args.get(i + 1))
         .cloned();
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit, loaded_source) = match load_issues_auto_meta(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
@@ -12685,7 +13084,7 @@ fn run_robot_alerts() -> ExitCode {
     let want_severity = arg_value(&["--severity"]);
     let want_type = arg_value(&["--alert-type"]);
     let want_label = arg_value(&["--alert-label"]);
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (loaded, hash, _as_of_commit) = match load_issues_auto_unscoped(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
@@ -12910,14 +13309,21 @@ fn run_robot_alerts() -> ExitCode {
                     break;
                 }
                 let rel = s.related_bead.clone();
+                // Field order follows Go's `drift.Alert` (pkg/drift/drift.go:71-92):
+                // type, severity, message, baseline_value, current_value, delta,
+                // details, issue_id, label, detected_at, related_issue_id, labels,
+                // suggested_action. `related_issue_id` sits *after* `detected_at`,
+                // and `details` before `issue_id` — the `json!` literal had them
+                // the other way round, so the alert carried the same keys and
+                // values as the oracle in a different sequence.
                 duplicate_alerts.push(serde_json::json!({
                     "type": "potential_duplicate",
                     "severity": "info",
                     "message": s.summary,
-                    "issue_id": s.target_bead,
-                    "related_issue_id": rel,
                     "details": [s.reason],
+                    "issue_id": s.target_bead,
                     "detected_at": detected_at.clone(),
+                    "related_issue_id": rel,
                     "suggested_action": "Compare the two issues; close one as a duplicate or link them with a related dependency",
                 }));
             }
@@ -13037,7 +13443,7 @@ fn run_robot_alerts() -> ExitCode {
 }
 
 fn run_robot_graph(args: &[String]) -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
@@ -18513,7 +18919,7 @@ fn build_attention_reason(s: &bv_analysis::label_health::LabelAttentionScore) ->
 }
 
 fn run_robot_label_attention() -> ExitCode {
-    let (issues, hash) = match load_issues_tracked(&std::env::current_dir().unwrap_or_default()) {
+    let (issues, hash) = match load_issues_tracked(&go_working_dir()) {
         Ok((issues, _)) => {
             let h = bv_core::data_hash::compute_data_hash(&issues);
             (issues, h)

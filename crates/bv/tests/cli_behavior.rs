@@ -806,3 +806,59 @@ fn export_rejects_unknown_format() {
         "{stderr}"
     );
 }
+
+/// `--recipe` has to actually narrow the set.
+///
+/// It used to be accepted, validated against the recipe catalogue, and then
+/// dropped on the floor: `apply_recipe_scope` returned its input unchanged, so
+/// every recipe answered with the whole repository and five different recipes
+/// wrote one byte-identical export. The name check was real, which is what made
+/// it read as working.
+///
+/// Go's `scopeLoadedIssues` narrows once and every consumer analyses the same
+/// narrowed set, so the robot payloads are the cheapest place to see it.
+#[test]
+fn a_recipe_narrows_the_issue_set_the_robot_reports() {
+    let issue_count = |args: &[&str]| -> usize {
+        let (_, stdout, stderr) = run_at_repo_root(args);
+        assert_eq!(stderr, "", "robot output must stay clean: {stderr}");
+        let v: serde_json::Value =
+            serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}\n{stdout}"));
+        v["triage"]["meta"]["issue_count"]
+            .as_u64()
+            .expect("issue_count is a number") as usize
+    };
+
+    let unscoped = issue_count(&["--robot-triage"]);
+    let blocked = issue_count(&["--robot-triage", "--recipe", "blocked"]);
+    let actionable = issue_count(&["--robot-triage", "--recipe", "actionable"]);
+
+    assert!(
+        blocked < unscoped,
+        "the `blocked` recipe selected {blocked} of {unscoped} issues — the scope is not being applied"
+    );
+    // Not `blocked != actionable`: this repository has no blocked beads, so
+    // both recipes legitimately select nothing. What matters is that neither
+    // one answers with all {unscoped}, which is what every recipe did before.
+    assert!(
+        actionable < unscoped,
+        "the `actionable` recipe selected {actionable} of {unscoped} — the scope is not being applied"
+    );
+}
+
+/// Go main.go:2780-2784 withholds the recipe from the TUI, which keeps the whole
+/// repository and filters from its own picker. Narrowing on launch would hand
+/// the picker a list it cannot widen again.
+#[test]
+fn a_recipe_does_not_narrow_the_tui() {
+    let lines = |args: &[&str]| -> usize {
+        let (code, stdout, _) = run_at_repo_root(args);
+        assert_eq!(code, 0);
+        stdout.lines().count()
+    };
+    assert_eq!(
+        lines(&["--recipe", "blocked", "--debug-render", "insights"]),
+        lines(&["--debug-render", "insights"]),
+        "--recipe narrowed the TUI's issue set"
+    );
+}

@@ -223,7 +223,11 @@ pub fn compute_row_triage(issues: &[Issue]) -> std::collections::HashMap<String,
             continue;
         }
         let unblocks_count = unblocks.get(&issue.id).map(Vec::len).unwrap_or(0);
-        let unblock_impact = ((unblocks_count as f64) + 1.0).log2();
+        // Go's `math.Log2`, not `f64::log2` — see `crate::go_math`. Only the
+        // ranking depends on it here (`is_quick_win` is a bool), but the sort
+        // has to be the same sort Go performs or a 1-ULP tie can swap two
+        // rows and put the quick-win mark on the wrong issue.
+        let unblock_impact = crate::go_math::go_log2((unblocks_count as f64) + 1.0);
         let ratio = blocker_ratio_of(&issue.id);
         let simplicity = if ratio < 0.2 {
             1.0
@@ -351,6 +355,11 @@ pub fn compute_unblocks(
 struct ReadinessIssue<'a> {
     status: Status,
     defer_until: Option<jiff::Timestamp>,
+    /// Go's `ReadinessIssue` carries `Assignee` and `IssueType` for one reason:
+    /// `Claimable` (readiness.go:181-185) tests them. Nothing else in the
+    /// index reads either field.
+    assignee: &'a str,
+    issue_type: &'a str,
     /// `(depends_on_id, type)`, pre-folded from the legacy field names.
     deps: Vec<(&'a str, bv_core::model::DependencyType)>,
 }
@@ -399,12 +408,47 @@ impl<'a> Readiness<'a> {
                 ReadinessIssue {
                     status: issue.status,
                     defer_until: bv_core::model::parse_ts(&issue.defer_until),
+                    assignee: issue.assignee.as_str(),
+                    issue_type: issue.issue_type.as_str(),
                     deps,
                 },
             );
         }
         r.compute();
         r
+    }
+
+    /// Go `ReadinessIndex.HasOpenChildren` (readiness.go:187-194).
+    pub fn has_open_children(&self, id: &str) -> bool {
+        self.children.get(id).is_some_and(|kids| {
+            kids.iter().any(|k| {
+                self.issues
+                    .get(*k)
+                    .is_some_and(|c| !closed_for_readiness(c.status))
+            })
+        })
+    }
+
+    /// Go `ReadinessIndex.Claimable` (readiness.go:181-185):
+    ///
+    /// ```go
+    /// return exists && r.Ready(id, now) && issue.Status == StatusOpen &&
+    ///     issue.Assignee == "" && issue.IssueType != TypeEpic && !r.HasOpenChildren(id)
+    /// ```
+    ///
+    /// This is the gate behind the export's "Atomically claim" command block
+    /// (`generateIssueCommands`, pkg/export/markdown.go:667-673), which
+    /// reports an issue claimable only when the source authority is complete,
+    /// a readiness index is present, and this returns true.
+    pub fn claimable(&self, id: &str, now: jiff::Timestamp) -> bool {
+        let Some(issue) = self.issues.get(id) else {
+            return false;
+        };
+        self.ready(id, now)
+            && issue.status == Status::Open
+            && issue.assignee.is_empty()
+            && issue.issue_type != "epic"
+            && !self.has_open_children(id)
     }
 
     /// Go `ReadinessIndex.Ready` (readiness.go:175-179), the `defer_until`
@@ -838,7 +882,7 @@ pub fn build_triage(
     // per-metric timing at all.
     time_travelling: bool,
 ) -> TriageOutput {
-    build_triage_inner(issues, g, now, true, time_travelling, None)
+    build_triage_inner(issues, g, now, true, time_travelling, None, None, None)
 }
 
 /// Go parity for the three triage entrypoints that pass
@@ -854,7 +898,120 @@ pub fn build_triage_with_weights(
     time_travelling: bool,
     weights: Option<crate::scoring::Weights>,
 ) -> TriageOutput {
-    build_triage_inner(issues, g, now, true, time_travelling, weights)
+    build_triage_inner(issues, g, now, true, time_travelling, weights, None, None)
+}
+
+/// Go `ComputeTriageWithOptionsAndTime` (pkg/analysis/triage.go:466-467):
+///
+/// ```go
+/// if opts.Readiness == nil {
+///     opts.Readiness = model.NewReadinessIndex(issues)
+/// }
+/// analyzer.SetReadinessScope(opts.Readiness, opts.CandidateIDs)
+/// ```
+///
+/// The index is built over `issues` only when the caller did not supply one —
+/// and the robot handlers always do. `buildRobotContext` builds its readiness
+/// over the whole loaded source and then narrows `ctx.Issues` to the recipe's
+/// output (main.go:4904-4920), so by the time triage runs, `issues` is the
+/// recipe's short list while the authority still knows every issue in the
+/// repository.
+///
+/// Rebuilding the index from the narrowed list instead loses the blockers that
+/// the recipe filtered away, and a blocking dependency naming an absent issue
+/// resolves to `Unknown` rather than `Satisfied` (readiness.go, `visit`). Under
+/// `--recipe triage` on the ultraworkers set — 20 epics, whose children are
+/// all outside the recipe — that withheld readiness from 2 of the 20 and
+/// reported `actionable_count` 18 where Go reports 20.
+pub fn build_triage_with_readiness(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+    time_travelling: bool,
+    weights: Option<crate::scoring::Weights>,
+    readiness: Option<&Readiness<'_>>,
+) -> TriageOutput {
+    build_triage_inner(
+        issues,
+        g,
+        now,
+        true,
+        time_travelling,
+        weights,
+        readiness,
+        None,
+    )
+}
+
+/// Go `ComputeTriageScores` (pkg/analysis/triage.go:1316-1333), reduced to the
+/// shape `--recipe` consumes: an id -> triage-score map.
+///
+/// Go builds it as `ComputeImpactScores` → `computeTriageScoresFromImpact` →
+/// `computeSingleTriageScore`, whose composite is
+///
+/// ```text
+/// triageScore = base.Score * BaseScoreWeight + UnblockBoost + QuickWinBoost
+/// (triage.go:1409; label health, claim penalty and attention are listed
+///  as pending, not applied — :1398-1407)
+/// ```
+///
+/// which is exactly what `build_triage` already assembles at triage.rs:1215.
+/// Reusing it rather than restating the formula means a recipe sorted by
+/// `triage` ranks identically to the triage payload — which is the point of
+/// Go sending both through `TriageScoringOptions`.
+///
+/// The caller is the `--recipe` scope in `apply_recipe_scope`
+/// (main.go:4955-4963), which only builds this when the recipe actually sorts
+/// by that field.
+/// Go `analysis.ComputeTriageScores` (pkg/analysis/triage.go:1316-1332) — the
+/// score source the `--recipe` sort chain reads (`cmd/bv/main.go:4957`).
+///
+/// This is *not* the `ComputeTriageWithOptions` path the `--robot-triage`
+/// command takes. Go builds a bare analyzer here and calls
+/// `ComputeImpactScores`, which is `a.Analyze()` — synchronous and therefore
+/// complete. So this path has real PageRank and betweenness in hand even though
+/// no `WaitForPhase2` option is set anywhere near it. Passing `false` to
+/// [`build_triage`] left `pr` and `bw` empty (see `build_triage_inner`), which
+/// silently drops the graph terms from every score and reorders the `triage`
+/// recipe: it selected `epic-g7mp`/`epic-jhz5` where Go picks
+/// `m1-w21-021`/`m6-gap-m6-12-081`.
+pub fn compute_triage_scores(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+) -> std::collections::BTreeMap<String, f64> {
+    // Go: `NewAnalyzer(issues)` leaves `config` nil, so `Analyze()` resolves
+    // `ConfigForSize(nodeCount, edgeCount)` (graph.go:1583-1590,
+    // config.go:98). `analyze_with_profile` needs its own graph handle because
+    // it takes ownership; `g` stays for the impact scorer. `build_graph`
+    // assigns indices in sorted-id order, so the two graphs are isomorphic and
+    // the float results agree.
+    let config = crate::analyzer::config_for_size(g.len(), g.edge_count(), 0.0);
+    let owned = std::sync::Arc::new(crate::analyzer::build_graph(issues));
+    let (analysis, _) = crate::analyzer::analyze_with_profile(owned, &config);
+    let pagerank = analysis.page_rank.clone().unwrap_or_default();
+    let betweenness = analysis.betweenness.clone().unwrap_or_default();
+    let metrics = ScoreMetrics {
+        pagerank: &pagerank,
+        betweenness: &betweenness,
+        critical_path: analysis.critical_path_score.as_ref(),
+    };
+    build_triage_inner(
+        issues,
+        g,
+        now,
+        // `Analyze()` waits for phase 2 before returning, so the maps are
+        // populated even though no `WaitForPhase2` option is in play here.
+        true,
+        false,
+        None,
+        None,
+        Some(metrics),
+    )
+    .recommendations
+    .iter()
+    .map(|r| (r.id.clone(), r.score))
+    .collect()
 }
 
 /// Go parity variant for `cmd/bv/main.go:4013` (`--emit-script`), the one
@@ -879,9 +1036,38 @@ pub fn build_triage_phase2_pending(
     g: &DiGraph,
     now: jiff::Timestamp,
 ) -> TriageOutput {
-    build_triage_inner(issues, g, now, false, false, None)
+    build_triage_inner(issues, g, now, false, false, None, None, None)
 }
 
+/// Graph metrics to score against, when the caller already has them.
+///
+/// `build_triage_inner` otherwise derives PageRank and betweenness from the
+/// *triage fast config* (betweenness approximate, sample 50, critical path
+/// disabled — Go `TriageConfig`, triage.go:400). Go's
+/// `analysis.ComputeTriageScores` is not on that path: it builds a bare
+/// `NewAnalyzer(issues)` whose `config` field is nil, so `Analyze()` picks
+/// `ConfigForSize` (config.go:98), and for any graph under 500 nodes that is
+/// **exact** betweenness with `ComputeCriticalPath: true`
+/// (config.go:134-153). The two disagree enough to reorder the `triage`
+/// recipe — on the 133-node reference workspace Rust's scores collapsed to 13
+/// distinct values and selected `epic-g7mp`/`epic-jhz5` where Go selects
+/// `m1-w21-021`/`m6-gap-m6-12-081`.
+///
+/// This is deliberately an override rather than a second scoring function: the
+/// unblocks map, blocker depths and the `base*0.70 + boosts` composition below
+/// are shared, and only the three graph maps differ.
+#[derive(Clone, Copy)]
+pub struct ScoreMetrics<'a> {
+    pub pagerank: &'a BTreeMap<String, f64>,
+    pub betweenness: &'a BTreeMap<String, f64>,
+    pub critical_path: Option<&'a BTreeMap<String, f64>>,
+}
+
+// One parameter per Go `ComputeTriageWithOptions` input plus the two
+// caller-supplied overrides the recipe path needs. Bundling them into an
+// options struct would hide which combinations Go actually reaches, and every
+// caller here passes one fixed combination.
+#[allow(clippy::too_many_arguments)]
 fn build_triage_inner(
     issues: &[Issue],
     g: &DiGraph,
@@ -889,6 +1075,8 @@ fn build_triage_inner(
     phase2_awaited: bool,
     time_travelling: bool,
     weights: Option<crate::scoring::Weights>,
+    supplied_readiness: Option<&Readiness<'_>>,
+    supplied_metrics: Option<ScoreMetrics<'_>>,
 ) -> TriageOutput {
     // Go TriageConfig (fast config) parity: PageRank exact, Betweenness
     // approximate with sample 50 (falling back to exact inside the
@@ -896,45 +1084,60 @@ fn build_triage_inner(
     const TRIAGE_BETWEENNESS_SAMPLE: usize = 50;
 
     let n = g.len();
-    let t0 = std::time::Instant::now();
-    let pagerank = crate::algorithms::pagerank::pagerank_default(g);
-    let pr_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    // When the caller supplies the metrics, the fast-config ones below are
+    // dead: they are read only through `inputs`, which the override replaces.
+    // Computing them anyway cost a full PageRank plus a betweenness pass per
+    // `--recipe` invocation — and the betweenness branch is O(n·m) whenever the
+    // graph has fewer than 50 nodes, or exact-by-fallback above it. The
+    // `metric_status` timings go to zero with them, which is invisible: the
+    // recipe path reads `recommendations[..].score` and nothing else.
+    let (pr, bw, pr_ms, bw_ms, actual_sample) = match supplied_metrics {
+        Some(_) => (BTreeMap::new(), BTreeMap::new(), 0.0, 0.0, 0),
+        None => {
+            let t0 = std::time::Instant::now();
+            let pagerank = crate::algorithms::pagerank::pagerank_default(g);
+            let pr_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    let t1 = std::time::Instant::now();
-    let (betweenness, actual_sample) = if TRIAGE_BETWEENNESS_SAMPLE >= n {
-        // Go ApproxBetweenness falls back to exact when sample >= n; the
-        // config-mode reason stays "approximate" but no sample is reported.
-        (crate::algorithms::betweenness::betweenness(g), 0)
-    } else {
-        (
-            crate::algorithms::betweenness::betweenness_approx(
-                g,
-                TRIAGE_BETWEENNESS_SAMPLE,
-                Some(1),
-            ),
-            TRIAGE_BETWEENNESS_SAMPLE,
-        )
-    };
-    let bw_ms = t1.elapsed().as_secs_f64() * 1000.0;
+            let t1 = std::time::Instant::now();
+            let (betweenness, actual_sample) = if TRIAGE_BETWEENNESS_SAMPLE >= n {
+                // Go ApproxBetweenness falls back to exact when sample >= n;
+                // the config-mode reason stays "approximate" but no sample is
+                // reported.
+                (crate::algorithms::betweenness::betweenness(g), 0)
+            } else {
+                (
+                    crate::algorithms::betweenness::betweenness_approx(
+                        g,
+                        TRIAGE_BETWEENNESS_SAMPLE,
+                        Some(1),
+                    ),
+                    TRIAGE_BETWEENNESS_SAMPLE,
+                )
+            };
+            let bw_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
-    // Go TriageConfig skips ComputeCriticalPath: no time-to-impact component.
-    let pr: BTreeMap<String, f64> = if phase2_awaited {
-        pagerank
-            .into_iter()
-            .enumerate()
-            .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
-            .collect()
-    } else {
-        BTreeMap::new()
-    };
-    let bw: BTreeMap<String, f64> = if phase2_awaited {
-        betweenness
-            .into_iter()
-            .enumerate()
-            .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
-            .collect()
-    } else {
-        BTreeMap::new()
+            // Go TriageConfig skips ComputeCriticalPath: no time-to-impact
+            // component.
+            let pr: BTreeMap<String, f64> = if phase2_awaited {
+                pagerank
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
+            let bw: BTreeMap<String, f64> = if phase2_awaited {
+                betweenness
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
+            (pr, bw, pr_ms, bw_ms, actual_sample)
+        }
     };
 
     // Go graph.go:1913-1916 marks every metric "skipped" on an empty graph
@@ -1024,9 +1227,11 @@ fn build_triage_inner(
 
     let inputs = ImpactInputs {
         issues,
-        pagerank: &pr,
-        betweenness: &bw,
-        critical_path: None, // Go TriageConfig skips ComputeCriticalPath
+        pagerank: supplied_metrics.map_or(&pr, |m| m.pagerank),
+        betweenness: supplied_metrics.map_or(&bw, |m| m.betweenness),
+        // Go TriageConfig skips ComputeCriticalPath; the `ConfigForSize` path
+        // behind `ComputeTriageScores` enables it, and the caller says which.
+        critical_path: supplied_metrics.and_then(|m| m.critical_path),
         g,
         now,
     };
@@ -1056,7 +1261,14 @@ fn build_triage_inner(
     //    The blocker set is `Readiness().Blockers`, not a raw in-degree scan:
     //    it deduplicates, keeps blockers absent from the source, and rolls up
     //    `parent-child` parents that are themselves unresolved.
-    let readiness = Readiness::new(issues);
+    let owned_readiness;
+    let readiness = match supplied_readiness {
+        Some(r) => r,
+        None => {
+            owned_readiness = Readiness::new(issues);
+            &owned_readiness
+        }
+    };
     let mut unblocks_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for issue in issues {
         if closed_for_readiness(issue.status)
@@ -1246,8 +1458,12 @@ fn build_triage_inner(
             .then(a.id.cmp(&b.id))
     });
 
-    let readiness = Readiness::new(issues);
-    let (counts, quick_ref) = compute_counts(issues, &readiness, now);
+    // Go reuses one readiness index for both the unblocks map above and the
+    // counts here — `opts.Readiness` is resolved once at triage.go:466 and
+    // threaded through. When the caller supplied the full-source index, the
+    // narrowed `issues` are counted against it; otherwise this is the same
+    // locally-built index as above.
+    let (counts, quick_ref) = compute_counts(issues, readiness, now);
     let velocity = compute_project_velocity(issues, now);
     TriageOutput {
         recommendations,
@@ -1310,6 +1526,137 @@ mod tests {
             comments: vec![],
             source_repo: String::new(),
         }
+    }
+
+    /// The `--recipe` sort path scores against `ConfigForSize`, not the triage
+    /// fast config. That difference is invisible in `--robot-triage` (which
+    /// really does use the fast config and matches the oracle byte for byte) and
+    /// only shows up as a reshuffled `triage` recipe export, so it needs its own
+    /// guard: assert the supplied metrics actually reach the composite.
+    ///
+    /// The fixture is a two-node chain, `A -> B`, where `A` is the only node
+    /// with any PageRank to speak of. Supplying a PageRank map that ranks `B`
+    /// above `A` must move `B`'s score up; with the override dropped on the
+    /// floor the two calls would be identical.
+    #[test]
+    fn supplied_metrics_reach_the_triage_composite() {
+        let now = jiff::Timestamp::now();
+        let mut a = bare_issue("A");
+        let b = bare_issue("B");
+        a.dependencies.push(bv_core::model::Dependency {
+            issue_id: "A".into(),
+            depends_on_id: "B".into(),
+            depends_on_legacy: String::new(),
+            target_id_legacy: String::new(),
+            r#type: bv_core::model::DependencyType::Blocks,
+            created_at: None,
+            created_by: String::new(),
+        });
+        let issues = vec![a, b];
+        let g = crate::analyzer::build_graph(&issues);
+
+        let default_run =
+            build_triage_inner(&issues, &g, now, true, false, None, None, None).recommendations;
+        let default_scores: BTreeMap<String, f64> = default_run
+            .iter()
+            .map(|r| (r.id.clone(), r.score))
+            .collect();
+
+        // Invert the ranking: give `B` all the PageRank.
+        let mut pr = BTreeMap::new();
+        pr.insert("A".to_string(), 0.0);
+        pr.insert("B".to_string(), 1.0);
+        let empty: BTreeMap<String, f64> = BTreeMap::new();
+        let override_run = build_triage_inner(
+            &issues,
+            &g,
+            now,
+            true,
+            false,
+            None,
+            None,
+            Some(ScoreMetrics {
+                pagerank: &pr,
+                betweenness: &empty,
+                critical_path: None,
+            }),
+        )
+        .recommendations;
+        let override_scores: BTreeMap<String, f64> = override_run
+            .iter()
+            .map(|r| (r.id.clone(), r.score))
+            .collect();
+
+        // `A` is the dependent, so its score is the one the graph terms move:
+        // zeroing its PageRank drops it from 0.1777 to 0.0826. `B` is the
+        // blocker and its score is unchanged by construction, so asserting on
+        // it would have passed even with the override dropped on the floor.
+        assert_ne!(
+            default_scores.get("A"),
+            override_scores.get("A"),
+            "supplied PageRank did not change A's triage score — the override is not reaching ImpactInputs"
+        );
+    }
+
+    /// Go `ReadinessIndex.Claimable` (readiness.go:181-185) decides whether the
+    /// export prints an "Atomically claim" command for an issue. Each conjunct
+    /// is a separate rejection, and this walks them one at a time so a future
+    /// edit cannot quietly drop one and only show up as a missing line in a
+    /// markdown export nobody diffs.
+    #[test]
+    fn claimable_rejects_each_go_conjunct() {
+        let now = jiff::Timestamp::now();
+
+        // Baseline: open, unassigned, non-epic, no blockers, no children.
+        let plain = bare_issue("A");
+        let r = Readiness::new(std::slice::from_ref(&plain));
+        assert!(r.claimable("A", now), "a plain open task is claimable");
+
+        // `issue.Status == StatusOpen` — in_progress is Ready but not Open.
+        let in_progress = bare_issue_with("A", Status::InProgress, None);
+        assert!(!Readiness::new(std::slice::from_ref(&in_progress)).claimable("A", now));
+        // ...and so is a closed one.
+        let closed = bare_issue_with("A", Status::Closed, None);
+        assert!(!Readiness::new(std::slice::from_ref(&closed)).claimable("A", now));
+
+        // `issue.Assignee == ""`
+        let mut assigned = bare_issue("A");
+        assigned.assignee = "someone".into();
+        assert!(!Readiness::new(std::slice::from_ref(&assigned)).claimable("A", now));
+
+        // `issue.IssueType != TypeEpic`
+        let mut epic = bare_issue("A");
+        epic.issue_type = "epic".into();
+        assert!(!Readiness::new(std::slice::from_ref(&epic)).claimable("A", now));
+
+        // `!r.HasOpenChildren(id)` — a closed child does not withhold.
+        let parent_child = |child_status: Status| {
+            let pc = |target: &str| bv_core::model::Dependency {
+                issue_id: String::new(),
+                depends_on_id: target.to_string(),
+                depends_on_legacy: String::new(),
+                target_id_legacy: String::new(),
+                r#type: bv_core::model::DependencyType::ParentChild,
+                created_at: None,
+                created_by: String::new(),
+            };
+            let mut parent = bare_issue("P");
+            let mut child = bare_issue_with("C", child_status, None);
+            child.dependencies = vec![pc("P")];
+            parent.dependencies = vec![pc("C")];
+            vec![parent, child]
+        };
+        assert!(
+            !Readiness::new(&parent_child(Status::Open)).claimable("P", now),
+            "an open child withholds the parent"
+        );
+        assert!(
+            Readiness::new(&parent_child(Status::Closed)).claimable("P", now),
+            "a closed child does not withhold the parent"
+        );
+
+        // `exists` — an id the index never saw is not claimable.
+        assert!(!r.claimable("nope", now));
     }
 
     /// `quick_ref.in_progress_count` is `ByStatus["in_progress"]`

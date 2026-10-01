@@ -8,6 +8,7 @@ pub mod diff;
 pub mod drift;
 pub mod feedback;
 pub mod file_impact;
+pub mod go_math;
 pub mod impact;
 pub mod label_health;
 pub mod metrics;
@@ -27,6 +28,7 @@ pub use analyzer::{
 };
 pub use blocker_chain::{is_actionable, open_blockers};
 pub use feedback::{load_feedback, FeedbackData, FeedbackEvent, FeedbackJson, WeightAdjustment};
+pub use go_math::{go_log, go_log2};
 pub use impact::{compute_impact_scores, compute_impact_scores_with_weights, ImpactInputs};
 pub use scoring::{default_weights, Weights};
 pub use triage::{build_triage, compute_blocked_set, compute_row_triage, RowTriage, TriageOutput};

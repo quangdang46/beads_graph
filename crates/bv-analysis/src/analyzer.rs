@@ -1073,13 +1073,19 @@ pub fn analyze_phase2_blocking(
         Err(()) => status.kcore = StatusEntry::timeout(0.0),
     }
 
-    let t0 = Instant::now();
     let gc = std::sync::Arc::clone(&g);
     match run_with_timeout(budget.timeout_for(n), move || {
         crate::algorithms::articulation::articulation_points(&gc)
     }) {
         Ok(points) => {
-            status.articulation = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
+            // Go records `profile.Articulation = 0` with the comment "Computed
+            // together with k-core" (pkg/analysis/graph.go:2266) — the cut
+            // vertices fall out of the k-core pass, so there is no separate
+            // duration to report. Timing this independently made the status
+            // entry carry an `ms` the oracle never emits, and since
+            // `statusEntry` drops the key only at exactly zero, the extra key
+            // showed up in every `--robot-insights` payload.
+            status.articulation = StatusEntry::computed(0.0);
             out.articulation = Some(
                 points
                     .into_iter()
