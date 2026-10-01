@@ -780,7 +780,7 @@ pub fn calculate(
             severity: Severity::Critical,
             message: format!("{} new cycle(s) detected", new_cycles.len()),
             suggested_action:
-                "Break the cycle by removing or reversing one dependency edge (bv --robot-suggest lists cycle-break candidates)"
+                "Break the cycle by removing or reversing one dependency edge (bvr --robot-suggest lists cycle-break candidates)"
                     .into(),
             // Go's BaselineVal is `len(c.baseline.Cycles)`
             // (pkg/drift/drift.go:346) — the number of cycles RECORDED IN THE
@@ -832,7 +832,7 @@ pub fn calculate(
                 alert_type: AlertType::NodeCountChange,
                 severity: Severity::Info,
                 suggested_action:
-                    "Confirm the graph change is intended (bv --robot-diff --diff-since <baseline commit> lists it)"
+                    "Confirm the graph change is intended (bvr --robot-diff --diff-since <baseline commit> lists it)"
                         .into(),
                 // Go drift.go:421 phrases this as a signed delta plus a
                 // percentage, not as "from X to Y".
@@ -1690,7 +1690,7 @@ mod tests {
         assert_eq!(alert.severity, Severity::Critical);
         assert_eq!(
             alert.suggested_action,
-            "Break the cycle by removing or reversing one dependency edge (bv --robot-suggest lists cycle-break candidates)"
+            "Break the cycle by removing or reversing one dependency edge (bvr --robot-suggest lists cycle-break candidates)"
         );
     }
 

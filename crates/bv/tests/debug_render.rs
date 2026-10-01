@@ -366,7 +366,7 @@ fn debug_width_requires_debug_render() {
         "got {stderr:?}"
     );
     assert!(
-        stderr.contains("Try: `bv --debug-render triage --debug-width 120 --debug-height 40`."),
+        stderr.contains("Try: `bvr --debug-render triage --debug-width 120 --debug-height 40`."),
         "got {stderr:?}"
     );
 }

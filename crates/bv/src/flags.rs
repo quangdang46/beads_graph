@@ -62,14 +62,24 @@ const fn i(name: &'static str) -> FlagDef {
 // Root `--help` rendering (Go `printRootHelp`, main.go:1380-1427)
 // ---------------------------------------------------------------------------
 
-/// Program name printed in the `--help` banner.
+/// Program name printed in the `--help` banner and its footer.
 ///
-/// Byte-parity with Go bv v0.25.0 means printing `bv`, not `bvr`: the help
-/// text is a frozen compatibility surface, the flag usage strings it embeds
-/// already say "bv" (e.g. "Update bv to the latest version"), and the
-/// differential gate diffs this output against the oracle byte-for-byte.
-/// Change this one constant to print the Rust name instead.
-pub const HELP_PROGRAM: &str = "bv";
+/// This is `bvr`, the name the binary actually installs under (`install.sh`).
+/// Go printed `bv` here, but `bv` is not a binary this project ships — a user
+/// who ran the installer and then typed the `bv --robot-help` line this footer
+/// ends with got `command not found`. The differential gate never diffed this
+/// page (no golden captures the help output), so naming the real binary costs
+/// no parity coverage.
+pub const HELP_PROGRAM: &str = "bvr";
+
+/// Program name printed by `--version`.
+///
+/// This one deliberately stays `bv`. `--version` reports the Go-compatibility
+/// identity that the envelope and all 65 frozen goldens carry (`bv v0.25.0`),
+/// so it is a parity surface rather than a usage hint, and
+/// `cli_behavior::version_exits_zero` pins it. The help page names the binary
+/// you can actually run; this names the thing it emulates.
+pub const VERSION_PROGRAM: &str = "bv";
 
 /// Column budget Go passes to `pflag`'s `FlagUsagesWrapped` (main.go:1425).
 const HELP_COLS: usize = 100;
@@ -147,7 +157,7 @@ pub const HELP_FLAGS: &[HelpFlag] = &[
         short: None,
         section: "General Flags",
         type_word: "",
-        help: "Update bv to the latest version",
+        help: "Update bvr to the latest version",
     },
     HelpFlag {
         name: "check-update",
@@ -168,7 +178,7 @@ pub const HELP_FLAGS: &[HelpFlag] = &[
         short: None,
         section: "General Flags",
         type_word: "",
-        help: "Show what an update would do without installing (use via 'bv upgrade --dry-run')",
+        help: "Show what an update would do without installing (use via 'bvr upgrade --dry-run')",
     },
     HelpFlag {
         name: "yes",
@@ -1155,7 +1165,7 @@ pub const HELP_FLAGS: &[HelpFlag] = &[
         short: Some('h'),
         section: "General Flags",
         type_word: "",
-        help: "help for bv",
+        help: "help for bvr",
     },
 ];
 
@@ -1855,193 +1865,196 @@ pub const MODIFIER_RECOVERY_EXAMPLES: &[(&str, &[&str])] = &[
     (
         "robot-search",
         &[
-            r#"bv robot-search "login oauth" --json"#,
-            r#"bv --search "login oauth" --robot-search --format json"#,
+            r#"bvr robot-search "login oauth" --json"#,
+            r#"bvr --search "login oauth" --robot-search --format json"#,
         ],
     ),
     (
         "search-limit",
         &[
-            r#"bv robot-search "login oauth" --json"#,
-            r#"bv --search "login oauth" --robot-search --format json"#,
+            r#"bvr robot-search "login oauth" --json"#,
+            r#"bvr --search "login oauth" --robot-search --format json"#,
         ],
     ),
     (
         "search-min-score",
         &[
-            r#"bv robot-search "login oauth" --json"#,
-            r#"bv --search "login oauth" --robot-search --format json"#,
+            r#"bvr robot-search "login oauth" --json"#,
+            r#"bvr --search "login oauth" --robot-search --format json"#,
         ],
     ),
     (
         "search-mode",
         &[
-            r#"bv robot-search "login oauth" --json"#,
-            r#"bv --search "login oauth" --robot-search --format json"#,
+            r#"bvr robot-search "login oauth" --json"#,
+            r#"bvr --search "login oauth" --robot-search --format json"#,
         ],
     ),
     (
         "search-preset",
         &[
-            r#"bv robot-search "login oauth" --json"#,
-            r#"bv --search "login oauth" --robot-search --format json"#,
+            r#"bvr robot-search "login oauth" --json"#,
+            r#"bvr --search "login oauth" --robot-search --format json"#,
         ],
     ),
     (
         "search-weights",
         &[
-            r#"bv robot-search "login oauth" --json"#,
-            r#"bv --search "login oauth" --robot-search --format json"#,
+            r#"bvr robot-search "login oauth" --json"#,
+            r#"bvr --search "login oauth" --robot-search --format json"#,
         ],
     ),
     // main.go:265-269
     (
         "robot-diff",
         &[
-            "bv robot-diff HEAD~1 --json",
-            "bv --robot-diff --diff-since HEAD~1 --format json",
+            "bvr robot-diff HEAD~1 --json",
+            "bvr --robot-diff --diff-since HEAD~1 --format json",
         ],
     ),
     // main.go:270-278
-    ("schema-command", &["bv robot-schema triage --json"]),
-    ("graph-format", &["bv robot-graph mermaid --json"]),
-    ("graph-depth", &["bv robot-graph mermaid --json"]),
-    ("graph-root", &["bv robot-graph json --graph-root A --json"]),
+    ("schema-command", &["bvr robot-schema triage --json"]),
+    ("graph-format", &["bvr robot-graph mermaid --json"]),
+    ("graph-depth", &["bvr robot-graph mermaid --json"]),
+    (
+        "graph-root",
+        &["bvr robot-graph json --graph-root A --json"],
+    ),
     // main.go:279-288
-    ("severity", &["bv robot-alerts --severity critical --json"]),
+    ("severity", &["bvr robot-alerts --severity critical --json"]),
     (
         "alert-type",
-        &["bv robot-alerts --severity critical --json"],
+        &["bvr robot-alerts --severity critical --json"],
     ),
     (
         "alert-label",
-        &["bv robot-alerts --severity critical --json"],
+        &["bvr robot-alerts --severity critical --json"],
     ),
     (
         "robot-drift",
-        &["bv --check-drift --robot-drift --format json"],
+        &["bvr --check-drift --robot-drift --format json"],
     ),
     (
         "history-since",
-        &[r#"bv robot-history --history-since "30 days ago" --json"#],
+        &[r#"bvr robot-history --history-since "30 days ago" --json"#],
     ),
     // main.go:289-297
     (
         "history-limit",
-        &[r#"bv robot-history --history-since "30 days ago" --json"#],
+        &[r#"bvr robot-history --history-since "30 days ago" --json"#],
     ),
     (
         "min-confidence",
-        &[r#"bv robot-history --history-since "30 days ago" --json"#],
+        &[r#"bvr robot-history --history-since "30 days ago" --json"#],
     ),
     (
         "robot-history-timeout-ms",
-        &["bv robot-triage --robot-history-timeout-ms 10000 --json"],
+        &["bvr robot-triage --robot-history-timeout-ms 10000 --json"],
     ),
     // main.go:298-305
-    ("brief", &["bv robot-triage --brief --json"]),
+    ("brief", &["bvr robot-triage --brief --json"]),
     (
         "correlation-by",
-        &["bv robot-confirm-correlation deadbeef:A --correlation-by agent --json"],
+        &["bvr robot-confirm-correlation deadbeef:A --correlation-by agent --json"],
     ),
     (
         "correlation-reason",
-        &["bv robot-confirm-correlation deadbeef:A --correlation-by agent --json"],
+        &["bvr robot-confirm-correlation deadbeef:A --correlation-by agent --json"],
     ),
     // main.go:306-310
     (
         "orphans-min-score",
-        &["bv robot-orphans --orphans-min-score 30 --json"],
+        &["bvr robot-orphans --orphans-min-score 30 --json"],
     ),
     (
         "file-beads-limit",
-        &["bv robot-file-beads README.md --file-beads-limit 10 --json"],
+        &["bvr robot-file-beads README.md --file-beads-limit 10 --json"],
     ),
     (
         "hotspots-limit",
-        &["bv robot-file-hotspots --hotspots-limit 10 --json"],
+        &["bvr robot-file-hotspots --hotspots-limit 10 --json"],
     ),
     (
         "relations-threshold",
-        &["bv robot-file-relations README.md --relations-limit 10 --json"],
+        &["bvr robot-file-relations README.md --relations-limit 10 --json"],
     ),
     // main.go:311-320
     (
         "relations-limit",
-        &["bv robot-file-relations README.md --relations-limit 10 --json"],
+        &["bvr robot-file-relations README.md --relations-limit 10 --json"],
     ),
     (
         "related-min-relevance",
-        &["bv robot-related A --related-max-results 5 --json"],
+        &["bvr robot-related A --related-max-results 5 --json"],
     ),
     (
         "related-max-results",
-        &["bv robot-related A --related-max-results 5 --json"],
+        &["bvr robot-related A --related-max-results 5 --json"],
     ),
     (
         "related-include-closed",
-        &["bv robot-related A --related-max-results 5 --json"],
+        &["bvr robot-related A --related-max-results 5 --json"],
     ),
     // main.go:321-327
     (
         "network-depth",
-        &["bv robot-impact-network A --network-depth 2 --json"],
+        &["bvr robot-impact-network A --network-depth 2 --json"],
     ),
     (
         "forecast-label",
-        &["bv robot-forecast all --forecast-agents 3 --json"],
+        &["bvr robot-forecast all --forecast-agents 3 --json"],
     ),
     (
         "forecast-sprint",
-        &["bv robot-forecast all --forecast-agents 3 --json"],
+        &["bvr robot-forecast all --forecast-agents 3 --json"],
     ),
     // main.go:328-338
     (
         "forecast-agents",
-        &["bv robot-forecast all --forecast-agents 3 --json"],
+        &["bvr robot-forecast all --forecast-agents 3 --json"],
     ),
-    ("agents", &["bv robot-capacity --agents 3 --json"]),
-    ("capacity-label", &["bv robot-capacity --agents 3 --json"]),
+    ("agents", &["bvr robot-capacity --agents 3 --json"]),
+    ("capacity-label", &["bvr robot-capacity --agents 3 --json"]),
     (
         "robot-by-label",
-        &["bv robot-priority --robot-by-label backend --json"],
+        &["bvr robot-priority --robot-by-label backend --json"],
     ),
     // main.go:339-346
     (
         "robot-by-assignee",
-        &["bv robot-priority --robot-by-label backend --json"],
+        &["bvr robot-priority --robot-by-label backend --json"],
     ),
-    ("script-limit", &["bv --emit-script --script-limit 5"]),
-    ("script-format", &["bv --emit-script --script-limit 5"]),
+    ("script-limit", &["bvr --emit-script --script-limit 5"]),
+    ("script-format", &["bvr --emit-script --script-limit 5"]),
     // main.go:347-358
     (
         "pages-title",
-        &[r#"bv --export-pages ./bv-pages --pages-title "Nightly Build""#],
+        &[r#"bvr --export-pages ./bv-pages --pages-title "Nightly Build""#],
     ),
     (
         "pages-include-closed",
-        &[r#"bv --export-pages ./bv-pages --pages-title "Nightly Build""#],
+        &[r#"bvr --export-pages ./bv-pages --pages-title "Nightly Build""#],
     ),
     (
         "pages-include-history",
-        &[r#"bv --export-pages ./bv-pages --pages-title "Nightly Build""#],
+        &[r#"bvr --export-pages ./bv-pages --pages-title "Nightly Build""#],
     ),
     (
         "no-live-reload",
-        &["bv --preview-pages ./bv-pages --no-live-reload"],
+        &["bvr --preview-pages ./bv-pages --no-live-reload"],
     ),
     (
         "watch-export",
-        &["bv --export-pages ./bv-pages --watch-export"],
+        &["bvr --export-pages ./bv-pages --watch-export"],
     ),
     // main.go:359-361
     (
         "debug-width",
-        &["bv --debug-render triage --debug-width 120 --debug-height 40"],
+        &["bvr --debug-render triage --debug-width 120 --debug-height 40"],
     ),
     (
         "debug-height",
-        &["bv --debug-render triage --debug-width 120 --debug-height 40"],
+        &["bvr --debug-render triage --debug-width 120 --debug-height 40"],
     ),
 ];
 
@@ -2863,6 +2876,37 @@ mod tests {
         );
     }
 
+    /// The help page may only ever point at a command that exists. It used to
+    /// print Go's `bv`, which this project does not ship — `install.sh`
+    /// installs `bvr` and nothing else — so the footer's "Run `bv --robot-help`"
+    /// was a dead end for every user who did not already have the Go oracle on
+    /// PATH.
+    #[test]
+    fn help_never_points_at_a_command_we_do_not_ship() {
+        let out = render_help(HELP_PROGRAM);
+        assert!(
+            !out.contains("`bv "),
+            "help still suggests running `bv`: {:?}",
+            out.lines()
+                .filter(|l| l.contains("`bv "))
+                .collect::<Vec<_>>()
+        );
+        // The strings that only *look* like a program reference must survive a
+        // blanket rename: `.bv/workspace.yaml` is a directory, `(bv-87)` is an
+        // issue ID, and `./bv-pages` is an example export path.
+        for kept in [".bv/workspace.yaml", "(bv-87)", "./bv-pages"] {
+            assert!(out.contains(kept), "unrelated `bv` string lost: {kept}");
+        }
+    }
+
+    /// `--version` reports the emulated tool rather than this binary, so it
+    /// keeps Go's name even though `--help` now prints the runnable one.
+    #[test]
+    fn version_keeps_the_go_name_that_help_dropped() {
+        assert_eq!(VERSION_PROGRAM, "bv");
+        assert_eq!(HELP_PROGRAM, "bvr");
+    }
+
     #[test]
     fn robot_primaries_count_matches_go() {
         assert_eq!(ROBOT_PRIMARIES.len(), 41);
@@ -3153,31 +3197,31 @@ mod tests {
         // each invocation keeps its own backtick fence.
         assert_eq!(
             format_modifier_recovery_examples("search-min-score"),
-            "\nTry one of:\n  `bv robot-search \"login oauth\" --json`\n  `bv --search \"login oauth\" --robot-search --format json`"
+            "\nTry one of:\n  `bvr robot-search \"login oauth\" --json`\n  `bvr --search \"login oauth\" --robot-search --format json`"
         );
         assert_eq!(
             format_modifier_recovery_examples("robot-diff"),
-            "\nTry one of:\n  `bv robot-diff HEAD~1 --json`\n  `bv --robot-diff --diff-since HEAD~1 --format json`"
+            "\nTry one of:\n  `bvr robot-diff HEAD~1 --json`\n  `bvr --robot-diff --diff-since HEAD~1 --format json`"
         );
         // Go main.go:270 — a single example gets the short "Try: `x`." form,
         // with a trailing period, and no "one of".
         assert_eq!(
             format_modifier_recovery_examples("schema-command"),
-            "\nTry: `bv robot-schema triage --json`."
+            "\nTry: `bvr robot-schema triage --json`."
         );
         assert_eq!(
             format_modifier_recovery_examples("brief"),
-            "\nTry: `bv robot-triage --brief --json`."
+            "\nTry: `bvr robot-triage --brief --json`."
         );
         // Go main.go:296-297 — escaped quotes in a double-quoted Go literal.
         assert_eq!(
             format_modifier_recovery_examples("history-limit"),
-            "\nTry: `bv robot-history --history-since \"30 days ago\" --json`."
+            "\nTry: `bvr robot-history --history-since \"30 days ago\" --json`."
         );
         // Go main.go:347-349 — a raw string keeps its double quotes literal.
         assert_eq!(
             format_modifier_recovery_examples("pages-title"),
-            "\nTry: `bv --export-pages ./bv-pages --pages-title \"Nightly Build\"`."
+            "\nTry: `bvr --export-pages ./bv-pages --pages-title \"Nightly Build\"`."
         );
     }
 
@@ -3642,7 +3686,7 @@ pub const ENV_VARS: &[EnvVar] = &[
     EnvVar { name: "BV_SEARCH_PRESET", description: "Default hybrid preset: `default`, `bug-hunting`, `sprint-planning`, `impact-first`, `text-only`; setting one implies hybrid mode.", default: "`default`" },
     EnvVar { name: "BV_SEARCH_WEIGHTS", description: "JSON weight map for hybrid search; overrides the preset.", default: "(preset)" },
     EnvVar { name: "BV_SEMANTIC_DIM", description: "Embedding dimension for the hashed search index.", default: "`384`" },
-    EnvVar { name: "BV_SEMANTIC_EMBEDDER", description: "Embedding provider for `bv --search` and TUI search. Only `hash` (FNV-1a keyword feature hashing) is implemented; `python-sentence-transformers` and `openai` are reserved names that fail with \"not implemented\".", default: "`hash`" },
+    EnvVar { name: "BV_SEMANTIC_EMBEDDER", description: "Embedding provider for `bvr --search` and TUI search. Only `hash` (FNV-1a keyword feature hashing) is implemented; `python-sentence-transformers` and `openai` are reserved names that fail with \"not implemented\".", default: "`hash`" },
     EnvVar { name: "BV_SEMANTIC_MODEL", description: "Model name for a future non-hash provider; ignored by `hash`.", default: "(empty)" },
     EnvVar { name: "BV_SKIP_PHASE2", description: "Skip Phase 2 graph metrics (centrality, cycles, critical path) (`1`/`0`).", default: "(disabled)" },
     EnvVar { name: "BV_TEST_MODE", description: "Any value: test harness mode; suppresses browser opening, terminal capability queries, and the background worker's idle GC tuning.", default: "(unset)" },

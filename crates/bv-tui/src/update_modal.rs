@@ -180,7 +180,7 @@ pub fn spawn_perform_update(expected_version: &str) -> UpdateWorker {
                     let require_root =
                         matches!(err, bv_update::update::UpdateError::NoPermission(_));
                     let message = if require_root {
-                        "Update requires elevated permissions. Run: sudo bv --update".to_string()
+                        "Update requires elevated permissions. Run: sudo bvr --update".to_string()
                     } else {
                         format!("Update failed: {err}")
                     };
@@ -515,13 +515,13 @@ impl UpdateModal {
                         subtext,
                     )));
                     b.push(Line::from(Span::styled(
-                        "Run 'bv --rollback' to restore if needed",
+                        "Run 'bvr --rollback' to restore if needed",
                         subtext,
                     )));
                     b.push(Line::from(""));
                 }
                 b.push(Line::from(Span::styled(
-                    "Restart bv to use the new version.",
+                    "Restart bvr to use the new version.",
                     success,
                 )));
                 b.push(Line::from(""));

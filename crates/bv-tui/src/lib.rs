@@ -2834,7 +2834,7 @@ impl App {
                     &project_dir,
                     bv_core::agents::BLURB_VERSION,
                 );
-                self.status_msg = format!("Added bv instructions to {}", modal.file_type);
+                self.status_msg = format!("Added bvr instructions to {}", modal.file_type);
             }
             Err(e) => {
                 self.status_msg = format!("Could not update {}: {e}", modal.file_type);

@@ -1,83 +1,83 @@
 {
   "agent_intent_aliases": [
     {
-      "agent_instinct": "bv --json",
-      "canonical": "bv --robot-triage --format json"
+      "agent_instinct": "bvr --json",
+      "canonical": "bvr --robot-triage --format json"
     },
     {
-      "agent_instinct": "bv robot-triage --json",
-      "canonical": "bv --robot-triage --format json"
+      "agent_instinct": "bvr robot-triage --json",
+      "canonical": "bvr --robot-triage --format json"
     },
     {
-      "agent_instinct": "bv triage --json",
-      "canonical": "bv --robot-triage --format json"
+      "agent_instinct": "bvr triage --json",
+      "canonical": "bvr --robot-triage --format json"
     },
     {
-      "agent_instinct": "bv next --json",
-      "canonical": "bv --robot-next --format json"
+      "agent_instinct": "bvr next --json",
+      "canonical": "bvr --robot-next --format json"
     },
     {
-      "agent_instinct": "bv plan --json",
-      "canonical": "bv --robot-plan --format json"
+      "agent_instinct": "bvr plan --json",
+      "canonical": "bvr --robot-plan --format json"
     },
     {
-      "agent_instinct": "bv insights --json",
-      "canonical": "bv --robot-insights --format json"
+      "agent_instinct": "bvr insights --json",
+      "canonical": "bvr --robot-insights --format json"
     },
     {
-      "agent_instinct": "bv robot-capabilities --json",
-      "canonical": "bv --robot-capabilities --format json"
+      "agent_instinct": "bvr robot-capabilities --json",
+      "canonical": "bvr --robot-capabilities --format json"
     },
     {
-      "agent_instinct": "bv capabilities --json",
-      "canonical": "bv --robot-capabilities --format json"
+      "agent_instinct": "bvr capabilities --json",
+      "canonical": "bvr --robot-capabilities --format json"
     },
     {
-      "agent_instinct": "bv robot-docs guide --json",
-      "canonical": "bv --robot-docs guide --format json"
+      "agent_instinct": "bvr robot-docs guide --json",
+      "canonical": "bvr --robot-docs guide --format json"
     },
     {
-      "agent_instinct": "bv docs guide --json",
-      "canonical": "bv --robot-docs guide --format json"
+      "agent_instinct": "bvr docs guide --json",
+      "canonical": "bvr --robot-docs guide --format json"
     },
     {
-      "agent_instinct": "bv robot-schema triage --json",
-      "canonical": "bv --robot-schema --schema-command robot-triage --format json"
+      "agent_instinct": "bvr robot-schema triage --json",
+      "canonical": "bvr --robot-schema --schema-command robot-triage --format json"
     },
     {
-      "agent_instinct": "bv schema triage --json",
-      "canonical": "bv --robot-schema --schema-command robot-triage --format json"
+      "agent_instinct": "bvr schema triage --json",
+      "canonical": "bvr --robot-schema --schema-command robot-triage --format json"
     },
     {
-      "agent_instinct": "bv robot-search login oauth --json --limit 5",
-      "canonical": "bv --search 'login oauth' --robot-search --format json --search-limit 5"
+      "agent_instinct": "bvr robot-search login oauth --json --limit 5",
+      "canonical": "bvr --search 'login oauth' --robot-search --format json --search-limit 5"
     },
     {
-      "agent_instinct": "bv search login oauth --json --limit 5",
-      "canonical": "bv --search 'login oauth' --robot-search --format json --search-limit 5"
+      "agent_instinct": "bvr search login oauth --json --limit 5",
+      "canonical": "bvr --search 'login oauth' --robot-search --format json --search-limit 5"
     },
     {
-      "agent_instinct": "bv robot-graph mermaid --json",
-      "canonical": "bv --robot-graph --graph-format mermaid --format json"
+      "agent_instinct": "bvr robot-graph mermaid --json",
+      "canonical": "bvr --robot-graph --graph-format mermaid --format json"
     },
     {
-      "agent_instinct": "bv graph mermaid --json",
-      "canonical": "bv --robot-graph --graph-format mermaid --format json"
+      "agent_instinct": "bvr graph mermaid --json",
+      "canonical": "bvr --robot-graph --graph-format mermaid --format json"
     },
     {
-      "agent_instinct": "bv robot-related bv-123 --json",
-      "canonical": "bv --robot-related bv-123 --format json"
+      "agent_instinct": "bvr robot-related bv-123 --json",
+      "canonical": "bvr --robot-related bv-123 --format json"
     },
     {
-      "agent_instinct": "bv --name backend --json",
-      "canonical": "bv --label backend --robot-triage --format json"
+      "agent_instinct": "bvr --name backend --json",
+      "canonical": "bvr --label backend --robot-triage --format json"
     }
   ],
   "commands": [
     {
       "accepted_invocations": [
-        "bv --robot-alerts --format json",
-        "bv robot-alerts --severity critical --json"
+        "bvr --robot-alerts --format json",
+        "bvr robot-alerts --severity critical --json"
       ],
       "description": "Stale issues, blocking cascades, priority mismatches.",
       "flag": "--robot-alerts",
@@ -97,12 +97,12 @@
         "--alert-type critical",
         "--alert-label backend"
       ],
-      "preferred_invocation": "bv robot-alerts --severity critical --json"
+      "preferred_invocation": "bvr robot-alerts --severity critical --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-blocker-chain ISSUE_ID --format json",
-        "bv robot-blocker-chain ISSUE_ID --json"
+        "bvr --robot-blocker-chain ISSUE_ID --format json",
+        "bvr robot-blocker-chain ISSUE_ID --json"
       ],
       "description": "Full blocker chain analysis for an issue.",
       "flag": "--robot-blocker-chain ISSUE_ID",
@@ -119,12 +119,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-blocker-chain ISSUE_ID --json"
+      "preferred_invocation": "bvr robot-blocker-chain ISSUE_ID --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-burndown current --format json",
-        "bv robot-burndown current --json"
+        "bvr --robot-burndown current --format json",
+        "bvr robot-burndown current --json"
       ],
       "description": "Sprint burndown data.",
       "flag": "--robot-burndown current",
@@ -134,12 +134,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": true,
-      "preferred_invocation": "bv robot-burndown current --json"
+      "preferred_invocation": "bvr robot-burndown current --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-capabilities --format json",
-        "bv robot-capabilities --json"
+        "bvr --robot-capabilities --format json",
+        "bvr robot-capabilities --json"
       ],
       "description": "Machine-readable capability manifest: version, contract, commands, env vars, exit codes, and output formats.",
       "flag": "--robot-capabilities",
@@ -157,12 +157,12 @@
       "needs_git": false,
       "needs_issues": false,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-capabilities --json"
+      "preferred_invocation": "bvr robot-capabilities --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-capacity --format json",
-        "bv robot-capacity --json"
+        "bvr --robot-capacity --format json",
+        "bvr robot-capacity --json"
       ],
       "description": "Capacity simulation and completion projections.",
       "flag": "--robot-capacity",
@@ -176,12 +176,12 @@
         "--agents 10",
         "--capacity-label backend"
       ],
-      "preferred_invocation": "bv robot-capacity --json"
+      "preferred_invocation": "bvr robot-capacity --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-causality ISSUE_ID --format json",
-        "bv robot-causality ISSUE_ID --json"
+        "bvr --robot-causality ISSUE_ID --format json",
+        "bvr robot-causality ISSUE_ID --json"
       ],
       "description": "Causal chain analysis for a bead.",
       "flag": "--robot-causality ISSUE_ID",
@@ -198,12 +198,12 @@
       "needs_git": true,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-causality ISSUE_ID --json"
+      "preferred_invocation": "bvr robot-causality ISSUE_ID --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-confirm-correlation deadbeef:ISSUE_ID --format json",
-        "bv robot-confirm-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
+        "bvr --robot-confirm-correlation deadbeef:ISSUE_ID --format json",
+        "bvr robot-confirm-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
       ],
       "description": "Record positive feedback for a commit-to-bead correlation.",
       "flag": "--robot-confirm-correlation deadbeef:ISSUE_ID",
@@ -217,12 +217,12 @@
         "--correlation-by agent",
         "--correlation-reason verified"
       ],
-      "preferred_invocation": "bv robot-confirm-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
+      "preferred_invocation": "bvr robot-confirm-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-correlation-stats --format json",
-        "bv robot-correlation-stats --json"
+        "bvr --robot-correlation-stats --format json",
+        "bvr robot-correlation-stats --json"
       ],
       "description": "Summary counts for saved correlation feedback.",
       "flag": "--robot-correlation-stats",
@@ -239,12 +239,12 @@
       "needs_git": false,
       "needs_issues": false,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-correlation-stats --json"
+      "preferred_invocation": "bvr robot-correlation-stats --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-diff --diff-since HEAD~1 --format json",
-        "bv robot-diff HEAD~1 --json"
+        "bvr --robot-diff --diff-since HEAD~1 --format json",
+        "bvr robot-diff HEAD~1 --json"
       ],
       "description": "Changes since a historical point (commit, branch, tag, or date).",
       "flag": "--robot-diff",
@@ -257,12 +257,12 @@
       "params": [
         "--diff-since HEAD~1"
       ],
-      "preferred_invocation": "bv robot-diff HEAD~1 --json"
+      "preferred_invocation": "bvr robot-diff HEAD~1 --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-docs guide --format json",
-        "bv robot-docs guide --json"
+        "bvr --robot-docs guide --format json",
+        "bvr robot-docs guide --json"
       ],
       "description": "Machine-readable JSON documentation. Topics: guide, commands, examples, env, exit-codes, all.",
       "flag": "--robot-docs guide",
@@ -272,12 +272,12 @@
       "needs_git": false,
       "needs_issues": false,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-docs guide --json"
+      "preferred_invocation": "bvr robot-docs guide --json"
     },
     {
       "accepted_invocations": [
-        "bv --check-drift --robot-drift --format json",
-        "bv robot-drift --json"
+        "bvr --check-drift --robot-drift --format json",
+        "bvr robot-drift --json"
       ],
       "description": "Drift detection from saved baseline.",
       "flag": "--robot-drift",
@@ -287,12 +287,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv --check-drift --robot-drift --format json"
+      "preferred_invocation": "bvr --check-drift --robot-drift --format json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-explain-correlation deadbeef:ISSUE_ID --format json",
-        "bv robot-explain-correlation deadbeef:ISSUE_ID --json"
+        "bvr --robot-explain-correlation deadbeef:ISSUE_ID --format json",
+        "bvr robot-explain-correlation deadbeef:ISSUE_ID --json"
       ],
       "description": "Explain why a commit is linked to a bead.",
       "flag": "--robot-explain-correlation deadbeef:ISSUE_ID",
@@ -308,12 +308,12 @@
       "needs_git": true,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-explain-correlation deadbeef:ISSUE_ID --json"
+      "preferred_invocation": "bvr robot-explain-correlation deadbeef:ISSUE_ID --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-file-beads README.md --format json",
-        "bv robot-file-beads README.md --json"
+        "bvr --robot-file-beads README.md --format json",
+        "bvr robot-file-beads README.md --json"
       ],
       "description": "Beads that touched a specific file path.",
       "flag": "--robot-file-beads README.md",
@@ -332,12 +332,12 @@
       "params": [
         "--file-beads-limit 10"
       ],
-      "preferred_invocation": "bv robot-file-beads README.md --json"
+      "preferred_invocation": "bvr robot-file-beads README.md --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-file-hotspots --format json",
-        "bv robot-file-hotspots --json"
+        "bvr --robot-file-hotspots --format json",
+        "bvr robot-file-hotspots --json"
       ],
       "description": "Files touched by the most beads.",
       "flag": "--robot-file-hotspots",
@@ -356,12 +356,12 @@
       "params": [
         "--hotspots-limit 10"
       ],
-      "preferred_invocation": "bv robot-file-hotspots --json"
+      "preferred_invocation": "bvr robot-file-hotspots --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-file-relations README.md --format json",
-        "bv robot-file-relations README.md --json"
+        "bvr --robot-file-relations README.md --format json",
+        "bvr robot-file-relations README.md --json"
       ],
       "description": "Files that frequently co-change with a given file.",
       "flag": "--robot-file-relations README.md",
@@ -381,12 +381,12 @@
         "--relations-threshold 0.0-1.0",
         "--relations-limit 10"
       ],
-      "preferred_invocation": "bv robot-file-relations README.md --json"
+      "preferred_invocation": "bvr robot-file-relations README.md --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-forecast all --format json",
-        "bv robot-forecast all --json"
+        "bvr --robot-forecast all --format json",
+        "bvr robot-forecast all --json"
       ],
       "description": "ETA predictions for bead completion.",
       "flag": "--robot-forecast all",
@@ -401,12 +401,12 @@
         "--forecast-sprint SPRINT_ID",
         "--forecast-agents 10"
       ],
-      "preferred_invocation": "bv robot-forecast all --json"
+      "preferred_invocation": "bvr robot-forecast all --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-graph --format json",
-        "bv robot-graph mermaid --json"
+        "bvr --robot-graph --format json",
+        "bvr robot-graph mermaid --json"
       ],
       "description": "Dependency graph export in JSON, DOT, or Mermaid format.",
       "flag": "--robot-graph",
@@ -421,12 +421,12 @@
         "--graph-root ISSUE_ID",
         "--graph-depth 10"
       ],
-      "preferred_invocation": "bv robot-graph mermaid --json"
+      "preferred_invocation": "bvr robot-graph mermaid --json"
     },
     {
       "accepted_invocations": [
-        "bv robot-help --json",
-        "bv robot-docs guide --json"
+        "bvr robot-help --json",
+        "bvr robot-docs guide --json"
       ],
       "description": "Agent-focused command help. Use robot-docs guide for structured JSON documentation.",
       "flag": "--robot-help",
@@ -436,12 +436,12 @@
       "needs_git": false,
       "needs_issues": false,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-help --json"
+      "preferred_invocation": "bvr robot-help --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-history --format json",
-        "bv robot-history --history-limit 20 --json"
+        "bvr --robot-history --format json",
+        "bvr robot-history --history-limit 20 --json"
       ],
       "description": "Bead-to-commit correlations from git history.",
       "flag": "--robot-history",
@@ -463,12 +463,12 @@
         "--history-limit 10",
         "--min-confidence 0.0-1.0"
       ],
-      "preferred_invocation": "bv robot-history --history-limit 20 --json"
+      "preferred_invocation": "bvr robot-history --history-limit 20 --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-impact README.md --format json",
-        "bv robot-impact README.md --json"
+        "bvr --robot-impact README.md --format json",
+        "bvr robot-impact README.md --json"
       ],
       "description": "Analyze bead impact for files that may be modified.",
       "flag": "--robot-impact README.md",
@@ -485,12 +485,12 @@
       "needs_git": true,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-impact README.md --json"
+      "preferred_invocation": "bvr robot-impact README.md --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-impact-network all --format json",
-        "bv robot-impact-network all --json"
+        "bvr --robot-impact-network all --format json",
+        "bvr robot-impact-network all --json"
       ],
       "description": "Impact network graph (full or subnetwork for a bead).",
       "flag": "--robot-impact-network all",
@@ -510,12 +510,12 @@
       "params": [
         "--network-depth 1-3"
       ],
-      "preferred_invocation": "bv robot-impact-network all --json"
+      "preferred_invocation": "bvr robot-impact-network all --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-insights --format json",
-        "bv robot-insights --json"
+        "bvr --robot-insights --format json",
+        "bvr robot-insights --json"
       ],
       "description": "Deep graph analysis: PageRank, betweenness, HITS, eigenvector, k-core, cycle detection.",
       "flag": "--robot-insights",
@@ -533,12 +533,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-insights --json"
+      "preferred_invocation": "bvr robot-insights --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-label-attention --format json",
-        "bv robot-label-attention --attention-limit 5 --json"
+        "bvr --robot-label-attention --format json",
+        "bvr robot-label-attention --attention-limit 5 --json"
       ],
       "description": "Attention-ranked labels requiring focus.",
       "flag": "--robot-label-attention",
@@ -551,12 +551,12 @@
       "params": [
         "--attention-limit 10"
       ],
-      "preferred_invocation": "bv robot-label-attention --attention-limit 5 --json"
+      "preferred_invocation": "bvr robot-label-attention --attention-limit 5 --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-label-flow --format json",
-        "bv robot-label-flow --json"
+        "bvr --robot-label-flow --format json",
+        "bvr robot-label-flow --json"
       ],
       "description": "Cross-label dependency flow analysis.",
       "flag": "--robot-label-flow",
@@ -566,12 +566,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-label-flow --json"
+      "preferred_invocation": "bvr robot-label-flow --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-label-health --format json",
-        "bv robot-label-health --json"
+        "bvr --robot-label-health --format json",
+        "bvr robot-label-health --json"
       ],
       "description": "Per-label health metrics: open/closed counts, velocity, staleness.",
       "flag": "--robot-label-health",
@@ -581,12 +581,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-label-health --json"
+      "preferred_invocation": "bvr robot-label-health --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-metrics --format json",
-        "bv robot-metrics --json"
+        "bvr --robot-metrics --format json",
+        "bvr robot-metrics --json"
       ],
       "description": "Performance metrics: timing, cache hit rates, memory usage.",
       "flag": "--robot-metrics",
@@ -596,12 +596,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-metrics --json"
+      "preferred_invocation": "bvr robot-metrics --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-next --format json",
-        "bv robot-next --json"
+        "bvr --robot-next --format json",
+        "bvr robot-next --json"
       ],
       "description": "Single top recommendation with claim/show commands.",
       "flag": "--robot-next",
@@ -623,12 +623,12 @@
       "params": [
         "--graph-root ISSUE_ID"
       ],
-      "preferred_invocation": "bv robot-next --json"
+      "preferred_invocation": "bvr robot-next --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-orphans --format json",
-        "bv robot-orphans --orphans-min-score 30 --json"
+        "bvr --robot-orphans --format json",
+        "bvr robot-orphans --orphans-min-score 30 --json"
       ],
       "description": "Orphan commit candidates that should be linked to beads.",
       "flag": "--robot-orphans",
@@ -649,12 +649,12 @@
         "--orphans-min-score 0-100",
         "--label backend"
       ],
-      "preferred_invocation": "bv robot-orphans --orphans-min-score 30 --json"
+      "preferred_invocation": "bvr robot-orphans --orphans-min-score 30 --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-plan --format json",
-        "bv robot-plan --json"
+        "bvr --robot-plan --format json",
+        "bvr robot-plan --json"
       ],
       "description": "Dependency-respecting execution plan with parallel tracks.",
       "flag": "--robot-plan",
@@ -670,12 +670,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-plan --json"
+      "preferred_invocation": "bvr robot-plan --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-priority --format json",
-        "bv robot-priority --json"
+        "bvr --robot-priority --format json",
+        "bvr robot-priority --json"
       ],
       "description": "Priority misalignment detection: items whose graph importance differs from assigned priority.",
       "flag": "--robot-priority",
@@ -689,12 +689,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-priority --json"
+      "preferred_invocation": "bvr robot-priority --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-recipes --format json",
-        "bv robot-recipes --json"
+        "bvr --robot-recipes --format json",
+        "bvr robot-recipes --json"
       ],
       "description": "Recipe names, descriptions, and usage hints for pre-filtering work.",
       "flag": "--robot-recipes",
@@ -707,12 +707,12 @@
       "needs_git": false,
       "needs_issues": false,
       "needs_sprint": false,
-      "preferred_invocation": "bv robot-recipes --json"
+      "preferred_invocation": "bvr robot-recipes --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-reject-correlation deadbeef:ISSUE_ID --format json",
-        "bv robot-reject-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
+        "bvr --robot-reject-correlation deadbeef:ISSUE_ID --format json",
+        "bvr robot-reject-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
       ],
       "description": "Record negative feedback for a commit-to-bead correlation.",
       "flag": "--robot-reject-correlation deadbeef:ISSUE_ID",
@@ -726,12 +726,12 @@
         "--correlation-by agent",
         "--correlation-reason unrelated"
       ],
-      "preferred_invocation": "bv robot-reject-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
+      "preferred_invocation": "bvr robot-reject-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-related ISSUE_ID --format json",
-        "bv robot-related ISSUE_ID --json"
+        "bvr --robot-related ISSUE_ID --format json",
+        "bvr robot-related ISSUE_ID --json"
       ],
       "description": "Beads related to a specific bead ID.",
       "flag": "--robot-related ISSUE_ID",
@@ -754,12 +754,12 @@
         "--related-max-results 10",
         "--related-include-closed"
       ],
-      "preferred_invocation": "bv robot-related ISSUE_ID --json"
+      "preferred_invocation": "bvr robot-related ISSUE_ID --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-schema --format json",
-        "bv robot-schema --json"
+        "bvr --robot-schema --format json",
+        "bvr robot-schema --json"
       ],
       "description": "JSON Schema definitions for all robot command outputs.",
       "flag": "--robot-schema",
@@ -777,13 +777,13 @@
       "params": [
         "--schema-command robot-triage"
       ],
-      "preferred_invocation": "bv robot-schema --json"
+      "preferred_invocation": "bvr robot-schema --json"
     },
     {
       "accepted_invocations": [
-        "bv --search \"login oauth\" --robot-search --format json",
-        "bv robot-search \"login oauth\" --json",
-        "bv search \"login oauth\" --json"
+        "bvr --search \"login oauth\" --robot-search --format json",
+        "bvr robot-search \"login oauth\" --json",
+        "bvr search \"login oauth\" --json"
       ],
       "description": "Hashed keyword or graph-weighted hybrid search over issue text.",
       "flag": "--robot-search",
@@ -799,12 +799,12 @@
         "--search-min-score SCORE",
         "--search-mode text|hybrid"
       ],
-      "preferred_invocation": "bv robot-search \"login oauth\" --json"
+      "preferred_invocation": "bvr robot-search \"login oauth\" --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-sprint-list --format json",
-        "bv robot-sprint-list --json"
+        "bvr --robot-sprint-list --format json",
+        "bvr robot-sprint-list --json"
       ],
       "description": "List all sprints as JSON.",
       "flag": "--robot-sprint-list",
@@ -814,12 +814,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": true,
-      "preferred_invocation": "bv robot-sprint-list --json"
+      "preferred_invocation": "bvr robot-sprint-list --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-sprint-show SPRINT_ID --format json",
-        "bv robot-sprint-show SPRINT_ID --json"
+        "bvr --robot-sprint-show SPRINT_ID --format json",
+        "bvr robot-sprint-show SPRINT_ID --json"
       ],
       "description": "Show details for a specific sprint.",
       "flag": "--robot-sprint-show SPRINT_ID",
@@ -829,12 +829,12 @@
       "needs_git": false,
       "needs_issues": true,
       "needs_sprint": true,
-      "preferred_invocation": "bv robot-sprint-show SPRINT_ID --json"
+      "preferred_invocation": "bvr robot-sprint-show SPRINT_ID --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-suggest --format json",
-        "bv robot-suggest --suggest-type duplicate --json"
+        "bvr --robot-suggest --format json",
+        "bvr robot-suggest --suggest-type duplicate --json"
       ],
       "description": "Smart suggestions: potential duplicates, missing dependencies, label assignments, cycle warnings.",
       "flag": "--robot-suggest",
@@ -854,12 +854,12 @@
         "--suggest-confidence 0.0-1.0",
         "--suggest-bead ISSUE_ID"
       ],
-      "preferred_invocation": "bv robot-suggest --suggest-type duplicate --json"
+      "preferred_invocation": "bvr robot-suggest --suggest-type duplicate --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-triage --format json",
-        "bv robot-triage --json"
+        "bvr --robot-triage --format json",
+        "bvr robot-triage --json"
       ],
       "description": "Unified triage: top picks, recommendations, quick wins, blockers, project health, velocity.",
       "flag": "--robot-triage",
@@ -879,12 +879,12 @@
       "params": [
         "--graph-root ISSUE_ID"
       ],
-      "preferred_invocation": "bv robot-triage --json"
+      "preferred_invocation": "bvr robot-triage --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-triage-by-label --format json",
-        "bv robot-triage-by-label --json"
+        "bvr --robot-triage-by-label --format json",
+        "bvr robot-triage-by-label --json"
       ],
       "description": "Triage grouped by label for area-focused agents.",
       "flag": "--robot-triage-by-label",
@@ -902,12 +902,12 @@
       "params": [
         "--graph-root ISSUE_ID"
       ],
-      "preferred_invocation": "bv robot-triage-by-label --json"
+      "preferred_invocation": "bvr robot-triage-by-label --json"
     },
     {
       "accepted_invocations": [
-        "bv --robot-triage-by-track --format json",
-        "bv robot-triage-by-track --json"
+        "bvr --robot-triage-by-track --format json",
+        "bvr robot-triage-by-track --json"
       ],
       "description": "Triage grouped by independent parallel execution tracks.",
       "flag": "--robot-triage-by-track",
@@ -925,11 +925,11 @@
       "params": [
         "--graph-root ISSUE_ID"
       ],
-      "preferred_invocation": "bv robot-triage-by-track --json"
+      "preferred_invocation": "bvr robot-triage-by-track --json"
     }
   ],
   "contract_version": "1.0.0",
-  "default_robot_command": "bv --robot-triage",
+  "default_robot_command": "bvr --robot-triage",
   "docs_topics": [
     "guide",
     "commands",
@@ -960,11 +960,11 @@
     "json",
     "toon"
   ],
-  "schema_command": "bv --robot-schema",
+  "schema_command": "bvr --robot-schema",
   "stream_contract": {
     "stderr": "Diagnostics, warnings, and actionable errors.",
     "stdout": "Structured robot data only for robot commands."
   },
-  "tool": "bv",
+  "tool": "bvr",
   "version": "v0.25.0"
 }

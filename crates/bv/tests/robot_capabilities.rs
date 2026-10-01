@@ -104,11 +104,11 @@ fn no_entry_invents_a_status_field() {
 }
 
 #[test]
-fn self_descriptions_name_the_go_tool() {
+fn self_descriptions_name_the_installed_binary() {
     let caps = capabilities();
-    assert_eq!(caps["tool"], "bv");
-    assert_eq!(caps["default_robot_command"], "bv --robot-triage");
-    assert_eq!(caps["schema_command"], "bv --robot-schema");
+    assert_eq!(caps["tool"], "bvr");
+    assert_eq!(caps["default_robot_command"], "bvr --robot-triage");
+    assert_eq!(caps["schema_command"], "bvr --robot-schema");
     assert_eq!(caps["output_formats"], serde_json::json!(["json", "toon"]));
     assert_eq!(caps["version"], "v0.25.0");
     assert_eq!(caps["contract_version"], "1.0.0");
@@ -148,7 +148,7 @@ fn flag_carries_the_placeholder_the_accepted_invocations_use() {
     );
     assert_eq!(
         command(&caps, "robot-related")["preferred_invocation"],
-        "bv robot-related ISSUE_ID --json"
+        "bvr robot-related ISSUE_ID --json"
     );
     // The per-command pre-pass wins over the generic table: `--forecast-sprint
     // <id>` names a sprint, not a bead.
@@ -167,27 +167,30 @@ fn accepted_invocations_use_the_override_lists_where_go_has_them() {
     let caps = capabilities();
 
     // Two entries have an override list that shares no element with the
-    // default `bv <flag> --format json` / `bv <name> ... --json` pair.
+    // default `bvr <flag> --format json` / `bvr <name> ... --json` pair.
     assert_eq!(
         command(&caps, "robot-search")["accepted_invocations"],
         serde_json::json!([
-            "bv --search \"login oauth\" --robot-search --format json",
-            "bv robot-search \"login oauth\" --json",
-            "bv search \"login oauth\" --json",
+            "bvr --search \"login oauth\" --robot-search --format json",
+            "bvr robot-search \"login oauth\" --json",
+            "bvr search \"login oauth\" --json",
         ])
     );
     assert_eq!(
         command(&caps, "robot-help")["accepted_invocations"],
-        serde_json::json!(["bv robot-help --json", "bv robot-docs guide --json"])
+        serde_json::json!(["bvr robot-help --json", "bvr robot-docs guide --json"])
     );
     assert_eq!(
         command(&caps, "robot-drift")["preferred_invocation"],
-        "bv --check-drift --robot-drift --format json"
+        "bvr --check-drift --robot-drift --format json"
     );
     // Everything else gets the two-element default.
     assert_eq!(
         command(&caps, "robot-triage")["accepted_invocations"],
-        serde_json::json!(["bv --robot-triage --format json", "bv robot-triage --json",])
+        serde_json::json!([
+            "bvr --robot-triage --format json",
+            "bvr robot-triage --json",
+        ])
     );
 }
 
@@ -302,23 +305,28 @@ fn agent_intent_aliases_map_near_misses_to_canonical_forms() {
         let keys: Vec<&String> = alias.as_object().expect("object").keys().collect();
         assert_eq!(keys, vec!["agent_instinct", "canonical"]);
     }
-    // Every canonical form must be a real `bv` invocation, never `bvr`.
+    // Every canonical form must name `bvr`, the binary this project installs.
+    // A `bv` here is what Go printed, and an agent that followed it literally
+    // ran a command that does not exist — `install.sh` ships `bvr` alone.
     for alias in aliases {
         let canonical = alias["canonical"].as_str().expect("string");
         assert!(
-            canonical.starts_with("bv ") || canonical.starts_with("bv\t"),
-            "canonical form {canonical:?} does not name the bv tool"
+            canonical.starts_with("bvr ") || canonical.starts_with("bvr\t"),
+            "canonical form {canonical:?} does not name the bvr tool"
         );
+        // Catch a half-rewritten form like `bvr --robot-triage --json` that
+        // still carries a bare `bv` token further along (env prefixes, `bv@`,
+        // or a stale subcommand) rather than only at the head.
         assert!(
-            !canonical.contains("bvr"),
-            "canonical form names bvr: {canonical}"
+            !canonical.split_whitespace().any(|tok| tok == "bv"),
+            "canonical form still names the Go tool: {canonical}"
         );
     }
     assert_eq!(
         aliases[0],
         serde_json::json!({
-            "agent_instinct": "bv --json",
-            "canonical": "bv --robot-triage --format json",
+            "agent_instinct": "bvr --json",
+            "canonical": "bvr --robot-triage --format json",
         })
     );
 }

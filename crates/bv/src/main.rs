@@ -1565,11 +1565,11 @@ fn main() -> ExitCode {
 
     // --version handled before validation (Go parity). Go prints
     // "bv <version>" from `pkg/version`, whose fallback at the parity commit
-    // is v0.25.0 — the same string the envelope already carries. Printing the
-    // Rust crate's own name and version here would make `--version` the one
-    // place the binary contradicts its own output.
+    // is v0.25.0 — the same string the envelope already carries. `--version`
+    // reports the emulated tool's identity, not the binary's own name, so it
+    // uses VERSION_PROGRAM rather than the HELP_PROGRAM the help page prints.
     if args.iter().any(|a| a == "--version") {
-        println!("{} {}", flags::HELP_PROGRAM, GO_APP_VERSION);
+        println!("{} {}", flags::VERSION_PROGRAM, GO_APP_VERSION);
         return ExitCode::from(0);
     }
 
@@ -1648,7 +1648,7 @@ fn main() -> ExitCode {
         match argv::suggest_closest_flag(&unknown) {
             Some(suggestion) => {
                 eprintln!(
-                    "unknown flag: --{unknown}\nDid you mean `{}`?\nRun `bv --help` for all flags or `bv --robot-help` for agent-focused docs.",
+                    "unknown flag: --{unknown}\nDid you mean `{}`?\nRun `bvr --help` for all flags or `bvr --robot-help` for agent-focused docs.",
                     argv::corrected_unknown_flag_command(&args, &unknown, &suggestion)
                 );
             }
@@ -2675,7 +2675,7 @@ fn main() -> ExitCode {
                 "show_top": export_top_actions.show.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
                 "list_ready": "",
                 "list_blocked": "",
-                "refresh_triage": "bv --robot-triage",
+                "refresh_triage": "bvr --robot-triage",
             });
             // Which analysis the export's TRIAGE ran under — the same branch
             // `ComputeTriageWithOptions` takes (triage.go:503-512). Both the
@@ -4394,7 +4394,7 @@ fn run_pages_steps_5_to_7(
         println!("║  Bundle: {path:<40}║");
         println!("║                                                  ║");
         println!("║  To preview:                                     ║");
-        println!("║    bv --preview-pages {path:<27}║");
+        println!("║    bvr --preview-pages {path:<26}║");
         println!("╚══════════════════════════════════════════════════╝");
         println!();
         return ExitCode::from(0);
@@ -4498,7 +4498,7 @@ fn git_init_and_push(
         ("Staging files", vec!["add", "."]),
         (
             "Creating commit",
-            vec!["commit", "-m", "Deploy static site via bv --pages"],
+            vec!["commit", "-m", "Deploy static site via bvr --pages"],
         ),
         ("Setting main branch", vec!["branch", "-M", "main"]),
         ("Adding remote", vec!["remote", "add", "origin", remote_url]),
@@ -4839,7 +4839,7 @@ where
     println!("  → Press Ctrl+C to stop");
     println!();
     println!("To preview with auto-refresh, run in another terminal:");
-    println!("  bv --preview-pages {out_dir}");
+    println!("  bvr --preview-pages {out_dir}");
     println!();
 
     install_stop_handler();
@@ -6329,7 +6329,7 @@ fn run_robot_triage() -> ExitCode {
     // from the live tracker route's `actions`. `show_top`/`claim_top` are the
     // tracker's shell strings (empty when no route is established) and
     // `list_ready`/`list_blocked` are always empty — there is no unique route
-    // to name. `refresh_triage` is literally "bv --robot-triage".
+    // to name. `refresh_triage` is literally "bvr --robot-triage".
     let top_id = out
         .recommendations
         .first()
@@ -6341,7 +6341,7 @@ fn run_robot_triage() -> ExitCode {
         "show_top": top_actions.show.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
         "list_ready": "",
         "list_blocked": "",
-        "refresh_triage": "bv --robot-triage",
+        "refresh_triage": "bvr --robot-triage",
     });
 
     let mut env = bv_robot::RobotEnvelope::new(
@@ -7243,7 +7243,7 @@ fn run_baseline_info() -> ExitCode {
     let path = baseline.as_path();
     if !path.exists() {
         println!("No baseline found.");
-        println!("Create one with: bv --save-baseline \"description\"");
+        println!("Create one with: bvr --save-baseline \"description\"");
         return ExitCode::from(0);
     }
     let raw = match std::fs::read_to_string(path) {
@@ -9722,7 +9722,7 @@ mod pages_deploy_git_tests {
         // The commit message is part of the contract — it is what a reader of
         // the deployed repository's history sees.
         let log = git(&remote, &["log", "--format=%s", "-1", "main"]);
-        assert_eq!(log, "Deploy static site via bv --pages");
+        assert_eq!(log, "Deploy static site via bvr --pages");
 
         // The bundle's files, not just an empty commit.
         let tree = git(&remote, &["ls-tree", "--name-only", "main"]);
@@ -10284,7 +10284,7 @@ fn build_robot_insights() -> Result<serde_json::Value, ExitCode> {
         "jq '.Slack[:5]' - Nodes with slack (good parallel work candidates)",
         "jq '.Cycles | length' - Count of detected cycles",
         "jq '.advanced_insights.cycle_break' - Cycle break suggestions (bv-181)",
-        "BV_INSIGHTS_MAP_LIMIT=50 bv --robot-insights - Reduce map sizes",
+        "BV_INSIGHTS_MAP_LIMIT=50 bvr --robot-insights - Reduce map sizes",
     ]);
 
     Ok(payload)
@@ -13268,7 +13268,7 @@ fn run_robot_alerts() -> ExitCode {
                 "delta": sug - cur,
                 "details": rec["reasoning"].clone(),
                 "detected_at": detected_at.clone(),
-                "suggested_action": format!("Review with bv --robot-priority; if it holds, set the priority to P{sug}"),
+                "suggested_action": format!("Review with bvr --robot-priority; if it holds, set the priority to P{sug}"),
             });
             if cur != 0 {
                 alert["baseline_value"] = serde_json::json!(cur);
@@ -13434,7 +13434,7 @@ fn run_robot_alerts() -> ExitCode {
         "--severity=warning --alert-type=stale_issue   # stale warnings only",
         "--alert-type=blocking_cascade                 # high-unblock opportunities",
         "--alert-type=high_impact_unblock|abandoned_claim|potential_duplicate|priority_mismatch|velocity_drop   # proactive checks (no baseline needed)",
-        "--alert-type=new_cycle|density_growth|node_count_change|edge_count_change|scope_creep|blocked_increase|actionable_change|pagerank_change   # drift vs saved baseline (bv --save-baseline)",
+        "--alert-type=new_cycle|density_growth|node_count_change|edge_count_change|scope_creep|blocked_increase|actionable_change|pagerank_change   # drift vs saved baseline (bvr --save-baseline)",
         "--alert-label=backend                        # only alerts on issues carrying that label",
         "jq '.alerts | map({issue_id, type, suggested_action})'   # what to do about each",
         "thresholds: .bv/drift.yaml; every key and its default is listed in the README 'Alerts System' table",
@@ -16400,7 +16400,7 @@ fn run_emit_script(args: &[String]) -> ExitCode {
         }
     }
     sb.push_str(&format!(
-        "# Generated by bv --emit-script at {}\n",
+        "# Generated by bvr --emit-script at {}\n",
         jiff_now()
     ));
     sb.push_str(&format!("# Data hash: {data_hash}\n"));
@@ -18203,31 +18203,31 @@ fn robot_command_argument_suffix(command_name: &str, doc: &RobotCommandDoc) -> S
 /// Go's `""` — the zero value meaning "fall through to the default form".
 fn preferred_robot_invocation_override(command_name: &str) -> Option<&'static str> {
     Some(match command_name {
-        "robot-help" => "bv robot-help --json",
-        "robot-search" => "bv robot-search \"login oauth\" --json",
-        "robot-diff" => "bv robot-diff HEAD~1 --json",
-        "robot-history" => "bv robot-history --history-limit 20 --json",
-        "robot-alerts" => "bv robot-alerts --severity critical --json",
-        "robot-suggest" => "bv robot-suggest --suggest-type duplicate --json",
-        "robot-label-attention" => "bv robot-label-attention --attention-limit 5 --json",
-        "robot-graph" => "bv robot-graph mermaid --json",
-        "robot-orphans" => "bv robot-orphans --orphans-min-score 30 --json",
-        "robot-explain-correlation" => "bv robot-explain-correlation deadbeef:ISSUE_ID --json",
+        "robot-help" => "bvr robot-help --json",
+        "robot-search" => "bvr robot-search \"login oauth\" --json",
+        "robot-diff" => "bvr robot-diff HEAD~1 --json",
+        "robot-history" => "bvr robot-history --history-limit 20 --json",
+        "robot-alerts" => "bvr robot-alerts --severity critical --json",
+        "robot-suggest" => "bvr robot-suggest --suggest-type duplicate --json",
+        "robot-label-attention" => "bvr robot-label-attention --attention-limit 5 --json",
+        "robot-graph" => "bvr robot-graph mermaid --json",
+        "robot-orphans" => "bvr robot-orphans --orphans-min-score 30 --json",
+        "robot-explain-correlation" => "bvr robot-explain-correlation deadbeef:ISSUE_ID --json",
         "robot-confirm-correlation" => {
-            "bv robot-confirm-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
+            "bvr robot-confirm-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
         }
         "robot-reject-correlation" => {
-            "bv robot-reject-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
+            "bvr robot-reject-correlation deadbeef:ISSUE_ID --correlation-by agent --json"
         }
-        "robot-file-beads" => "bv robot-file-beads README.md --json",
-        "robot-file-relations" => "bv robot-file-relations README.md --json",
-        "robot-related" => "bv robot-related ISSUE_ID --json",
-        "robot-blocker-chain" => "bv robot-blocker-chain ISSUE_ID --json",
-        "robot-causality" => "bv robot-causality ISSUE_ID --json",
-        "robot-forecast" => "bv robot-forecast all --json",
-        "robot-burndown" => "bv robot-burndown current --json",
-        "robot-drift" => "bv --check-drift --robot-drift --format json",
-        "robot-impact" => "bv robot-impact README.md --json",
+        "robot-file-beads" => "bvr robot-file-beads README.md --json",
+        "robot-file-relations" => "bvr robot-file-relations README.md --json",
+        "robot-related" => "bvr robot-related ISSUE_ID --json",
+        "robot-blocker-chain" => "bvr robot-blocker-chain ISSUE_ID --json",
+        "robot-causality" => "bvr robot-causality ISSUE_ID --json",
+        "robot-forecast" => "bvr robot-forecast all --json",
+        "robot-burndown" => "bvr robot-burndown current --json",
+        "robot-drift" => "bvr --check-drift --robot-drift --format json",
+        "robot-impact" => "bvr robot-impact README.md --json",
         _ => return None,
     })
 }
@@ -18238,19 +18238,19 @@ fn preferred_robot_invocation_override(command_name: &str) -> Option<&'static st
 /// neither of which is the `--flag --format json` form).
 fn accepted_robot_invocation_overrides(command_name: &str) -> Option<&'static [&'static str]> {
     Some(match command_name {
-        "robot-help" => &["bv robot-help --json", "bv robot-docs guide --json"],
+        "robot-help" => &["bvr robot-help --json", "bvr robot-docs guide --json"],
         "robot-search" => &[
-            "bv --search \"login oauth\" --robot-search --format json",
-            "bv robot-search \"login oauth\" --json",
-            "bv search \"login oauth\" --json",
+            "bvr --search \"login oauth\" --robot-search --format json",
+            "bvr robot-search \"login oauth\" --json",
+            "bvr search \"login oauth\" --json",
         ],
         "robot-diff" => &[
-            "bv --robot-diff --diff-since HEAD~1 --format json",
-            "bv robot-diff HEAD~1 --json",
+            "bvr --robot-diff --diff-since HEAD~1 --format json",
+            "bvr robot-diff HEAD~1 --json",
         ],
         "robot-drift" => &[
-            "bv --check-drift --robot-drift --format json",
-            "bv robot-drift --json",
+            "bvr --check-drift --robot-drift --format json",
+            "bvr robot-drift --json",
         ],
         _ => return None,
     })
@@ -18262,7 +18262,7 @@ fn preferred_robot_invocation(command_name: &str, doc: &RobotCommandDoc) -> Stri
         return override_invocation.to_string();
     }
     format!(
-        "bv {}{} --json",
+        "bvr {}{} --json",
         command_name,
         robot_command_argument_suffix(command_name, doc)
     )
@@ -18275,7 +18275,7 @@ fn accepted_robot_invocations(command_name: &str, doc: &RobotCommandDoc) -> Vec<
     }
     vec![
         format!(
-            "bv {} --format json",
+            "bvr {} --format json",
             robot_flag_example_form_for_command(command_name, doc.flag)
         ),
         preferred_robot_invocation(command_name, doc),
@@ -18294,59 +18294,62 @@ fn robot_example_forms_for_command(command_name: &str, values: &[&str]) -> Vec<S
 /// an agent is likely to try, each mapped to its canonical form.
 fn agent_intent_alias_docs() -> Vec<serde_json::Value> {
     const ALIASES: &[(&str, &str)] = &[
-        ("bv --json", "bv --robot-triage --format json"),
-        ("bv robot-triage --json", "bv --robot-triage --format json"),
-        ("bv triage --json", "bv --robot-triage --format json"),
-        ("bv next --json", "bv --robot-next --format json"),
-        ("bv plan --json", "bv --robot-plan --format json"),
-        ("bv insights --json", "bv --robot-insights --format json"),
+        ("bvr --json", "bvr --robot-triage --format json"),
         (
-            "bv robot-capabilities --json",
-            "bv --robot-capabilities --format json",
+            "bvr robot-triage --json",
+            "bvr --robot-triage --format json",
+        ),
+        ("bvr triage --json", "bvr --robot-triage --format json"),
+        ("bvr next --json", "bvr --robot-next --format json"),
+        ("bvr plan --json", "bvr --robot-plan --format json"),
+        ("bvr insights --json", "bvr --robot-insights --format json"),
+        (
+            "bvr robot-capabilities --json",
+            "bvr --robot-capabilities --format json",
         ),
         (
-            "bv capabilities --json",
-            "bv --robot-capabilities --format json",
+            "bvr capabilities --json",
+            "bvr --robot-capabilities --format json",
         ),
         (
-            "bv robot-docs guide --json",
-            "bv --robot-docs guide --format json",
+            "bvr robot-docs guide --json",
+            "bvr --robot-docs guide --format json",
         ),
         (
-            "bv docs guide --json",
-            "bv --robot-docs guide --format json",
+            "bvr docs guide --json",
+            "bvr --robot-docs guide --format json",
         ),
         (
-            "bv robot-schema triage --json",
-            "bv --robot-schema --schema-command robot-triage --format json",
+            "bvr robot-schema triage --json",
+            "bvr --robot-schema --schema-command robot-triage --format json",
         ),
         (
-            "bv schema triage --json",
-            "bv --robot-schema --schema-command robot-triage --format json",
+            "bvr schema triage --json",
+            "bvr --robot-schema --schema-command robot-triage --format json",
         ),
         (
-            "bv robot-search login oauth --json --limit 5",
-            "bv --search 'login oauth' --robot-search --format json --search-limit 5",
+            "bvr robot-search login oauth --json --limit 5",
+            "bvr --search 'login oauth' --robot-search --format json --search-limit 5",
         ),
         (
-            "bv search login oauth --json --limit 5",
-            "bv --search 'login oauth' --robot-search --format json --search-limit 5",
+            "bvr search login oauth --json --limit 5",
+            "bvr --search 'login oauth' --robot-search --format json --search-limit 5",
         ),
         (
-            "bv robot-graph mermaid --json",
-            "bv --robot-graph --graph-format mermaid --format json",
+            "bvr robot-graph mermaid --json",
+            "bvr --robot-graph --graph-format mermaid --format json",
         ),
         (
-            "bv graph mermaid --json",
-            "bv --robot-graph --graph-format mermaid --format json",
+            "bvr graph mermaid --json",
+            "bvr --robot-graph --graph-format mermaid --format json",
         ),
         (
-            "bv robot-related bv-123 --json",
-            "bv --robot-related bv-123 --format json",
+            "bvr robot-related bv-123 --json",
+            "bvr --robot-related bv-123 --format json",
         ),
         (
-            "bv --name backend --json",
-            "bv --label backend --robot-triage --format json",
+            "bvr --name backend --json",
+            "bvr --label backend --robot-triage --format json",
         ),
     ];
     ALIASES
@@ -18466,7 +18469,7 @@ fn run_robot_capabilities() -> ExitCode {
     );
     payload.insert(
         "default_robot_command".into(),
-        serde_json::json!("bv --robot-triage"),
+        serde_json::json!("bvr --robot-triage"),
     );
     payload.insert("docs_topics".into(), serde_json::json!(robot_docs_topics()));
     payload.insert("environment_variables".into(), robot_env_vars());
@@ -18475,7 +18478,7 @@ fn run_robot_capabilities() -> ExitCode {
     payload.insert("output_formats".into(), serde_json::json!(["json", "toon"]));
     payload.insert(
         "schema_command".into(),
-        serde_json::json!("bv --robot-schema"),
+        serde_json::json!("bvr --robot-schema"),
     );
     payload.insert(
         "stream_contract".into(),
@@ -18484,7 +18487,12 @@ fn run_robot_capabilities() -> ExitCode {
             "stdout": "Structured robot data only for robot commands.",
         }),
     );
-    payload.insert("tool".into(), serde_json::json!("bv"));
+    // The manifest tells an agent which binary it is talking to. Go printed
+    // `bv`; this port installs as `bvr` (install.sh), so `bv` would send the
+    // agent to a command that does not exist. The `version` below stays Go's
+    // `v0.25.0` — that one is the emulated-tool identity the envelope and the
+    // frozen goldens agree on.
+    payload.insert("tool".into(), serde_json::json!("bvr"));
     payload.insert("version".into(), serde_json::json!(GO_APP_VERSION));
     emit_json(&serde_json::Value::Object(payload))
 }

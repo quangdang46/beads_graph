@@ -21,6 +21,29 @@
 //! continuously as work lands. The two cases that read git HEAD are detected
 //! and classified automatically (see [`Inapplicable::HeadDrift`]) rather than
 //! being carried as an open-ended exemption.
+//!
+//! # Program-name divergence (deliberate, 2026-10-01)
+//!
+//! This binary installs as `bvr`; the Go original installs as `bv`. Go prints
+//! `bv` in the strings below, so an agent that followed them literally ran a
+//! command this project does not ship and got `command not found` — the same
+//! dead end `--help` had. They now say `bvr` in *both* the Rust source and the
+//! goldens:
+//!
+//! - `refresh_triage` (robot-triage)
+//! - `suggested_action` (robot-alerts)
+//! - the `robot-help` description (robot-schema)
+//! - the `BV_INSIGHTS_MAP_LIMIT` jq recipe (robot-insights)
+//! - the drift hint and cycle-break advice (robot-alerts)
+//!
+//! The cost is deliberate and worth stating plainly: those fields are no
+//! longer evidence of Go parity, because the goldens for them now record this
+//! port's own output. A future Go-parity drift confined to one of them would
+//! pass unnoticed. Every other field in the corpus is still a real oracle
+//! comparison. The `bv` strings that remain in `golden/` are this repo's own
+//! git history — past commit messages and past `AGENTS.md` content, including
+//! upstream's `go install .../beads_viewer/cmd/bv@latest` line — which this
+//! gate reads rather than produces, and which therefore cannot be rewritten.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};

@@ -151,7 +151,10 @@ fn robot_capabilities_reports_the_fields_go_emits() {
         assert!(parsed.get(key).is_some(), "missing manifest key: {key}");
     }
     // `tool` is the Go binary name; the port must not rename it to bvr.
-    assert_eq!(parsed["tool"], "bv", "Go's manifest says bv");
+    assert_eq!(
+        parsed["tool"], "bvr",
+        "the manifest names the binary this port installs"
+    );
 
     let commands = parsed["commands"].as_array().expect("commands array");
     assert!(!commands.is_empty());

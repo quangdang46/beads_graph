@@ -475,7 +475,7 @@ fn write_status_summary(b: &mut String, input: &ReadmeInput) {
 fn write_footer(b: &mut String, input: &ReadmeInput) {
     b.push_str("---\n\n");
     b.push_str(&format!(
-        "*Generated {} by [bv](https://github.com/Dicklesworthstone/beads_viewer)*\n\n",
+        "*Generated {} by [bvr](https://github.com/quangdang46/beads_viewer_rust)*\n\n",
         go_readable_timestamp(input.now)
     ));
     if !input.pages_url.is_empty() {
@@ -618,7 +618,7 @@ mod tests {
         let mut rendered = render_readme(&input);
         let footer_at = rendered.find("*Generated ").unwrap();
         let stamp = go_readable_timestamp_in(input.now, &jiff::tz::TimeZone::UTC);
-        rendered.replace_range(footer_at.., &format!("*Generated {stamp} by [bv](https://github.com/Dicklesworthstone/beads_viewer)*\n\n"));
+        rendered.replace_range(footer_at.., &format!("*Generated {stamp} by [bvr](https://github.com/quangdang46/beads_viewer_rust)*\n\n"));
         assert_eq!(
             rendered,
             concat!(
@@ -633,7 +633,7 @@ mod tests {
                 "**By Priority:** P0: 2 | P1: 22 | P2: 13 | P3: 9\n\n",
                 "**By Type:** chore: 1 | epic: 1 | feature: 2 | task: 42\n\n",
                 "---\n\n",
-                "*Generated Sep 28, 2026 at 2:55 PM UTC by [bv](https://github.com/Dicklesworthstone/beads_viewer)*\n\n",
+                "*Generated Sep 28, 2026 at 2:55 PM UTC by [bvr](https://github.com/quangdang46/beads_viewer_rust)*\n\n",
             ),
             "569-byte oracle output"
         );

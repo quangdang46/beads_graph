@@ -29,7 +29,7 @@ pub enum ValidationError {
     /// consume, and `enrichFlagParseError` (cmd/bv/main.go:1269-1271) appends the
     /// recovery line. Rust accepted the bare flag instead and ran the command
     /// with an empty value — `--export-md` with no argument wrote `report.md`.
-    #[error("flag needs an argument: --{flag}\nUse --{flag} VALUE. Run `bv --help` for all flags or `bv --robot-help` for agent-focused docs.")]
+    #[error("flag needs an argument: --{flag}\nUse --{flag} VALUE. Run `bvr --help` for all flags or `bvr --robot-help` for agent-focused docs.")]
     MissingFlagArgument { flag: String },
 }
 

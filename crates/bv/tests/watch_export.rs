@@ -155,7 +155,7 @@ fn watch_banner_matches_go_and_names_the_discovered_source() {
         assert!(text.contains(line), "missing banner line {line:?}:\n{text}");
     }
     assert!(
-        text.contains(&format!("  bv --preview-pages {}", out_dir.display())),
+        text.contains(&format!("  bvr --preview-pages {}", out_dir.display())),
         "preview hint must name the export dir:\n{text}"
     );
 

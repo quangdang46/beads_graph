@@ -28,17 +28,17 @@ This project uses a Beads tracker—either the Go `bd` CLI or the Rust `br` CLI�
 
 **Choose the tracker CLI from this repository's instructions and configuration.** Use `bd` commands in a Go Beads workspace and `br` commands in a beads_rust workspace. Do not run both trackers against the same workspace or infer the tracker solely from the JSONL filename.
 
-### Using bv as an AI sidecar
+### Using bvr as an AI sidecar
 
-bv is a graph-aware triage engine for Beads projects. Instead of parsing .beads/issues.jsonl / .beads/beads.jsonl directly or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
+bvr is a graph-aware triage engine for Beads projects. Instead of parsing .beads/issues.jsonl / .beads/beads.jsonl directly or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
 
-**Scope boundary:** bv handles *what to work on* (triage, priority, planning). The selected tracker CLI (`bd` or `br`) handles creating, claiming, modifying, and closing beads.
+**Scope boundary:** bvr handles *what to work on* (triage, priority, planning). The selected tracker CLI (`bd` or `br`) handles creating, claiming, modifying, and closing beads.
 
-**CRITICAL: Use ONLY --robot-* flags. Bare bv launches an interactive TUI that blocks your session.**
+**CRITICAL: Use ONLY --robot-* flags. Bare bvr launches an interactive TUI that blocks your session.**
 
 #### The Workflow: Start With Triage
 
-**`bv --robot-triage` is your single entry point.** Its `triage` object contains:
+**`bvr --robot-triage` is your single entry point.** Its `triage` object contains:
 - `quick_ref`: at-a-glance counts + top 3 picks
 - `recommendations`: ranked actionable items with scores, reasons, unblock info
 - `quick_wins`: low-effort high-impact items
@@ -47,8 +47,8 @@ bv is a graph-aware triage engine for Beads projects. Instead of parsing .beads/
 - `commands`: copy-paste shell commands for next steps
 
 ```bash
-bv --robot-triage        # THE MEGA-COMMAND: start here
-bv --robot-next          # Minimal: just the single top pick + claim command
+bvr --robot-triage        # THE MEGA-COMMAND: start here
+bvr --robot-next          # Minimal: just the single top pick + claim command
 
 # TOON output (--format toon): a compact tabular encoding. Measured on this
 # repository it is 7% smaller than JSON for --robot-graph but 9-15% LARGER for
@@ -57,13 +57,13 @@ bv --robot-next          # Minimal: just the single top pick + claim command
 # TOON encoding shells out to the tru binary. With no encoder installed,
 # --format toon prints a fallback warning, emits JSON with output_format "json",
 # and --stats prints no sizes at all.
-bv --robot-graph --format toon
-bv --robot-triage --format toon --stats
+bvr --robot-graph --format toon
+bvr --robot-triage --format toon --stats
 ```
 
 Recommendations can include blocked or assigned work; `triage.quick_ref.top_picks` reflects snapshot readiness. A suggested action records its original local ID, working directory, and tracker route. Use that route rather than a namespaced display ID or an unrelated current directory. Inspect current tracker state before execution: analysis does not reserve work or guarantee that a later claim succeeds.
 
-#### Other bv Commands
+#### Other bvr Commands
 
 | Command | Returns |
 |---------|---------|
@@ -75,15 +75,15 @@ Recommendations can include blocked or assigned work; `triage.quick_ref.top_pick
 | `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues |
 | `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
 
-Robot analysis commands default to JSON; `--format toon` selects TOON, and `--robot-help` defaults to text. In JSON mode, `--graph-format=dot` or `mermaid` puts diagram text in the `graph` field (`bv --robot-graph --graph-format=dot | jq -r .graph`).
+Robot analysis commands default to JSON; `--format toon` selects TOON, and `--robot-help` defaults to text. In JSON mode, `--graph-format=dot` or `mermaid` puts diagram text in the `graph` field (`bvr --robot-graph --graph-format=dot | jq -r .graph`).
 
 #### Scoping & Filtering
 
 ```bash
-bv --robot-plan --label backend              # Scope to label's subgraph
-bv --robot-insights --as-of HEAD~30          # Historical point-in-time
-bv --recipe actionable --robot-plan          # Pre-filter: ready to work (no blockers)
-bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
+bvr --robot-plan --label backend              # Scope to label's subgraph
+bvr --robot-insights --as-of HEAD~30          # Historical point-in-time
+bvr --recipe actionable --robot-plan          # Pre-filter: ready to work (no blockers)
+bvr --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
 ```
 
 ### Tracker Commands for Issue Management
@@ -122,7 +122,7 @@ bd export -o .beads/issues.jsonl        # Refresh the compatibility export read 
 
 ### Workflow Pattern
 
-1. **Triage**: Run `bv --robot-triage` to find the highest-impact actionable work
+1. **Triage**: Run `bvr --robot-triage` to find the highest-impact actionable work
 2. **Verify**: Check the selected tracker's `show`/`ready` output before claiming
 3. **Claim**: Use `br update <id> --claim --json` or `bd update <id> --claim --json`
 4. **Work**: Implement the task
@@ -159,18 +159,18 @@ pub fn contains_any_blurb(content: &str) -> bool {
 }
 
 /// Check if content contains a legacy blurb (pre-v4).
-/// Requires ALL patterns: the v3 blurb has "### Using bv as an AI sidecar"
-/// but NOT "bv already computes the hard parts" — that's the key
+/// Requires ALL patterns: the v3 blurb has "### Using bvr as an AI sidecar"
+/// but NOT "bvr already computes the hard parts" — that's the key
 /// differentiator that makes the check reliable. Any v3 blurb (with `bv`
 /// commands instead of `bvr`) is now treated as outdated: `needs_upgrade`
 /// fires on version mismatch, and `update_blurb` strips the old section by
 /// its markers.
 pub fn contains_legacy_blurb(content: &str) -> bool {
     let patterns = [
-        "### Using bv as an AI sidecar",
+        "### Using bvr as an AI sidecar",
         "--robot-insights",
         "--robot-plan",
-        "bv already computes the hard parts",
+        "bvr already computes the hard parts",
     ];
     let matches = patterns.iter().filter(|p| content.contains(*p)).count();
     matches == patterns.len()
@@ -197,7 +197,7 @@ pub fn get_blurb_version(content: &str) -> i32 {
 pub fn update_blurb(content: &str) -> String {
     // Remove everything that looks like a blurb — any versioned markers plus
     // legacy content. The legacy blurb contains patterns not in v3+:
-    // "bv already computes the hard parts" is the key differentiator.
+    // "bvr already computes the hard parts" is the key differentiator.
     let mut cleaned = content.to_string();
 
     // Remove any marker-wrapped section (any version, not just current).
@@ -377,7 +377,7 @@ mod tests {
         assert!(get_blurb_version(v3) < BLURB_VERSION);
         let upgraded = update_blurb(v3);
         assert!(verify_blurb_present(&upgraded));
-        assert!(upgraded.contains("bv --robot-triage"));
+        assert!(upgraded.contains("bvr --robot-triage"));
         assert!(!upgraded.contains("bv-agent-instructions-v3"));
     }
 

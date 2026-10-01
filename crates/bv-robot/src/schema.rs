@@ -1840,7 +1840,7 @@ fn help_schema() -> Value {
     json!({
         "$schema": DRAFT,
         "title": "Robot Help Output",
-        "description": "Machine-readable guide output emitted by the agent-friendly `bv robot-help --json` invocation",
+        "description": "Machine-readable guide output emitted by the agent-friendly `bvr robot-help --json` invocation",
         "type": "object",
         "additionalProperties": false,
         "properties": {

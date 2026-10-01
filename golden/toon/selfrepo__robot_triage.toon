@@ -113,7 +113,7 @@ triage:
     show_top: ""
     list_ready: ""
     list_blocked: ""
-    refresh_triage: bv --robot-triage
+    refresh_triage: bvr --robot-triage
 feedback:
   enabled: true
   applied: false

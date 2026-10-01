@@ -172,17 +172,17 @@ pub fn commands_doc() -> Value {
 
 fn guide_doc() -> Value {
     json!({
-        "description": "bv (Beads Viewer) provides structural analysis of the beads issue tracker DAG. It is the primary interface for AI agents to understand project state, plan work, and discover high-impact tasks.",
+        "description": "bvr (Beads Viewer) provides structural analysis of the beads issue tracker DAG. It is the primary interface for AI agents to understand project state, plan work, and discover high-impact tasks.",
         "quickstart": [
-            "bv robot-triage --json           # Full triage with recommendations",
-            "bv robot-next --json             # Single top pick plus claim/show commands",
-            "bv robot-plan --json             # Dependency-respecting execution plan",
-            "bv robot-insights --json         # Deep graph analysis (PageRank, betweenness, etc.)",
-            "bv robot-triage-by-track --json  # Parallel work streams for multi-agent coordination",
-            "bv robot-capabilities --json     # Machine-readable command manifest",
-            "bv robot-schema --json           # JSON Schema definitions for all commands",
-            "bv triage --json                 # Short alias for robot-triage",
-            "bv capabilities --json           # Short alias for robot-capabilities",
+            "bvr robot-triage --json           # Full triage with recommendations",
+            "bvr robot-next --json             # Single top pick plus claim/show commands",
+            "bvr robot-plan --json             # Dependency-respecting execution plan",
+            "bvr robot-insights --json         # Deep graph analysis (PageRank, betweenness, etc.)",
+            "bvr robot-triage-by-track --json  # Parallel work streams for multi-agent coordination",
+            "bvr robot-capabilities --json     # Machine-readable command manifest",
+            "bvr robot-schema --json           # JSON Schema definitions for all commands",
+            "bvr triage --json                 # Short alias for robot-triage",
+            "bvr capabilities --json           # Short alias for robot-capabilities",
         ],
         "data_source": ".beads/beads.jsonl, .beads/issues.jsonl, or BEADS_DB plus git history (correlations)",
         "output_modes": {
@@ -190,40 +190,40 @@ fn guide_doc() -> Value {
             "toon": "Tabular notation; measured smaller than JSON only for wide payloads such as --robot-graph (~7%), and 9-15% larger for nested ones (--robot-triage, --robot-plan, --robot-insights, --robot-label-health). See tests/artifacts/perf/toon_vs_json.md and check --stats before adopting it.",
         },
         "agent_intent_aliases": [
-            {"agent_instinct": "bv --json", "canonical": "bv --robot-triage --format json"},
-            {"agent_instinct": "bv robot-triage --json", "canonical": "bv --robot-triage --format json"},
-            {"agent_instinct": "bv triage --json", "canonical": "bv --robot-triage --format json"},
-            {"agent_instinct": "bv next --json", "canonical": "bv --robot-next --format json"},
-            {"agent_instinct": "bv plan --json", "canonical": "bv --robot-plan --format json"},
-            {"agent_instinct": "bv insights --json", "canonical": "bv --robot-insights --format json"},
-            {"agent_instinct": "bv robot-capabilities --json", "canonical": "bv --robot-capabilities --format json"},
-            {"agent_instinct": "bv capabilities --json", "canonical": "bv --robot-capabilities --format json"},
-            {"agent_instinct": "bv robot-docs guide --json", "canonical": "bv --robot-docs guide --format json"},
-            {"agent_instinct": "bv docs guide --json", "canonical": "bv --robot-docs guide --format json"},
-            {"agent_instinct": "bv robot-schema triage --json", "canonical": "bv --robot-schema --schema-command robot-triage --format json"},
-            {"agent_instinct": "bv schema triage --json", "canonical": "bv --robot-schema --schema-command robot-triage --format json"},
-            {"agent_instinct": "bv robot-search login oauth --json --limit 5", "canonical": "bv --search 'login oauth' --robot-search --format json --search-limit 5"},
-            {"agent_instinct": "bv search login oauth --json --limit 5", "canonical": "bv --search 'login oauth' --robot-search --format json --search-limit 5"},
-            {"agent_instinct": "bv robot-graph mermaid --json", "canonical": "bv --robot-graph --graph-format mermaid --format json"},
-            {"agent_instinct": "bv graph mermaid --json", "canonical": "bv --robot-graph --graph-format mermaid --format json"},
-            {"agent_instinct": "bv robot-related bv-123 --json", "canonical": "bv --robot-related bv-123 --format json"},
-            {"agent_instinct": "bv --name backend --json", "canonical": "bv --label backend --robot-triage --format json"},
+            {"agent_instinct": "bvr --json", "canonical": "bvr --robot-triage --format json"},
+            {"agent_instinct": "bvr robot-triage --json", "canonical": "bvr --robot-triage --format json"},
+            {"agent_instinct": "bvr triage --json", "canonical": "bvr --robot-triage --format json"},
+            {"agent_instinct": "bvr next --json", "canonical": "bvr --robot-next --format json"},
+            {"agent_instinct": "bvr plan --json", "canonical": "bvr --robot-plan --format json"},
+            {"agent_instinct": "bvr insights --json", "canonical": "bvr --robot-insights --format json"},
+            {"agent_instinct": "bvr robot-capabilities --json", "canonical": "bvr --robot-capabilities --format json"},
+            {"agent_instinct": "bvr capabilities --json", "canonical": "bvr --robot-capabilities --format json"},
+            {"agent_instinct": "bvr robot-docs guide --json", "canonical": "bvr --robot-docs guide --format json"},
+            {"agent_instinct": "bvr docs guide --json", "canonical": "bvr --robot-docs guide --format json"},
+            {"agent_instinct": "bvr robot-schema triage --json", "canonical": "bvr --robot-schema --schema-command robot-triage --format json"},
+            {"agent_instinct": "bvr schema triage --json", "canonical": "bvr --robot-schema --schema-command robot-triage --format json"},
+            {"agent_instinct": "bvr robot-search login oauth --json --limit 5", "canonical": "bvr --search 'login oauth' --robot-search --format json --search-limit 5"},
+            {"agent_instinct": "bvr search login oauth --json --limit 5", "canonical": "bvr --search 'login oauth' --robot-search --format json --search-limit 5"},
+            {"agent_instinct": "bvr robot-graph mermaid --json", "canonical": "bvr --robot-graph --graph-format mermaid --format json"},
+            {"agent_instinct": "bvr graph mermaid --json", "canonical": "bvr --robot-graph --graph-format mermaid --format json"},
+            {"agent_instinct": "bvr robot-related bv-123 --json", "canonical": "bvr --robot-related bv-123 --format json"},
+            {"agent_instinct": "bvr --name backend --json", "canonical": "bvr --label backend --robot-triage --format json"},
         ],
     })
 }
 
 fn examples_doc() -> Value {
     json!([
-        {"description": "Get top 3 picks for immediate work", "command": "bv robot-triage --json | jq '.triage.quick_ref.top_picks[:3]'"},
-        {"description": "Inspect the claim command for the top recommendation", "command": "bv robot-next --json | jq -r '.claim_command'"},
-        {"description": "Find high-impact blockers to clear", "command": "bv robot-triage --json | jq '.triage.blockers_to_clear | map(.id)'"},
-        {"description": "Get bug-only recommendations", "command": "bv robot-triage --json | jq '.triage.recommendations[] | select(.type == \"bug\")'"},
-        {"description": "Multi-agent: top pick per parallel track", "command": "bv robot-triage-by-track --json | jq '.triage.recommendations_by_track[].top_pick'"},
-        {"description": "Find beads related to a specific file", "command": "bv robot-file-beads README.md --json"},
-        {"description": "Search for issues by keyword", "command": "bv robot-search \"authentication\" --json"},
-        {"description": "Get TOON output for a wide payload (measured ~7% smaller than JSON)", "command": "bv robot-graph --toon"},
-        {"description": "Use env for default format", "command": "BV_OUTPUT_FORMAT=toon bv robot-triage"},
-        {"description": "Compare JSON and TOON size for this payload (TOON can be larger)", "command": "TOON_STATS=1 bv robot-triage --toon"},
+        {"description": "Get top 3 picks for immediate work", "command": "bvr robot-triage --json | jq '.triage.quick_ref.top_picks[:3]'"},
+        {"description": "Inspect the claim command for the top recommendation", "command": "bvr robot-next --json | jq -r '.claim_command'"},
+        {"description": "Find high-impact blockers to clear", "command": "bvr robot-triage --json | jq '.triage.blockers_to_clear | map(.id)'"},
+        {"description": "Get bug-only recommendations", "command": "bvr robot-triage --json | jq '.triage.recommendations[] | select(.type == \"bug\")'"},
+        {"description": "Multi-agent: top pick per parallel track", "command": "bvr robot-triage-by-track --json | jq '.triage.recommendations_by_track[].top_pick'"},
+        {"description": "Find beads related to a specific file", "command": "bvr robot-file-beads README.md --json"},
+        {"description": "Search for issues by keyword", "command": "bvr robot-search \"authentication\" --json"},
+        {"description": "Get TOON output for a wide payload (measured ~7% smaller than JSON)", "command": "bvr robot-graph --toon"},
+        {"description": "Use env for default format", "command": "BV_OUTPUT_FORMAT=toon bvr robot-triage"},
+        {"description": "Compare JSON and TOON size for this payload (TOON can be larger)", "command": "TOON_STATS=1 bvr robot-triage --toon"},
     ])
 }
 
@@ -334,11 +334,11 @@ pub fn generate_robot_docs(topic: &str, app_version: &str, now: &str) -> Value {
                 Some(suggestion) => {
                     result["did_you_mean"] = json!(suggestion);
                     result["suggested_action"] =
-                        json!(format!("Run `bv --robot-docs {suggestion}`"));
+                        json!(format!("Run `bvr --robot-docs {suggestion}`"));
                 }
                 None => {
                     result["suggested_action"] =
-                        json!("Run `bv --robot-docs guide` or `bv --robot-docs all`");
+                        json!("Run `bvr --robot-docs guide` or `bvr --robot-docs all`");
                 }
             }
         }
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(out["did_you_mean"], json!("guide"));
         assert_eq!(
             out["suggested_action"],
-            json!("Run `bv --robot-docs guide`")
+            json!("Run `bvr --robot-docs guide`")
         );
     }
 

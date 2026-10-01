@@ -180,7 +180,7 @@ fn every_corrected_string_matches_go_verbatim() {
     );
     assert_eq!(got["commands"]["robot-sprint-list"]["needs_sprint"], true);
 
-    assert_eq!(got["examples"][7]["command"], "bv robot-graph --toon");
+    assert_eq!(got["examples"][7]["command"], "bvr robot-graph --toon");
     assert_eq!(
         got["examples"][7]["description"],
         "Get TOON output for a wide payload (measured ~7% smaller than JSON)"
@@ -244,7 +244,7 @@ fn unknown_topic_suggests_the_nearest_real_topic() {
     let got: Value = serde_json::from_slice(&out.stdout).expect("the error payload goes to stdout");
     assert_eq!(got["error"], "Unknown topic: guied");
     assert_eq!(got["did_you_mean"], "guide");
-    assert_eq!(got["suggested_action"], "Run `bv --robot-docs guide`");
+    assert_eq!(got["suggested_action"], "Run `bvr --robot-docs guide`");
     assert_eq!(
         got["available_topics"],
         serde_json::json!(["guide", "commands", "examples", "env", "exit-codes", "all"])

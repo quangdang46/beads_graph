@@ -354,7 +354,7 @@ pub fn render_alerts_tables() -> String {
         out.push_str(&format!("| `{t}` | {trig} | {sev} | {keys} |\n"));
     }
 
-    out.push_str("\n**Drift checks** (compare the current graph with the baseline saved by `bv --save-baseline`):\n\n");
+    out.push_str("\n**Drift checks** (compare the current graph with the baseline saved by `bvr --save-baseline`):\n\n");
     out.push_str("| Type | Trigger | Severity | `.bv/drift.yaml` keys (default) |\n");
     out.push_str("|------|---------|----------|----------------------------------|\n");
 
