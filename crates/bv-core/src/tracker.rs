@@ -515,22 +515,38 @@ fn lookup_path(name: &str) -> Option<PathBuf> {
 
 /// The suffixes to try for a bare command name, most specific first.
 ///
-/// A name that already carries an extension is used verbatim. Otherwise the
-/// bare name is tried first (correct on Unix, and on Windows for a
-/// extensionless binary), followed by each `PATHEXT` entry.
+/// A name that already carries an extension is used verbatim.
+///
+/// On Unix the bare name is correct and first: there is one convention, and
+/// `Command` resolves it through PATH anyway.
+///
+/// On Windows the bare name must come **last**, not first. `npm install -g`
+/// and `cargo install` drop three files in the same bin directory: an
+/// extensionless POSIX shell script, a `#!/bin/sh` wrapper that
+/// `CreateProcess` cannot execute at all, and the real `.cmd`. Trying the
+/// bare name first therefore resolves to the unrunnable script, and every
+/// downstream `Command::new` on that path fails with "program not found" —
+/// which surfaced as `cannot establish installed tracker capabilities` and a
+/// permanently absent claim command on Windows, while `bd` worked fine from a
+/// shell. So on Windows each PATHEXT entry is tried before the bare name.
 fn executable_extensions(name: &str) -> Vec<String> {
     if Path::new(name).extension().is_some() {
         return vec![String::new()];
     }
-    let mut out = vec![String::new()];
+    let bare = vec![String::new()];
     if cfg!(windows) {
         let pathext =
             std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        for ext in pathext.split(';').map(str::trim).filter(|e| !e.is_empty()) {
-            out.push(ext.to_string());
-        }
+        let mut out: Vec<String> = pathext
+            .split(';')
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(|e| e.to_string())
+            .collect();
+        out.extend(bare);
+        return out;
     }
-    out
+    bare
 }
 
 /// Canonicalize a path for embedding in emitted argv, stripping the Windows
@@ -727,6 +743,45 @@ pub fn resolve_issue_origin(source_path: &str, local_id: &str) -> IssueOrigin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `npm install -g` puts three files for one binary in the same directory:
+    /// an extensionless `#!/bin/sh` script, a `.ps1`, and the `.cmd` that
+    /// `CreateProcess` can actually run. Windows must therefore skip the bare
+    /// name until every PATHEXT entry has been tried — resolving to the shell
+    /// script makes the capability probe fail with "program not found" even
+    /// though the tracker works from a shell, which is exactly the
+    /// `cannot establish installed tracker capabilities` this guards.
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefers_a_runnable_suffix_over_the_extensionless_shim() {
+        let exts = executable_extensions("bd");
+        let bare = exts.iter().position(|e| e.is_empty());
+        let cmd = exts
+            .iter()
+            .position(|e| e.eq_ignore_ascii_case(".cmd") || e.eq_ignore_ascii_case(".exe"));
+        // No such suffix in this PATHEXT means there is nothing to compare.
+        if let (Some(bare_at), Some(runnable_at)) = (bare, cmd) {
+            assert!(
+                runnable_at < bare_at,
+                "a runnable suffix must be tried before the bare name: {exts:?}"
+            );
+        }
+    }
+
+    /// A name that already carries an extension is used verbatim, on every
+    /// platform — `bd.cmd` must never be rewritten to `bd.cmd.cmd`.
+    #[test]
+    fn an_explicit_extension_is_never_extended_further() {
+        assert_eq!(executable_extensions("bd.cmd"), vec![String::new()]);
+        assert_eq!(executable_extensions(r"C:\bin\bd.exe"), vec![String::new()]);
+    }
+
+    /// The bare name stays first on Unix, where it is the only convention.
+    #[cfg(unix)]
+    #[test]
+    fn unix_tries_the_bare_name_first() {
+        assert_eq!(executable_extensions("bd"), vec![String::new()]);
+    }
 
     fn origin() -> IssueOrigin {
         IssueOrigin {
