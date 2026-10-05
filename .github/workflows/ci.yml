@@ -11,6 +11,13 @@ jobs:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      # All three OSes report even when one fails. The default fail-fast
+      # cancelled macOS and Windows as soon as ubuntu went red, which hid
+      # platform-specific failures behind whichever OS happened to run
+      # first — a bug that only reproduces on Windows (where `bd` installs
+      # as a shim with no .exe) looks identical to a Linux-only failure
+      # when the other two jobs are never given the chance to run.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
@@ -22,7 +29,7 @@ jobs:
       # their output diverge from the frozen goldens, blowing the parity
       # ratchet even though nothing regressed. See the `differential` job
       # below, which hit the same issue first.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -48,7 +55,7 @@ jobs:
       # needs git history present. A shallow checkout (fetch-depth: 1)
       # resolves HEAD~5 to nothing and fails the golden gate with
       # FAIL(rust-error) in CI while passing locally with full history.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable

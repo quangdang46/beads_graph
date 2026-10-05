@@ -37,17 +37,22 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Poll cadence while waiting on the child. Matches `probe_tracker`.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Locate the `bd` executable, or `None` when it is not installed.
+/// Locate the `bd` executable.
 ///
-/// Windows needs this because a package manager may install `bd` as shims
-/// (`bd`, `bd.cmd`, `bd.ps1`) with no `bd.exe` at all — `npm install -g
-/// @beads/bd` does exactly that — and `CreateProcess` only ever appends
-/// `.exe`, so a bare `Command::new("bd")` reports "program not found" on a
-/// machine where `bd` works fine from a shell. We search PATH ourselves and
-/// honour PATHEXT. The shim itself runs without a `cmd /c` wrapper.
+/// On Windows this walks PATH honouring PATHEXT, and returns `None` when
+/// nothing matches. That search is necessary because a package manager may
+/// install `bd` as shims (`bd`, `bd.cmd`, `bd.ps1`) with no `bd.exe` at all
+/// — `npm install -g @beads/bd` does exactly that — and `CreateProcess` only
+/// ever appends `.exe`, so a bare `Command::new("bd")` reports "program not
+/// found" on a machine where `bd` works fine from a shell. The shim itself
+/// runs without a `cmd /c` wrapper.
 ///
-/// Exposed so tests can skip on the same condition the reader actually fails
-/// on, rather than a looser one that makes them pass vacuously.
+/// On Unix it always returns the bare name: there `Command` resolves through
+/// PATH itself, so there is nothing to search. **That means `Some` does not
+/// imply `bd` is installed** — a missing `bd` surfaces as a spawn error from
+/// [`load_issues_from_bd_export`], which callers treat as "try the next
+/// datasource". Anything that needs a real availability check (the tests
+/// gate on it) must additionally prove the binary starts.
 pub fn bd_executable() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {

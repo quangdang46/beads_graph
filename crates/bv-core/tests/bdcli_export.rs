@@ -9,27 +9,37 @@
 //! `bd` is not a build dependency, so every test skips cleanly when it is
 //! absent rather than failing.
 
-use bv_core::bdcli::bd_executable;
 use bv_core::discovery::get_beads_dir;
 use bv_core::tracker::is_bd_workspace;
 use std::path::{Path, PathBuf};
 
-/// Whether the reader itself can find a `bd`.
+/// A `bd` that is present *and runnable*, or `None`.
 ///
-/// Deliberately the reader's own resolver rather than a shell-style
-/// `Command::new("bd")`: on Windows a package manager can install only
-/// shims, and a looser probe would report "yes" while the reader cannot
-/// spawn anything — which is how these tests passed without running.
-fn have_bd() -> bool {
-    bv_core::bdcli::bd_executable().is_some()
+/// Resolution alone is not enough. On Unix `bd_executable()` hands back the
+/// bare name unconditionally, because `Command` resolves it through PATH
+/// itself — so a resolver-only probe reports "yes" on a machine with no `bd`
+/// at all. That made the skip gate never trip on CI and the failure surfaced
+/// as `Spawn("No such file or directory")` rather than a skip, which is the
+/// confusing way round: the suite went red on a missing optional dependency.
+///
+/// Proving the binary actually starts is what makes the skip honest.
+fn runnable_bd() -> Option<PathBuf> {
+    let exe = bv_core::bdcli::bd_executable()?;
+    let starts = std::process::Command::new(&exe)
+        .arg("version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok();
+    starts.then_some(exe)
 }
 
 /// A throwaway bd workspace. Never touches the caller's project.
 struct Workspace(PathBuf, PathBuf);
 
 impl Workspace {
-    fn new(tag: &str) -> Option<Self> {
-        let bd = bd_executable()?;
+    fn new(tag: &str, bd: &Path) -> Option<Self> {
+        let bd = bd.to_path_buf();
         let dir = std::env::temp_dir().join(format!("bv-bdcli-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok()?;
@@ -96,12 +106,12 @@ impl Drop for Workspace {
 /// still yields its issues and edges.
 #[test]
 fn dolt_workspace_without_jsonl_loads_through_bd() {
-    if !have_bd() {
-        eprintln!("skipping: `bd` not on PATH");
+    let Some(bd) = runnable_bd() else {
+        eprintln!("skipping: no runnable `bd` on PATH");
         return;
-    }
-    let Some(ws) = Workspace::new("load") else {
-        eprintln!("skipping: `bd init` unavailable");
+    };
+    let Some(ws) = Workspace::new("load", &bd) else {
+        eprintln!("skipping: `bd init` did not produce a Dolt workspace here");
         return;
     };
 
@@ -159,11 +169,12 @@ fn dolt_workspace_without_jsonl_loads_through_bd() {
 /// file-only, this reader would silently see zero issues.
 #[test]
 fn bd_export_writes_jsonl_to_stdout() {
-    if !have_bd() {
-        eprintln!("skipping: `bd` not on PATH");
+    let Some(bd) = runnable_bd() else {
+        eprintln!("skipping: no runnable `bd` on PATH");
         return;
-    }
-    let Some(ws) = Workspace::new("stdout") else {
+    };
+    let Some(ws) = Workspace::new("stdout", &bd) else {
+        eprintln!("skipping: `bd init` did not produce a Dolt workspace here");
         return;
     };
     ws.bd(&["create", "Only issue", "-p", "1"]);
@@ -189,8 +200,8 @@ fn bd_export_writes_jsonl_to_stdout() {
 /// not an empty-but-successful load that would read as "no issues".
 #[test]
 fn failure_outside_a_workspace_is_reported() {
-    if !have_bd() {
-        eprintln!("skipping: `bd` not on PATH");
+    if runnable_bd().is_none() {
+        eprintln!("skipping: no runnable `bd` on PATH");
         return;
     }
     let dir = std::env::temp_dir().join(format!("bv-bdcli-bare-{}", std::process::id()));

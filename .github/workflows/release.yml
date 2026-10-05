@@ -23,7 +23,7 @@ jobs:
       # perfectly green — so the release would be blocked by a checkout
       # setting rather than by a real regression. (Or worse: it would block
       # every release, which is how this goes unnoticed.)
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -66,7 +66,7 @@ jobs:
             method: native
             suffix: windows-x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -109,7 +109,7 @@ jobs:
           "ARCHIVE=$archive" | Out-File $env:GITHUB_ENV -Append
         env:
           RUNNER_TARGET: ${{ matrix.suffix }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.suffix }}
           path: |
@@ -122,11 +122,11 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
           path: artifacts
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true
