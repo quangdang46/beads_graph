@@ -127,7 +127,9 @@ struct RawIssue {
     priority: i32,
     #[serde(default, rename = "issue_type")]
     issue_type: String,
-    #[serde(default)]
+    /// `bd` emits the assignee as `owner`; Go's JSONL and the frozen model
+    /// both spell it `assignee`. Accept either — see `model::Issue::assignee`.
+    #[serde(default, alias = "owner")]
     assignee: String,
     #[serde(default, rename = "estimated_minutes")]
     estimated_minutes: Option<i64>,
@@ -135,7 +137,9 @@ struct RawIssue {
     created_at: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
-    #[serde(default, rename = "due_date")]
+    /// `bd` spells the due date `due_at`; Go's JSONL and the frozen model
+    /// both spell it `due_date`.
+    #[serde(default, rename = "due_date", alias = "due_at")]
     due_date: Option<String>,
     #[serde(default, rename = "defer_until")]
     defer_until: Option<String>,

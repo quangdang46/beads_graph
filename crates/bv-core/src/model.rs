@@ -338,7 +338,11 @@ pub struct Issue {
     pub priority: i32,
     #[serde(default, rename = "issue_type")]
     pub issue_type: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// `bd` spells this `owner` on the wire (`types.Issue.Owner`); the frozen
+    /// model and every Go JSONL spelling use `assignee`. Serde accepts either,
+    /// and still always serialises as `assignee` — an alias widens what is
+    /// accepted without changing what is emitted, so Go parity is untouched.
+    #[serde(default, alias = "owner", skip_serializing_if = "String::is_empty")]
     pub assignee: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_minutes: Option<i64>,
@@ -346,7 +350,9 @@ pub struct Issue {
     pub created_at: Option<String>,
     #[serde(default, serialize_with = "serialize_go_time")]
     pub updated_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `bd` emits this as `due_at` (`types.Issue.DueAt`). Accepted under either
+    /// spelling; always serialised as `due_date`.
+    #[serde(default, alias = "due_at", skip_serializing_if = "Option::is_none")]
     pub due_date: Option<String>,
     /// Scheduler deferral: hidden from ready/actionable until this instant
     /// passes. Go `Issue.DeferUntil` (pkg/model/types.go:30).

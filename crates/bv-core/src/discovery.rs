@@ -288,6 +288,20 @@ pub fn load_issues_from_repo(
         }
     }
 
+    // A Dolt-backed `bd` workspace only materialises the JSONL on an explicit
+    // export (`export.auto` is off by default), so a fresh `bd init` has a live
+    // issue graph and no file at all. Ask `bd` for it. Gated on
+    // `is_bd_workspace` so a legacy workspace never spawns a subprocess, and
+    // placed before the SQLite fallback because a leftover `beads.db` in a Dolt
+    // workspace is stale by definition — the live store wins.
+    if crate::tracker::is_bd_workspace(&beads_dir) {
+        if let Ok(parsed) = crate::bdcli::load_issues_from_bd_export(repo_path) {
+            if !parsed.0.is_empty() {
+                return Ok(parsed);
+            }
+        }
+    }
+
     // Fallback to the SQLite db when no usable JSONL is present.
     let db_path = beads_dir.join("beads.db");
     if db_path.exists() {
@@ -308,8 +322,13 @@ pub fn load_issues_from_repo(
     }
 
     Err(DiscoveryError::Git(format!(
-        "no beads JSONL or SQLite database found in {}",
-        beads_dir.display()
+        "no beads JSONL or SQLite database found in {}{}",
+        beads_dir.display(),
+        if crate::tracker::is_bd_workspace(&beads_dir) {
+            " (Dolt workspace: `bd` was not reachable — install it or run `bd export -o .beads/issues.jsonl`)"
+        } else {
+            ""
+        }
     )))
 }
 

@@ -16,7 +16,7 @@
 
 **The dependency-graph brain for your Beads project — rebuilt in Rust, byte-compatible with the Go original.**
 
-`bvr` is a Compatible Rust Successor of [Dicklesworthstone/beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (bv): a graph-aware TUI and triage engine for the [Beads](https://github.com/steveyegge/beads) issue tracker. It reads your `.beads/issues.jsonl`, builds the dependency DAG, computes nine graph metrics (PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack), and serves them through an interactive terminal UI and ~41 `--robot-*` JSON commands for AI agents. Same contracts as Go bv; new engine underneath.
+`bvr` is a Compatible Rust Successor of [Dicklesworthstone/beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (bv): a graph-aware TUI and triage engine for the [Beads](https://github.com/steveyegge/beads) issue tracker. It reads your issues — from `.beads/issues.jsonl` when that file exists, or straight from the live Dolt store via `bd` when it doesn't — builds the dependency DAG, computes nine graph metrics (PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack), and serves them through an interactive terminal UI and ~41 `--robot-*` JSON commands for AI agents. Same contracts as Go bv; new engine underneath.
 
 <div align="center">
 
@@ -279,7 +279,7 @@ Config file: `~/.config/bv/config.yaml` (e.g. `theme: light`).
 | Icons garbled / misaligned | Terminal lacks Nerd Font or TrueColor | install a Nerd Font; use WezTerm/iTerm2/Kitty/Windows Terminal |
 | Live reload not firing | NFS/SMB/SSHFS/FUSE doesn't deliver fs events | auto-falls back to polling; force with `BV_FORCE_POLLING=1` |
 | Light theme unreadable over SSH | Background probe fails, defaults dark | `--theme light` or `BV_THEME=light` |
-| `bd export` error mentioning issues.jsonl | Dolt-backed bd workspace without export | run `bd export -o .beads/issues.jsonl` |
+| `bd` workspace reports no issues | Dolt-backed workspace with no `.beads/issues.jsonl` and `bd` not on PATH | install `bd` (bvr reads it directly — no export needed), or run `bd export -o .beads/issues.jsonl` |
 | Drift check exits 2 in CI | Warning-level drift from baseline | intentional — inspect `--robot-drift` output, update baseline if accepted |
 
 ---

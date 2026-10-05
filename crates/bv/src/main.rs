@@ -5096,8 +5096,40 @@ fn load_issues_auto_meta_raw(
     }
     let beads_dir = bv_core::discovery::get_beads_dir(cwd).map_err(|e| e.to_string())?;
     let jsonl = bv_core::discovery::find_jsonl_path_with_warnings(&beads_dir, |_| {})
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("no beads JSONL found in {}", beads_dir.display()))?;
+        .map_err(|e| e.to_string())?;
+
+    // A Dolt-backed `bd` workspace only materialises the JSONL on an explicit
+    // export (`export.auto` is off by default), so finding none is the normal
+    // state of a fresh `bd init`, not a failure. Ask `bd` for the same records
+    // rather than erroring. Reachable only when there is no JSONL at all, so no
+    // workspace that resolves today changes which source it reads.
+    if jsonl.is_none() && bv_core::tracker::is_bd_workspace(&beads_dir) {
+        if let Ok((issues, stats)) = bv_core::bdcli::load_issues_from_bd_export(cwd) {
+            if !issues.is_empty() {
+                let hash = bv_core::data_hash::compute_data_hash(&issues);
+                let file_hash =
+                    bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids);
+                set_source_parse_facts(stats.valid, stats.tombstone_ids.clone());
+                return Ok((
+                    issues,
+                    hash,
+                    None,
+                    SourceMeta {
+                        path: format!("bd export --all@{}", cwd.display()),
+                        envelope_path: String::new(),
+                        kind: "bd_export".to_string(),
+                        valid: stats.valid,
+                        errors: stats.errors,
+                        skipped: stats.skipped,
+                        tombstones: stats.tombstones(),
+                        file_hash,
+                    },
+                ));
+            }
+        }
+    }
+
+    let jsonl = jsonl.ok_or_else(|| format!("no beads JSONL found in {}", beads_dir.display()))?;
     let (issues, stats) = {
         let raw = std::fs::read_to_string(&jsonl)
             .map_err(|e| format!("reading {}: {}", jsonl.display(), e))?;

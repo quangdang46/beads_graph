@@ -7,6 +7,7 @@ pub mod sprint;
 
 pub use model::{Comment, Dependency, DependencyType, Issue, Sprint, Status, ValidationError};
 
+pub mod bdcli;
 pub mod data_hash;
 pub mod discovery;
 pub mod fingerprint;
