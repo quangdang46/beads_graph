@@ -14,9 +14,21 @@
 
 </div>
 
-**The dependency-graph brain for your Beads project — rebuilt in Rust, byte-compatible with the Go original.**
+**A Rust port of [Dicklesworthstone's `beads_viewer`](https://github.com/Dicklesworthstone/beads_viewer) — same contracts, new engine underneath.**
 
-`bvr` is a Compatible Rust Successor of [Dicklesworthstone/beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (bv): a graph-aware TUI and triage engine for the [Beads](https://github.com/steveyegge/beads) issue tracker. It reads your issues — from `.beads/issues.jsonl` when that file exists, or straight from the live Dolt store via `bd` when it doesn't — builds the dependency DAG, computes nine graph metrics (PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack), and serves them through an interactive terminal UI and ~41 `--robot-*` JSON commands for AI agents. Same contracts as Go bv; new engine underneath.
+## Credits & attribution
+
+**[`beads_viewer`](https://github.com/Dicklesworthstone/beads_viewer) was written by [@Dicklesworthstone](https://github.com/Dicklesworthstone) (Jeffrey Emanuel)** — it is his tool, in Go, and the design behind it is his.
+
+**`bvr` is an independent, third-party Rust port of that tool**, written by [@quangdang46](https://github.com/quangdang46). It is not authored by Dicklesworthstone and is not an official continuation of his project. Upstream's licence — MIT with the OpenAI/Anthropic Rider, `Copyright (c) 2026 Jeffrey Emanuel` — carries over verbatim; see [LICENSE](LICENSE) and [PROVENANCE.md](PROVENANCE.md).
+
+The port deliberately preserves upstream's output contracts — the robot JSON schemas, `data_hash` algorithm, exit codes and TOON encoding — so scripts written against the Go tool keep working. What the port adds is idiomatic Rust internals (sync core, rayon, no tokio), direct `bd` reads for Dolt-backed workspaces, and `--robot-plan` parallel tracks for multi-agent dispatch.
+
+*If you are Dicklesworthstone and anything above misrepresents your work, your authorship or your wishes, please open an issue — it will be corrected.*
+
+---
+
+`bvr` is a Rust port of [Dicklesworthstone/beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (bv): a graph-aware TUI and triage engine for the [Beads](https://github.com/steveyegge/beads) issue tracker. It reads your issues — from `.beads/issues.jsonl` when that file exists, or straight from the live Dolt store via `bd` when it doesn't — builds the dependency DAG, computes nine graph metrics (PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack), and serves them through an interactive terminal UI and ~41 `--robot-*` JSON commands for AI agents. Same contracts as Go bv; new engine underneath.
 
 <div align="center">
 
@@ -297,7 +309,7 @@ Config file: `~/.config/bv/config.yaml` (e.g. `theme: light`).
 ## FAQ
 
 **Q: Is this a fork of Go beads_viewer?**
-A: A successor, not a fork — no shared code lineage except the graph WASM crate, which was already Rust upstream. Contracts are cloned; internals are idiomatic Rust (sync core, rayon, no tokio).
+A: A successor, not a fork — and the original is [@Dicklesworthstone's](https://github.com/Dicklesworthstone) work, not this repo's. See [Credits & attribution](#credits--attribution). There is no shared code lineage except the graph WASM crate, which was already Rust upstream. Contracts are cloned; internals are idiomatic Rust (sync core, rayon, no tokio).
 
 **Q: Will my existing automation break?**
 A: No — that's the point. Every robot output is differentially tested against frozen Go goldens. If you script `jq '.quick_ref'` today, it keeps working.
@@ -331,7 +343,7 @@ Roadmap and design rationale: [COMPREHENSIVE_PLAN_FOR_FORT_BEADS_VIEWER.md](COMP
 
 ## License
 
-**MIT with OpenAI/Anthropic Rider**, inherited verbatim from upstream — see [LICENSE](LICENSE).
+**MIT with OpenAI/Anthropic Rider**, `Copyright (c) 2026 Jeffrey Emanuel` — [Dicklesworthstone](https://github.com/Dicklesworthstone), the author of the original Go [`beads_viewer`](https://github.com/Dicklesworthstone/beads_viewer). This repo is a derivative work and carries that licence over verbatim — see [LICENSE](LICENSE).
 
 What this means in practice:
 
