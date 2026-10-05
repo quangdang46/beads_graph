@@ -1,4 +1,4 @@
-# AGENTS.md — beads_viewer_rust (bvr)
+# AGENTS.md — beads_graph (bvr)
 
 > Guidelines for AI coding agents working in this Rust codebase — a Compatible Rust Successor of [Dicklesworthstone/beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (Go).
 

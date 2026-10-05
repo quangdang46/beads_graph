@@ -103,7 +103,7 @@ This layering is preserved exactly — the port maps Go layers onto Rust crates 
 ### Workspace layout
 
 ```
-beads_viewer_rust/
+beads_graph/
 ├── Cargo.toml                # [workspace]
 ├── crates/
 │   ├── bv-core/              # model, loader, datasource (I/O + types — no algorithms)

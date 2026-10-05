@@ -10,7 +10,7 @@ pub mod prefs;
 
 /// Current blurb version. Increment when making breaking changes.
 /// v4: rename Go `bv` references to Rust `bvr` + fix repo links
-/// (quangdang46/beads_viewer_rust) so the injected instructions match this binary.
+/// (quangdang46/beads_graph) so the injected instructions match this binary.
 pub const BLURB_VERSION: i32 = 7;
 pub const BLURB_START_MARKER: &str = "<!-- bv-agent-instructions-v7 -->";
 pub const BLURB_END_MARKER: &str = "<!-- end-bv-agent-instructions -->";

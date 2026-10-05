@@ -1,4 +1,4 @@
-# bvr — Beads Viewer in Rust
+# bvr — Beads Graph in Rust
 
 <div align="center">
   <img src="bvr_illustration.webp" alt="bvr — graph-aware triage engine for Beads: PageRank, critical path, kanban, dependency DAG, and a deterministic robot JSON API">
@@ -9,7 +9,7 @@
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
 ![License](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)
-![Release](https://img.shields.io/github/v/release/quangdang46/beads_viewer_rust?include_prereleases)
+![Release](https://img.shields.io/github/v/release/quangdang46/beads_graph?include_prereleases)
 [![Upstream](https://img.shields.io/badge/upstream-Dicklesworthstone%2Fbeads__viewer-8A2BE2)](https://github.com/Dicklesworthstone/beads_viewer)
 
 </div>
@@ -33,12 +33,12 @@ The port deliberately preserves upstream's output contracts — the robot JSON s
 <div align="center">
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.sh?$(date +%s)" \
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/beads_graph/main/install.sh?$(date +%s)" \
   | bash -s -- --easy-mode
 ```
 
 ```powershell
-irm "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.ps1" | iex
+irm "https://raw.githubusercontent.com/quangdang46/beads_graph/main/install.ps1" | iex
 ```
 
 </div>
@@ -153,21 +153,21 @@ bvr --diff-since HEAD~5      # what changed in the last 5 commits
 ### Linux / macOS
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.sh?$(date +%s)" \
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/beads_graph/main/install.sh?$(date +%s)" \
   | bash -s -- --easy-mode
 ```
 
 ### Windows
 
 ```powershell
-irm "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.ps1" | iex
+irm "https://raw.githubusercontent.com/quangdang46/beads_graph/main/install.ps1" | iex
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/quangdang46/beads_viewer_rust.git
-cd beads_viewer_rust
+git clone https://github.com/quangdang46/beads_graph.git
+cd beads_graph
 cargo install --path crates/bv
 ```
 

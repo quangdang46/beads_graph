@@ -1,5 +1,5 @@
-# bvr installer -- Beads Viewer in Rust (Windows)
-# Usage: irm "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.ps1" | iex
+# bvr installer -- Beads Graph in Rust (Windows)
+# Usage: irm "https://raw.githubusercontent.com/quangdang46/beads_graph/main/install.ps1" | iex
 $ErrorActionPreference = "Stop"
 # Disables the slow IE-style progress bar in Invoke-WebRequest, which can
 # slow large downloads from seconds to minutes.
@@ -19,7 +19,7 @@ try {
 $BinaryName = "bvr"
 $BinaryExe  = "bvr.exe"
 $Owner      = "quangdang46"
-$Repo       = "beads_viewer_rust"
+$Repo       = "beads_graph"
 $Dest       = if ($env:DEST) { $env:DEST } else { Join-Path $env:USERPROFILE ".local\bin" }
 $Version    = $env:VERSION
 $EasyMode   = $false

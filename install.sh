@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# bvr installer — Beads Viewer in Rust
-# Usage: curl -fsSL "https://raw.githubusercontent.com/quangdang46/beads_viewer_rust/main/install.sh?$(date +%s)" | bash -s -- --easy-mode
+# bvr installer — Beads Graph in Rust
+# Usage: curl -fsSL "https://raw.githubusercontent.com/quangdang46/beads_graph/main/install.sh?$(date +%s)" | bash -s -- --easy-mode
 set -euo pipefail
 umask 022
 
 # === Config ===
 BINARY_NAME="bvr"
 OWNER="quangdang46"
-REPO="beads_viewer_rust"
+REPO="beads_graph"
 DEST="${DEST:-$HOME/.local/bin}"
 VERSION="${VERSION:-}"
 QUIET=0; EASY=0; VERIFY=0; FROM_SOURCE=0; UNINSTALL=0
