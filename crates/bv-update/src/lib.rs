@@ -15,12 +15,19 @@ pub use prefs::{load_preferences, Preferences};
 pub use update::{perform_rollback, perform_update, UpdateResult};
 pub use version::{
     compare_versions, current_version, is_dev_version, is_newer_than_current, APP_VERSION,
+    PORT_VERSION,
 };
 
 /// GitHub repo hosting bvr releases.
 pub const REPO_OWNER: &str = "quangdang46";
 /// GitHub repo hosting bvr releases.
-pub const REPO_NAME: &str = "beads_viewer_rust";
+///
+/// Renamed from `beads_viewer_rust` at the request of @Dicklesworthstone, who
+/// started their own Rust port of `beads_viewer` six months earlier. Left
+/// stale here, the release-identity check rejected every release with
+/// `release page URL path ... does not match`, so `--check-update` and
+/// `--update` failed outright.
+pub const REPO_NAME: &str = "beads_graph";
 /// Binary name inside release archives and on disk.
 pub const BINARY_NAME: &str = "bvr";
 

@@ -1569,7 +1569,9 @@ fn main() -> ExitCode {
     // reports the emulated tool's identity, not the binary's own name, so it
     // uses VERSION_PROGRAM rather than the HELP_PROGRAM the help page prints.
     if args.iter().any(|a| a == "--version") {
-        println!("{} {}", flags::VERSION_PROGRAM, GO_APP_VERSION);
+        // The port's own version, not the Go-parity envelope string: this is
+        // the version someone installed and would report in a bug.
+        println!("{} {}", flags::VERSION_PROGRAM, bv_update::PORT_VERSION);
         return ExitCode::from(0);
     }
 
@@ -7019,12 +7021,15 @@ fn baseline_path() -> std::path::PathBuf {
 
 /// Application version Go bv reports in robot envelopes (`pkg/version`
 /// fallback, pinned at parity commit 18afafa). Byte-parity with frozen
-/// goldens requires emitting Go's version string, not the Rust crate's.
+/// goldens requires emitting Go's version string, not the Rust port's.
 ///
-/// One constant, shared with `bv_update::current_version` and therefore with
-/// `--check-update` and the TUI update modal: Go resolves a single
-/// `version.Version` (version.go:22-52) and every consumer reads it, so the
-/// envelope and `--check-update` cannot disagree.
+/// Deliberately *not* the port's own version. The goldens byte-compare this
+/// field, and there is no Go bv release matching a port-only bump, so a v0.25.1
+/// binary must still report `v0.25.0` here. The two numbers are separate
+/// constants on purpose: `--version`, `--check-update` and the TUI update modal
+/// read `bv_update::PORT_VERSION`, while every envelope field reads this one.
+/// Sharing a single constant is what previously made `--check-update` compare
+/// the running release against itself and always report "already up to date".
 const GO_APP_VERSION: &str = bv_update::APP_VERSION;
 
 /// Output format for the current invocation, set from `--format`. Go tracks

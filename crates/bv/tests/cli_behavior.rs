@@ -17,13 +17,40 @@ fn run(args: &[&str]) -> (i32, String, String) {
 
 #[test]
 fn version_exits_zero() {
-    // Go prints `bv <version>` from `pkg/version` (fallback v0.25.0 at the
-    // parity commit), which is also what the robot envelope reports as
-    // `version`. The Rust crate's own name and version must not leak here —
-    // that would make `--version` contradict the binary's own output.
+    // `--version` reports the **port's own** version, so a bug report names the
+    // release the reporter actually installed. It is deliberately not the
+    // Go-parity string the robot envelope carries: that field is byte-pinned to
+    // the Go release this port tracks, so the two numbers legitimately differ
+    // (a v0.25.1 binary still reports `v0.25.0` in its envelope).
     let (code, stdout, _) = run(&["--version"]);
     assert_eq!(code, 0);
-    assert_eq!(stdout.trim(), "bv v0.25.0");
+    assert_eq!(
+        stdout.trim(),
+        format!("bv {}", bv_update::PORT_VERSION),
+        "--version must print the port version, not the Go-parity envelope string"
+    );
+}
+
+/// The two version numbers are separate constants on purpose. Collapsing them
+/// is what made `--check-update` compare the running release against itself and
+/// always report "already up to date".
+#[test]
+fn version_output_differs_from_the_envelope_version() {
+    let (_, stdout, _) = run(&["--version"]);
+    let reported = stdout.trim().strip_prefix("bv ").expect("bv <version>");
+    let (code, stdout, _) = run(&["--robot-next"]);
+    assert_eq!(code, 0);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("envelope json");
+    assert_eq!(
+        envelope["version"].as_str(),
+        Some(bv_update::APP_VERSION),
+        "the envelope must keep the Go-parity version the goldens byte-compare"
+    );
+    assert_eq!(
+        reported,
+        bv_update::PORT_VERSION,
+        "--version must report the port version"
+    );
 }
 
 #[test]

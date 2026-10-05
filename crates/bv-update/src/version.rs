@@ -8,27 +8,41 @@
 //! treats two unparseable versions as EQUAL so callers fail closed instead of
 //! announcing a bogus update.
 
-/// The application version, matching Go's hardcoded `pkg/version` fallback
-/// (version.go:18).
+/// The **Go release this port tracks**, matching Go's hardcoded
+/// `pkg/version` fallback (version.go:18).
 ///
-/// Go resolves `version.Version` from ldflags, then build info, then this
-/// constant, and every consumer — `bv --version`, the `version` field in every
-/// robot envelope, `--check-update`, the TUI's update modal — reads that one
-/// value. Rust has no equivalent injection point, so the fallback *is* the
-/// resolved version.
+/// This is a *compatibility* constant, not the port's own version. It is what
+/// lands in the `version` field of every robot envelope, which the frozen Go
+/// oracle byte-compares against: bumping it drops the golden gate from
+/// PASS=64/DIFF_FAILS=0 to PASS=5/DIFF_FAILS=59, one byte per file, because
+/// there is no Go bv v0.25.1 for a `v0.25.1` envelope to be compatible with.
+/// It tracks the Go release even after a port release, so a v0.25.1 binary
+/// still reports `v0.25.0` in its envelope.
 ///
-/// It is deliberately not `CARGO_PKG_VERSION`. That is the workspace's own
-/// semver, which has no relationship to the Go release this port tracks: the
-/// two disagreed, so `bvr --check-update` announced `v0.2.0` while the same
-/// binary's envelope reported `v0.25.0` and `bv --check-update` said
-/// `v0.25.0`.
+/// For the port's own version see [`PORT_VERSION`].
 pub const APP_VERSION: &str = "v0.25.0";
 
-/// Current binary version, normalized with a `v` prefix (e.g. `v0.1.7`).
-/// Mirrors Go's `version.Version`; see [`APP_VERSION`] for why the crate's own
-/// version is not the answer.
+/// This port's own version — the GitHub tag and the release it was built from.
+///
+/// Kept separate from [`APP_VERSION`] so the two numbers can diverge without
+/// either being wrong: the envelope advertises Go parity and is byte-pinned by
+/// the goldens, while `--version`, `--check-update` and the TUI update modal
+/// describe *this* binary. Collapsing them into one constant made
+/// `--check-update` compare the running release against itself and always
+/// report "already up to date", which is how v0.25.1 shipped with a dead
+/// updater.
+///
+/// Deliberately not `CARGO_PKG_VERSION`: that would tie the reported version
+/// to the workspace semver, which has no relationship to the release tag and
+/// previously disagreed with it.
+pub const PORT_VERSION: &str = "v0.25.1";
+
+/// Current **port** version, normalized with a `v` prefix.
+///
+/// This is what the updater compares against the latest published release, so
+/// it must be [`PORT_VERSION`] and not the Go-parity [`APP_VERSION`].
 pub fn current_version() -> String {
-    APP_VERSION.to_string()
+    PORT_VERSION.to_string()
 }
 
 /// Markers Go treats as "local build, never advertise an update"
@@ -347,6 +361,40 @@ pub fn is_newer_than_current(candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The updater must compare against the **port's** version. When both
+    /// constants were one value, `--check-update` compared the running release
+    /// against itself and always reported "already up to date" — v0.25.1
+    /// shipped with a dead updater because of it.
+    #[test]
+    fn current_version_is_the_port_version_not_the_go_parity_version() {
+        assert_eq!(current_version(), PORT_VERSION);
+    }
+
+    /// Both must stay well-formed, since `compare_versions` parses them.
+    #[test]
+    fn both_versions_are_v_prefixed_semver() {
+        for v in [APP_VERSION, PORT_VERSION] {
+            assert!(v.starts_with('v'), "{v} must start with v");
+            assert!(
+                compare_versions(v, "v0.0.1") > 0,
+                "{v} must parse and order above v0.0.1"
+            );
+        }
+    }
+
+    /// The envelope constant is a *compatibility* pin, so it must not drift
+    /// ahead of a Go bv release that does not exist. Bumping it to match a
+    /// port-only release takes the golden gate from PASS=64/DIFF_FAILS=0 to
+    /// PASS=5/DIFF_FAILS=59 — one byte per file, the `version` field.
+    #[test]
+    fn go_parity_version_stays_on_a_real_go_bv_release() {
+        assert_eq!(
+            APP_VERSION, "v0.25.0",
+            "the envelope version is pinned to the Go release this port tracks; \
+             raising it breaks byte-parity with the frozen goldens"
+        );
+    }
 
     #[test]
     fn basic_ordering() {
