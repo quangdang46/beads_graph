@@ -35,7 +35,7 @@ pub const APP_VERSION: &str = "v0.25.0";
 /// Deliberately not `CARGO_PKG_VERSION`: that would tie the reported version
 /// to the workspace semver, which has no relationship to the release tag and
 /// previously disagreed with it.
-pub const PORT_VERSION: &str = "v0.25.1";
+pub const PORT_VERSION: &str = "v0.25.2";
 
 /// Current **port** version, normalized with a `v` prefix.
 ///

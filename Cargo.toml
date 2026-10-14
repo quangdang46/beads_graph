@@ -21,10 +21,18 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.25.2"
 edition = "2021"
 license = "MIT"
 authors = ["Tran Quang Dang <tranquangdang21@gmail.com>"]
+repository = "https://github.com/quangdang46/beads_graph"
+homepage = "https://github.com/quangdang46/beads_graph"
+readme = "README.md"
+description = "Compatible Rust successor of beads_viewer (Go) — port of v0.25.0"
+
+# Nothing is published to crates.io: the path dependencies between the crates
+# resolve locally, and cargo would reject them for a published `bv`.
+publish = false
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
