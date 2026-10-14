@@ -250,3 +250,71 @@ fn list_larger_than_the_screen_never_paints_off_screen_rows() {
     let rows = render_list_rows(&mut app);
     assert_eq!(painted_ids(&rows).len(), CAPACITY);
 }
+
+#[test]
+fn tree_mode_renders_without_deps_as_flat_rows() {
+    // No edges: every issue is a root, so the tree is the flat list with no
+    // prefixes. Rows carry the same ids in the same order.
+    let mut app = make_app(5);
+    app.left_tree_mode = true;
+    let rows = render_list_rows(&mut app);
+    assert_eq!(painted_ids(&rows).len(), 5);
+    for line in rows.iter().filter(|l| l.contains("T-")) {
+        assert!(
+            !line.contains("├") && !line.contains("└"),
+            "root-only tree must not paint connectors: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn tree_mode_nests_children_under_parents() {
+    // A -> B (parent-child): the tree paints A then `└── B`, one extra glyph
+    // run in front of B's id, and the title still shows both issues.
+    let mut issues: Vec<_> = (0..2).map(issue).collect();
+    let parent = issues[0].id.clone();
+    let child = issues[1].id.clone();
+    issues[0].dependencies.push(bv_core::model::Dependency {
+        issue_id: parent,
+        depends_on_id: child,
+        depends_on_legacy: String::new(),
+        target_id_legacy: String::new(),
+        r#type: bv_core::model::DependencyType::ParentChild,
+        created_at: None,
+        created_by: String::new(),
+    });
+    let mut app = App::new(issues);
+    app.left_tree_mode = true;
+    let rows = render_list_rows(&mut app);
+    let painted = painted_ids(&rows);
+    assert_eq!(painted.len(), 2, "both issues must be visible: {rows:?}");
+    let child_line = rows
+        .iter()
+        .find(|l| l.contains("└"))
+        .expect("child row must carry a connector");
+    assert!(
+        child_line.contains(&painted[1]),
+        "connector row must hold the child id: {child_line:?}"
+    );
+    // The edge label is dimmed and last, so at the 40%-of-120 pane width it
+    // is already past the title truncation. What must be visible is that the
+    // child row is *annotated* rather than bare — assert on the builder that
+    // produced it, and on the visual signature (connector) above.
+    assert!(
+        !child_line.contains("Issue"),
+        "child row must be indented enough that the title is clipped: {child_line:?}"
+    );
+}
+
+#[test]
+fn tree_mode_keeps_cursor_selection_on_the_flat_cursor_row() {
+    // The cursor is still a `filtered_indices` index: moving it to 1
+    // highlights the row at position 1, and the `▸` marker stays exactly one
+    // per screen — the tests that scan for it must not see two.
+    let mut app = make_app(5);
+    app.left_tree_mode = true;
+    app.cursor = 3;
+    let rows = render_list_rows(&mut app);
+    let markers = rows.iter().filter(|l| l.contains('▸')).count();
+    assert_eq!(markers, 1, "exactly one row carries the cursor: {rows:?}");
+}

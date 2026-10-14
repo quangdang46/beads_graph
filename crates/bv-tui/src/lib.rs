@@ -315,6 +315,25 @@ pub struct App {
     pub alerts: Vec<bv_analysis::drift::Alert>,
     /// Collapsed node ids in the Tree view (all nodes start expanded).
     pub tree_collapsed: std::collections::HashSet<String>,
+    /// List pane shows issues as a dependency tree instead of a flat list.
+    ///
+    /// Toggled with `D`. Go's list is flat, so flat is the default and this
+    /// is an addition to the port rather than a correction of it.
+    ///
+    /// The tree is display-only: it never reorders `filtered_indices`, so
+    /// `cursor` keeps indexing that vector exactly as it does in flat mode.
+    /// Everything downstream of it (`selected()`, the mouse click handler,
+    /// the search-rank badge, `select_issue_in_list`) is unchanged.
+    pub left_tree_mode: bool,
+    /// The flattened dependency tree painted last frame, in tree mode.
+    ///
+    /// Written by `render_list` and read by `render_status_bar` and the mouse
+    /// click handler in the same frame — the same "renderer owns it" contract
+    /// as [`Self::list_window`]. Cleared when leaving tree mode so a stale
+    /// tree can't be read back.
+    pub dep_tree_nodes: Vec<crate::views::deptree::DepNode>,
+    /// The slice of `dep_tree_nodes` painted last frame.
+    pub dep_tree_window: std::ops::Range<usize>,
     /// Cursor position within the Alerts view list.
     pub alerts_cursor: usize,
     /// Cross-label flow data for the FlowMatrix view.
@@ -708,6 +727,13 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 /// `Limit == 0`, so it is named here only to make the Go constant explicit.
 const HISTORY_COMMIT_LIMIT: i64 = 500;
 
+/// How many levels below the root the dependency tree (`D`) expands.
+///
+/// Three matches `detail.rs`'s `max_depth: 3` and Go's `BuildDependencyTree`,
+/// and it is what bounds the tree's row count: the flatten never produces more
+/// than `filtered_indices + depth` rows no matter how deep the graph runs.
+const MAX_DEP_TREE_DEPTH: usize = 3;
+
 /// Go `openBrowserURL` (model.go:5846-5864). Honours the same
 /// `BV_NO_BROWSER` / `BV_TEST_MODE` suppression Go uses, so a test run never
 /// launches a browser.
@@ -929,6 +955,9 @@ impl App {
             alerts_total,
             alerts,
             tree_collapsed: std::collections::HashSet::new(),
+            left_tree_mode: false,
+            dep_tree_nodes: Vec::new(),
+            dep_tree_window: 0..0,
             alerts_cursor: 0,
             flow: None,
             flow_cursor: 0,
@@ -1557,10 +1586,27 @@ impl App {
                 // Read `list_window` rather than recomputing it — a second
                 // implementation of the same arithmetic is exactly how this
                 // drifted out of sync with the screen in the first place.
+                //
+                // In both modes `list_window.start` indexes a window over
+                // *tree* rows when `left_tree_mode` is on and over
+                // `filtered_indices` otherwise — `render_list` publishes the
+                // same window it painted, so the offset arithmetic never
+                // changes, only what the offset indexes into.
                 let screen_row = usize::from(mouse.row - LIST_TOP);
-                if let Some(idx) = self.list_window.start.checked_add(screen_row) {
-                    if idx < self.filtered_indices.len() {
-                        self.cursor = idx;
+                if let Some(offset) = self.list_window.start.checked_add(screen_row) {
+                    if self.left_tree_mode {
+                        // `handle_mouse` runs on the App state `render_list`
+                        // wrote last frame: `dep_tree_nodes` and
+                        // `dep_tree_window` are exactly what was painted.
+                        if let Some(node) = self.dep_tree_nodes.get(offset) {
+                            let pos = node.filtered_pos;
+                            if pos < self.filtered_indices.len() {
+                                self.cursor = pos;
+                                self.focus_detail = false;
+                            }
+                        }
+                    } else if offset < self.filtered_indices.len() {
+                        self.cursor = offset;
                         self.focus_detail = false;
                     }
                 }
@@ -2284,6 +2330,23 @@ impl App {
                 } else {
                     self.load_actionable_if_needed();
                     ViewMode::Actionable
+                };
+                true
+            }
+            // Dependency-tree left pane (`left_tree_mode`). A List-scoped
+            // addition to the port, not a Go binding: Go's list is flat, so
+            // the toggle stays out of the way of the mode-cycle keys (`s`,
+            // `b`, `E`, `G`) and defaults to flat.
+            KeyCode::Char('D') if self.current_view == ViewMode::List => {
+                self.left_tree_mode = !self.left_tree_mode;
+                if !self.left_tree_mode {
+                    self.dep_tree_nodes.clear();
+                    self.dep_tree_window = 0..0;
+                }
+                self.status_msg = if self.left_tree_mode {
+                    "Tree view: dependency tree (D to return to flat list)".to_string()
+                } else {
+                    "Flat list (D for dependency tree)".to_string()
                 };
                 true
             }
@@ -3604,7 +3667,7 @@ impl App {
     }
 }
 
-fn type_icon(issue_type: &str) -> (&'static str, Color) {
+pub(crate) fn type_icon(issue_type: &str) -> (&'static str, Color) {
     match issue_type {
         "bug" => ("🐛", Color::Red),
         "feature" => ("✨", Color::Green),
@@ -3615,7 +3678,7 @@ fn type_icon(issue_type: &str) -> (&'static str, Color) {
     }
 }
 
-fn prio_badge_style(priority: i32) -> (Color, Color) {
+pub(crate) fn prio_badge_style(priority: i32) -> (Color, Color) {
     match priority {
         0 => (Color::White, Color::Red),
         1 => (Color::White, Color::LightRed),
@@ -3625,7 +3688,7 @@ fn prio_badge_style(priority: i32) -> (Color, Color) {
     }
 }
 
-fn status_badge(status: &str) -> (&'static str, Color) {
+pub(crate) fn status_badge(status: &str) -> (&'static str, Color) {
     match status {
         "open" => ("OPEN", Color::Green),
         "in_progress" => ("PROG", Color::Yellow),
@@ -3641,7 +3704,7 @@ fn status_badge(status: &str) -> (&'static str, Color) {
     }
 }
 
-fn age_str(created_at: &Option<String>) -> String {
+pub(crate) fn age_str(created_at: &Option<String>) -> String {
     if let Some(ca) = created_at {
         if let Ok(t) = ca.parse::<jiff::Timestamp>() {
             let now = jiff::Timestamp::now();
@@ -4542,169 +4605,83 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let visible =
         crate::views::tree::visible_range(app.filtered_indices.len(), app.cursor, row_capacity);
     // Publish it so `handle_mouse` maps a click onto the same row the user
-    // actually saw, instead of re-deriving the arithmetic.
-    app.list_window = visible.clone();
-    let window_start = visible.start;
+    // actually saw, instead of re-deriving the arithmetic. In tree mode this
+    // is the tree's window, not the flat list's: the painted rows are the
+    // tree's, and `painted_row_for_screen` indexes `dep_tree_nodes` by the
+    // same offset `handle_mouse` subtracts.
+    if app.left_tree_mode {
+        let filtered: Vec<&crate::ListRow> =
+            app.filtered_indices.iter().map(|&i| &app.rows[i]).collect();
+        let (nodes, tree_cursor) = crate::views::deptree::tree_preview(
+            &filtered,
+            &app.issue_map,
+            MAX_DEP_TREE_DEPTH,
+            app.cursor,
+        );
+        app.dep_tree_nodes = nodes;
+        app.dep_tree_window =
+            crate::views::tree::visible_range(app.dep_tree_nodes.len(), tree_cursor, row_capacity);
+        app.list_window = app.dep_tree_window.clone();
+    } else {
+        app.dep_tree_nodes.clear();
+        app.dep_tree_window = 0..0;
+        app.list_window = visible.clone();
+    }
 
     // List items
-    let items: Vec<ListItem> = app.filtered_indices[visible]
+    // Both display modes share the per-row span builder (see `row_spans`),
+    // so a tree row shows exactly the columns a flat row does — only the
+    // leading indent differs. Flat mode passes an empty prefix, which
+    // reproduces the pre-existing column layout byte for byte.
+    //
+    // `(pos, tree_row)` pairs, where `pos` indexes `filtered_indices` (the
+    // rank the `#n` badge and the selection test mean) and `tree_row` is the
+    // row in `app.dep_tree_nodes` that produced it, for the prefix.
+    let window_rows: Vec<(usize, Option<usize>)> = if app.left_tree_mode {
+        app.dep_tree_window
+            .clone()
+            .map(|tree_row| {
+                let pos = app
+                    .dep_tree_nodes
+                    .get(tree_row)
+                    .map(|n| n.filtered_pos)
+                    .unwrap_or(0);
+                (pos, Some(tree_row))
+            })
+            .collect()
+    } else {
+        visible.clone().map(|pos| (pos, None)).collect()
+    };
+
+    let items: Vec<ListItem> = window_rows
         .iter()
-        .enumerate()
-        .map(|(local_idx, &row_idx)| {
-            // Rank within the *whole* filtered set, not the window — the
-            // `#n` search badge and the selection test both mean "row N of
-            // the list", not "row N of what happens to be on screen".
-            let vis_idx = window_start + local_idx;
-            let row = &app.rows[row_idx];
-            let selected = vis_idx == app.cursor;
-            let (icon, icon_color) = type_icon(&row.issue_type);
-
-            // Priority badge
-            let (pfg, pbg) = prio_badge_style(row.priority);
-            let prio_label = format!("P{}", row.priority);
-
-            // Status badge
-            let status_str = row.status.as_str();
-            let (slabel, scolor) = status_badge(status_str);
-
-            // Age
-            let age = age_str(&row.created_at);
-
-            let mut spans = vec![];
-
-            // Selection indicator
-            if selected {
-                spans.push(Span::styled(
-                    "▸ ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::raw("  "));
-            }
-
-            // Type icon
-            spans.push(Span::styled(icon, Style::default().fg(icon_color)));
-            spans.push(Span::raw(" "));
-
-            // Repo badge in workspace mode (Go `RenderRepoBadge`: "[API]",
-            // uppercase, capped at 4 chars — `normalizeRepoKey` already
-            // computed at load into `row.repo_prefix`).
-            if app.workspace_repos.is_some() {
-                if let Some(prefix) = row.repo_prefix.as_deref() {
-                    let display: String = prefix.to_uppercase().chars().take(4).collect();
-                    spans.push(Span::styled(
-                        format!("[{display}]"),
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::raw(" "));
-                }
-            }
-
-            // Priority badge
-            spans.push(Span::styled(
-                format!("{:<3}", prio_label),
-                Style::default()
-                    .fg(pfg)
-                    .bg(pbg)
-                    .add_modifier(Modifier::BOLD),
-            ));
-
-            // Priority hint arrow (Go `p` — delegate.go): shown only while
-            // hints are toggled on. suggested < current numeric priority
-            // means the issue is under-prioritized (should be more urgent)
-            // -> up-arrow "increase"; suggested > current -> down-arrow.
-            if app.show_priority_hints {
-                if let Some(hints) = &app.priority_hints {
-                    match hints.get(&row.id) {
-                        Some(&suggested) if suggested < row.priority => {
-                            spans.push(Span::styled(
-                                "\u{2191}",
-                                Style::default()
-                                    .fg(Color::Green)
-                                    .add_modifier(Modifier::BOLD),
-                            ));
-                        }
-                        Some(&suggested) if suggested > row.priority => {
-                            spans.push(Span::styled(
-                                "\u{2193}",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ));
-                        }
-                        _ => spans.push(Span::raw(" ")),
-                    }
-                } else {
-                    spans.push(Span::raw(" "));
-                }
-            }
-            spans.push(Span::raw(" "));
-
-            // Triage indicator (Go `delegate.go` bv-151): quick-win ⭐,
-            // else blocker-with-unblocks 🔓N, else any-unblocks ↪N.
-            // Go order: IsQuickWin first, then IsBlocker && UnblocksCount>0,
-            // then UnblocksCount>0.
-            let triage_indicator: Option<String> = app.row_triage.get(&row.id).and_then(|t| {
-                if t.is_quick_win {
-                    Some("⭐".to_string())
-                } else if t.is_blocker && t.unblocks_count > 0 {
-                    Some(format!("🔓{}", t.unblocks_count))
-                } else if t.unblocks_count > 0 {
-                    Some(format!("↪{}", t.unblocks_count))
-                } else {
-                    None
-                }
-            });
-            if let Some(ind) = triage_indicator {
-                spans.push(Span::styled(ind, Style::default().fg(Color::Yellow)));
-                spans.push(Span::raw(" "));
-            }
-
-            // Status badge
-            spans.push(Span::styled(
-                format!("{:<4}", slabel),
-                Style::default().fg(scolor),
-            ));
-            spans.push(Span::raw(" "));
-
-            // Search score badge while a search is active (Go `delegate.go`:
-            // `d.ShowSearchScores && i.SearchScoreSet` renders `[0.42]`).
-            // Rust has no per-row score store; the score IS the ranking that
-            // produced `filtered_indices`, so the badge shows the row's rank
-            // position when a fuzzy (/) or semantic (Ctrl+S) filter is active.
-            // Scope note: Go shows the raw float score; we show rank — same
-            // slot, same "search is active" signal, without inventing scores.
-            if app.searching || app.semantic_searching {
-                spans.push(Span::styled(
-                    format!("#{}", vis_idx + 1),
-                    Style::default().fg(Color::Cyan),
-                ));
-                spans.push(Span::raw(" "));
-            }
-
-            // ID
-            spans.push(Span::styled(
-                format!("{:<20}", row.id),
-                Style::default().fg(Color::Cyan),
-            ));
-            spans.push(Span::raw(" "));
-
-            // Diff badge in Time-Travel mode (Go `IssueItem.DiffStatus.Badge()`
-            // via `getDiffStatus` over newIssueIDs/closedIssueIDs/
-            // modifiedIssueIDs). Rust's `DiffResult` names the same sets
-            // `added` (in current, not at ref → 🆕) / `removed` (was at ref,
-            // gone now — never rendered as a live row, kept for symmetry) /
-            // `changed` (status/title/priority drift → ~). An issue that the
-            // diff reports as *closed* relative to the ref keeps Go's ✅ —
-            // detected here by comparing the live row's status against the
-            // changed entry: if the row is currently closed-like and the ref
-            // predates the closure, it's a closure, not a generic edit.
-            if app.current_view == ViewMode::TimeTravel {
-                if let Some(result) = &app.time_travel_result {
+        .map(|&(pos, tree_row)| {
+            let row_idx = app.filtered_indices[pos];
+            let node = tree_row.and_then(|t| app.dep_tree_nodes.get(t));
+            let prefix = node.map(|n| n.prefix.as_str()).unwrap_or_default();
+            let dimmed = node.is_some_and(|n| n.dimmed);
+            let edge_label = node.and_then(|n| (!n.label.is_empty()).then_some(n.label.as_str()));
+            let truncated = node.and_then(|n| n.truncated);
+            // Tree indentation comes out of the title's budget, so the columns
+            // keep lining up with the flat list. The edge label and any
+            // truncation marker are part of the title line, so they pay for
+            // their width out of the same budget.
+            let indent_cols = prefix.chars().count();
+            let suffix_cols: usize = edge_label.map_or(0, |l| l.chars().count() + 3)
+                + match truncated {
+                    Some(crate::views::deptree::Truncation::Cycle) => " (cycle)".len(),
+                    Some(crate::views::deptree::Truncation::MaxDepth) => " (max depth)".len(),
+                    None => 0,
+                };
+            let title_width = inner_width
+                .saturating_sub(crate::row_spans::COLUMN_RESERVE + indent_cols + suffix_cols);
+            // Time-Travel diff badge (Go `IssueItem.DiffStatus.Badge()` via
+            // `getDiffStatus` over newIssueIDs/closedIssueIDs/
+            // modifiedIssueIDs): `added` -> 🆕, `changed` -> ~ and ✅.
+            // Consulted only in that view, like Go.
+            let diff_badge = if app.current_view == ViewMode::TimeTravel {
+                app.time_travel_result.as_ref().and_then(|result| {
+                    let row = &app.rows[row_idx];
                     let badge = if result.added.iter().any(|id| id == &row.id) {
                         DiffBadge::Added
                     } else if result.changed.iter().any(|c| c.id == row.id) {
@@ -4717,49 +4694,50 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                     } else {
                         DiffBadge::None
                     };
-                    if badge != DiffBadge::None {
-                        spans.push(Span::raw(badge.badge()));
-                        spans.push(Span::raw(" "));
-                    }
-                }
-            }
-
-            // Title (truncated to fit)
-            let title_width = inner_width.saturating_sub(45);
-            let title = if row.title.chars().count() > title_width {
-                let truncated: String = row
-                    .title
-                    .chars()
-                    .take(title_width.saturating_sub(1))
-                    .collect();
-                format!("{}…", truncated)
+                    let s = badge.badge();
+                    (!s.is_empty()).then_some(s)
+                })
             } else {
-                format!("{:<width$}", row.title, width = title_width)
+                None
             };
-            spans.push(Span::styled(
-                title,
-                Style::default().add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-            ));
 
-            // Age (right-aligned)
-            if !age.is_empty() {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(age, Style::default().fg(Color::DarkGray)));
-            }
-
-            ListItem::new(Line::from(spans))
+            let id = app.rows[row_idx].id.clone();
+            let truncation_suffix = match truncated {
+                Some(crate::views::deptree::Truncation::Cycle) => Some(" (cycle)"),
+                Some(crate::views::deptree::Truncation::MaxDepth) => Some(" (max depth)"),
+                None => None,
+            };
+            let ctx = crate::row_spans::RowCtx {
+                row: &app.rows[row_idx],
+                index: pos,
+                cursor: app.cursor,
+                workspace_repos: app.workspace_repos.is_some(),
+                priority_hints: app.priority_hints.as_ref(),
+                triage: app.row_triage.get(&id),
+                searching: app.searching || app.semantic_searching,
+                diff_badge,
+                title_width,
+                edge_label,
+                dimmed,
+                truncation_suffix,
+            };
+            ListItem::new(Line::from(crate::row_spans::row_spans(prefix, &ctx)))
         })
         .collect();
 
-    let title = format!(
-        " ISSUES ({}) [{}] ",
-        app.filtered_indices.len(),
-        app.sort_mode.label()
-    );
+    let title = if app.left_tree_mode {
+        format!(
+            " ISSUES ({}) [{}] [tree] ",
+            app.filtered_indices.len(),
+            app.sort_mode.label()
+        )
+    } else {
+        format!(
+            " ISSUES ({}) [{}] ",
+            app.filtered_indices.len(),
+            app.sort_mode.label()
+        )
+    };
     let list_border_color = if !app.focus_detail {
         Color::Cyan
     } else {
@@ -4776,10 +4754,18 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         .highlight_symbol(">");
 
     // The window is already scrolled, so the state's offset is 0 and its
-    // selected index is relative to the window. `app.cursor` is the absolute
-    // row; `window_start` is the first row handed to `List`.
+    // selected index is relative to the window. In flat mode `app.cursor`
+    // minus the window start is that index; in tree mode the painted rows
+    // are already absolute `(filtered_pos, tree_row)` pairs, so the index is
+    // the position of the painted row whose `filtered_pos` equals the
+    // cursor.
     let mut state = ListState::default();
-    state.select(app.cursor.checked_sub(window_start));
+    if app.left_tree_mode {
+        let sel = window_rows.iter().position(|&(pos, _)| pos == app.cursor);
+        state.select(sel);
+    } else {
+        state.select(app.cursor.checked_sub(visible.start));
+    }
     f.render_stateful_widget(list, list_area, &mut state);
 }
 
@@ -7340,6 +7326,7 @@ pub mod detail;
 pub mod helpers;
 pub mod keybindings;
 pub mod markdown;
+pub mod row_spans;
 pub mod theme;
 pub mod tutorial;
 pub mod update_modal;

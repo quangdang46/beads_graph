@@ -1,5 +1,6 @@
 pub mod attention;
 pub mod board;
+pub mod deptree;
 pub mod flow_matrix;
 pub mod graph;
 pub mod history;

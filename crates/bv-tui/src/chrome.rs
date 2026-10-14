@@ -113,6 +113,7 @@ pub fn default_help_entries() -> Vec<(&'static str, &'static str)> {
         ("s", "Cycle sort mode"),
         ("b", "Board view"),
         ("E", "Tree view"),
+        ("D", "Tree left pane"),
         ("g", "Graph view"),
         ("i", "Insights dashboard"),
         ("h", "History view"),
@@ -154,8 +155,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_help_has_20_entries() {
-        assert_eq!(default_help_entries().len(), 20);
+    fn default_help_has_21_entries() {
+        assert_eq!(default_help_entries().len(), 21);
+    }
+
+    #[test]
+    fn help_lists_the_dependency_tree_toggle() {
+        // The toggle is a bvr addition, not a Go parity binding, so it must be
+        // documented or the `?` overlay will not mention it.
+        assert!(default_help_entries().iter().any(|(k, _)| *k == "D"));
     }
 
     #[test]

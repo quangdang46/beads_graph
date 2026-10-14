@@ -142,6 +142,10 @@ pub fn build_default_registry() -> KeyRegistry {
     for (key, desc) in [
         ("b", "Toggle board view"),
         ("E", "Toggle tree view"),
+        (
+            "D",
+            "Toggle dependency-tree left pane (flat list is the default)",
+        ),
         ("G", "Toggle graph view"),
         ("h", "Toggle history view (bead↔commit correlation)"),
         ("i", "Toggle insights view"),
