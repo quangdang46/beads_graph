@@ -37,7 +37,8 @@ pub struct RowCtx<'a> {
     /// Dependency edge annotation for tree rows, e.g. `[blocks]`. Empty (or
     /// `None`) in flat mode and on tree roots.
     pub edge_label: Option<&'a str>,
-    /// Mute the whole row (advisory dependency subtree in tree mode).
+    /// Mute the whole row (advisory dependency subtree in tree mode, or a
+    /// closed issue — see [`closed_dim_style`]).
     pub dimmed: bool,
     /// Cycle/max-depth marker suffix in tree mode (` (cycle)`,
     /// ` (max depth)`).
@@ -52,10 +53,38 @@ pub struct RowCtx<'a> {
 /// inventing one.
 pub const COLUMN_RESERVE: usize = 45;
 
+/// Style for the two columns that carry a row's ink — id and title — when the
+/// row should recede.
+///
+/// Beans paints a done bean in `StatusDoneText`, a flat secondary grey with no
+/// bold (`internal/ui/styles.go:79`), and its `Dimmed` branch mutes the whole
+/// row when a bean is shown only as ancestor context (`RenderBeanRow`,
+/// `styles.go:489-495`). Our `closed`/`tombstone` rows did neither: the badge
+/// went grey but the id stayed cyan and the title white, so a closed issue read
+/// as loudly as an open one.
+///
+/// Selected rows keep their bold — the cursor should still be legible — but
+/// lose their colour.
+fn receded_style(selected: bool) -> Style {
+    if selected {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
 /// Build one row's spans, `prefix` first.
 pub fn row_spans(prefix: &str, ctx: &RowCtx<'_>) -> Vec<Span<'static>> {
     let row = ctx.row;
     let selected = ctx.index == ctx.cursor;
+    // Closed and tombstoned issues recede, as does the advisory subtree a
+    // tree row may hang in. `Status::is_closed()` covers `Closed` only, so the
+    // tombstone test is spelled out here.
+    let receded = ctx.dimmed
+        || matches!(
+            row.status,
+            bv_core::model::Status::Closed | bv_core::model::Status::Tombstone
+        );
 
     let mut spans = Vec::with_capacity(16);
 
@@ -80,7 +109,9 @@ pub fn row_spans(prefix: &str, ctx: &RowCtx<'_>) -> Vec<Span<'static>> {
         spans.push(Span::raw("  "));
     }
 
-    // Type icon
+    // Type icon. Keeps its colour in both modes: the icon column is narrow and
+    // greying it makes the row harder to scan by type, which is what the icon
+    // is for.
     let (icon, icon_color) = crate::type_icon(&row.issue_type);
     spans.push(Span::styled(icon, Style::default().fg(icon_color)));
     spans.push(Span::raw(" "));
@@ -179,11 +210,11 @@ pub fn row_spans(prefix: &str, ctx: &RowCtx<'_>) -> Vec<Span<'static>> {
         spans.push(Span::raw(" "));
     }
 
-    // ID. In tree mode, a dimmed node (advisory edge or its subtree) renders
-    // its id muted, mirroring beans' `RenderBeanRow` `Dimmed` branch.
+    // ID. Recedes for the same reasons the title does: a closed issue, or an
+    // advisory subtree in tree mode.
     spans.push(Span::styled(
         format!("{:<20}", row.id),
-        Style::default().fg(if ctx.dimmed {
+        Style::default().fg(if receded {
             Color::DarkGray
         } else {
             Color::Cyan
@@ -209,10 +240,10 @@ pub fn row_spans(prefix: &str, ctx: &RowCtx<'_>) -> Vec<Span<'static>> {
     } else {
         format!("{:<width$}", row.title, width = ctx.title_width)
     };
-    // Advisory edges (and their subtrees) read as secondary: the title keeps
-    // its selected-bold state but loses its ink, matching the muted id above.
-    let title_style = if ctx.dimmed {
-        Style::default().fg(Color::DarkGray)
+    // A closed issue and an advisory subtree both read as secondary; the
+    // selected one keeps its bold so the cursor stays visible.
+    let title_style = if receded {
+        receded_style(selected)
     } else {
         Style::default().add_modifier(if selected {
             Modifier::BOLD
@@ -255,4 +286,113 @@ pub fn row_spans(prefix: &str, ctx: &RowCtx<'_>) -> Vec<Span<'static>> {
     }
 
     spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bv_core::model::Status;
+
+    fn row(status: Status) -> crate::ListRow {
+        crate::ListRow {
+            id: "T-001".into(),
+            title: "Some issue".into(),
+            status,
+            priority: 2,
+            issue_type: "task".into(),
+            labels: vec![],
+            created_at: None,
+            description: String::new(),
+            notes: String::new(),
+            assignee: String::new(),
+            repo_prefix: None,
+        }
+    }
+
+    fn ctx_for(row: &crate::ListRow, cursor: usize) -> RowCtx<'_> {
+        RowCtx {
+            row,
+            index: 0,
+            cursor,
+            workspace_repos: false,
+            priority_hints: None,
+            triage: None,
+            searching: false,
+            diff_badge: None,
+            title_width: 20,
+            edge_label: None,
+            dimmed: false,
+            truncation_suffix: None,
+        }
+    }
+
+    /// Style of the span holding the id (the first cyan/grey one after the
+    /// cursor marker).
+    fn id_style(spans: &[Span<'static>]) -> Option<String> {
+        spans
+            .iter()
+            .find(|s| s.content.contains("T-001"))
+            .map(|s| format!("{:?}", s.style.fg))
+    }
+
+    #[test]
+    fn closed_issue_recedes_and_open_does_not() {
+        let open = row(Status::Open);
+        let closed = row(Status::Closed);
+        let tomb = row(Status::Tombstone);
+
+        let open_id = id_style(&row_spans("", &ctx_for(&open, 0))).unwrap();
+        let closed_id = id_style(&row_spans("", &ctx_for(&closed, 0))).unwrap();
+        let tomb_id = id_style(&row_spans("", &ctx_for(&tomb, 0))).unwrap();
+
+        assert_eq!(open_id, format!("{:?}", Some(Color::Cyan)));
+        assert_eq!(closed_id, format!("{:?}", Some(Color::DarkGray)));
+        assert_eq!(tomb_id, format!("{:?}", Some(Color::DarkGray)));
+    }
+
+    #[test]
+    fn other_open_like_statuses_stay_loud() {
+        // The point of the change is that only finished work recedes — a
+        // blocked or review issue is still live work.
+        for status in [
+            Status::InProgress,
+            Status::Blocked,
+            Status::Review,
+            Status::Draft,
+        ] {
+            let r = row(status);
+            let style = id_style(&row_spans("", &ctx_for(&r, 0))).unwrap();
+            assert_eq!(
+                style,
+                format!("{:?}", Some(Color::Cyan)),
+                "{status:?} should keep the cyan id"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_closed_row_stays_bold_rather_than_grey() {
+        // The cursor must remain legible even on a finished issue.
+        let closed = row(Status::Closed);
+        let spans = row_spans("", &ctx_for(&closed, 0));
+        let title = spans
+            .iter()
+            .find(|s| s.content.contains("Some issue"))
+            .unwrap();
+        assert!(
+            title.style.add_modifier.contains(Modifier::BOLD),
+            "selected row should stay bold: {:?}",
+            title.style
+        );
+    }
+
+    #[test]
+    fn dimmed_row_recedes_like_a_closed_one() {
+        let open = row(Status::Open);
+        let mut ctx = ctx_for(&open, 0);
+        ctx.dimmed = true;
+        let spans = row_spans("", &ctx);
+        let id = spans.iter().find(|s| s.content.contains("T-001")).unwrap();
+        assert_eq!(id.style.fg, Some(Color::DarkGray));
+    }
 }
