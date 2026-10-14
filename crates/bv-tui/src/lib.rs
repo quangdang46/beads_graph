@@ -3429,9 +3429,9 @@ impl App {
     /// pane. `cursor` still indexes `filtered_indices`; only the *step* is
     /// computed from the tree row order.
     ///
-    /// A node that appears twice (a diamond) only advances one tree row per
-    /// keypress, so the cursor stays on the issue until the walk moves off
-    /// the last occurrence of it.
+    /// Every issue appears in the tree exactly once (see `build_dep_tree`), so
+    /// the tree row and the flat cursor are interchangeable: one row per
+    /// keypress, clamped at the ends.
     fn move_cursor_in_tree(&mut self, delta: isize) {
         let nodes = &self.dep_tree_nodes;
         if nodes.is_empty() {
@@ -3446,17 +3446,7 @@ impl App {
             return;
         }
         let current = crate::views::deptree::tree_row_for_cursor(nodes, self.cursor);
-        // Skip repeats of the same issue: a diamond shows one bead on several
-        // rows, and one keypress should move one *distinct* bead, not one row.
-        let leaving = nodes[current].filtered_pos;
-        let mut step = current as isize + delta;
-        while step >= 0 && (step as usize) < nodes.len() {
-            let pos = nodes[step as usize].filtered_pos;
-            if pos != leaving {
-                break;
-            }
-            step += delta;
-        }
+        let step = current as isize + delta;
         if step < 0 || (step as usize) >= nodes.len() {
             return; // clamped at the ends of the tree
         }

@@ -119,10 +119,18 @@ struct ChildEdge {
 /// from the first filtered one instead — rendering nothing would make the pane
 /// blank.
 ///
-/// Each root is walked independently with a fresh cycle guard, so a diamond
-/// (`A→B, A→C, B→D, C→D`) renders `D` twice. That is deliberate and matches
-/// [`crate::detail::render_tree_children`], whose `visited` set is
-/// inserted-then-removed per branch.
+/// Every issue appears at most once: the first walk that reaches it emits the
+/// row, and later parents skip it. A shared child (`A→B, A→C, B→D, C→D`)
+/// therefore renders `D` once, under `B`, with an `also under C` suffix (see
+/// [`DepNode::label`]). This keeps the flat-cursor ↔ tree-row mapping
+/// one-to-one: without it, `tree_row_for_cursor` would always resolve a
+/// repeated issue to its first occurrence, and moving `j` from the second one
+/// would jump backwards — the "stuck on the deepest child" bug.
+///
+/// This deliberately differs from [`crate::detail::render_tree_children`],
+/// whose `visited` set is inserted-then-removed per branch and so renders a
+/// diamond twice. The detail pane can afford that (it scrolls one issue); the
+/// list pane cannot (its cursor is positional).
 pub fn build_dep_tree(
     filtered: &[&crate::ListRow],
     issue_map: &HashMap<String, Issue>,
@@ -184,8 +192,16 @@ pub fn build_dep_tree(
     // the first filtered issue so the pane still shows the group.
     let roots = if roots.is_empty() { vec![0] } else { roots };
 
+    // Second-parent lookup: for the `also under` suffix. Built from the same
+    // `children_of` above, so it costs one pass and no `issue_map` lookups.
+    let parents = Parents::compute(filtered, &children_of);
+
     let mut out = Vec::new();
     let mut path = Vec::new();
+    // Every issue is emitted at most once. `emitted[pos]` records the first
+    // parent that reached it, so later parents skip the row — the suffix on
+    // the emitted row still names them (see `also_under`).
+    let mut emitted: HashMap<usize, Option<usize>> = HashMap::new();
     for root in roots {
         walk(
             root,
@@ -195,14 +211,63 @@ pub fn build_dep_tree(
             EdgeKind::ParentChild,
             false,
             "",
+            None,
             filtered,
             &children_of,
+            &parents,
+            &mut emitted,
             &mut path,
             max_depth,
             &mut out,
         );
     }
     out
+}
+
+/// Every issue's parent set, used for the `also under` suffix on a row that
+/// is reachable from more than one parent (a diamond).
+#[derive(Debug, Default)]
+struct Parents {
+    /// Child position -> every parent position that points at it.
+    of: HashMap<usize, Vec<usize>>,
+}
+
+impl Parents {
+    fn compute(filtered: &[&crate::ListRow], children_of: &HashMap<&str, Edges>) -> Self {
+        let mut of: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (parent, issue) in filtered.iter().enumerate() {
+            if let Some(edges) = children_of.get(issue.id.as_str()) {
+                for edge in edges {
+                    of.entry(edge.pos).or_default().push(parent);
+                }
+            }
+        }
+        Parents { of }
+    }
+
+    /// `also under A, B` for the parents other than `first_parent`.
+    fn suffix(
+        &self,
+        pos: usize,
+        first_parent: Option<usize>,
+        filtered: &[&crate::ListRow],
+    ) -> String {
+        let others: Vec<&str> = self
+            .of
+            .get(&pos)
+            .map(|ps| {
+                ps.iter()
+                    .filter(|&&p| Some(p) != first_parent)
+                    .map(|&p| filtered[p].id.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if others.is_empty() {
+            String::new()
+        } else {
+            format!(" [also under {}]", others.join(", "))
+        }
+    }
 }
 
 /// Recursive descent emitting rows depth-first, mirroring
@@ -216,12 +281,22 @@ fn walk(
     kind: EdgeKind,
     dimmed: bool,
     label: &str,
+    parent: Option<usize>,
     filtered: &[&crate::ListRow],
     children_of: &HashMap<&str, Edges>,
+    parents: &Parents,
+    emitted: &mut HashMap<usize, Option<usize>>,
     path: &mut Vec<usize>,
     max_depth: usize,
     out: &mut Vec<DepNode>,
 ) {
+    // Dedup: the first walk that reaches a node owns it. A later parent skips
+    // the row entirely — its name is already on the emitted row's `also
+    // under` suffix.
+    if emitted.contains_key(&pos) {
+        return;
+    }
+    emitted.insert(pos, parent);
     // Roots sit flush left; every deeper level carries its parent's connector.
     let prefix = if depth == 0 {
         String::new()
@@ -241,6 +316,9 @@ fn walk(
         None
     };
 
+    // `also under A, B`: the parents that did NOT get the row, because the
+    // first walk to reach `pos` did.
+    let extra = parents.suffix(pos, parent, filtered);
     out.push(DepNode {
         filtered_pos: pos,
         depth,
@@ -248,7 +326,13 @@ fn walk(
         kind,
         truncated,
         dimmed,
-        label: label.to_string(),
+        label: if extra.is_empty() {
+            label.to_string()
+        } else if label.is_empty() {
+            extra.trim_start().to_string()
+        } else {
+            format!("{label}{extra}")
+        },
     });
 
     if truncated.is_some() {
@@ -282,8 +366,11 @@ fn walk(
             edge.kind,
             dimmed || edge.kind.is_advisory(),
             &edge.label,
+            Some(pos),
             filtered,
             children_of,
+            parents,
+            emitted,
             path,
             max_depth,
             out,
@@ -508,13 +595,14 @@ mod tests {
             ("A", vec![dep("A", "B", DependencyType::Blocks)]),
             ("B", vec![dep("B", "A", DependencyType::Blocks)]),
         ]);
-        // Both are pointed at, so the cycle fallback walks from A:
-        // A -> B -> A(revisit, marked, not expanded).
+        // Both are pointed at, so the cycle fallback walks from A: A -> B.
+        // B's back-edge to A is a revisit of an *emitted* node, so no revisit
+        // row is painted — every issue appears at most once, which is what
+        // keeps the flat-cursor ↔ tree-row mapping one-to-one.
         let nodes = build_dep_tree(&filtered, &map, MAX_DEPTH);
-        assert_eq!(positions(&nodes), vec![0, 1, 0]);
+        assert_eq!(positions(&nodes), vec![0, 1]);
         assert_eq!(nodes[1].depth, 1);
-        assert_eq!(nodes[2].depth, 2);
-        assert_eq!(nodes[2].truncated, Some(Truncation::Cycle));
+        assert!(nodes[1].truncated.is_none());
     }
 
     #[test]
@@ -601,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn diamond_renders_the_shared_child_twice() {
+    fn diamond_renders_the_shared_child_once_with_also_under() {
         let a = row("A");
         let b = row("B");
         let c = row("C");
@@ -618,8 +706,13 @@ mod tests {
             ("B", vec![dep("B", "D", DependencyType::ParentChild)]),
             ("C", vec![dep("C", "D", DependencyType::ParentChild)]),
         ]);
+        // D is reached from both B and C, but appears once — under B, the
+        // first parent in filtered order — with an `also under C` suffix.
         let nodes = build_dep_tree(&filtered, &map, MAX_DEPTH);
-        assert_eq!(nodes.iter().filter(|n| n.filtered_pos == 3).count(), 2);
+        assert_eq!(positions(&nodes), vec![0, 1, 3, 2]);
+        let d = nodes.iter().find(|n| n.filtered_pos == 3).unwrap();
+        assert_eq!(d.depth, 2);
+        assert!(d.label.contains("also under"), "label: {:?}", d.label);
     }
 
     #[test]
@@ -682,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_maps_to_the_first_of_duplicate_rows() {
+    fn cursor_maps_to_the_only_row_for_a_shared_issue() {
         let a = row("A");
         let b = row("B");
         let c = row("C");
@@ -700,7 +793,10 @@ mod tests {
             ("C", vec![dep("C", "D", DependencyType::ParentChild)]),
         ]);
         let nodes = build_dep_tree(&filtered, &map, MAX_DEPTH);
-        // D appears at tree rows 2 and 4; the cursor's home is the first.
+        // D is emitted once, at tree row 2 under B — and that is the only row
+        // the cursor can land on. No ambiguity, no "stuck" navigation.
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(nodes[2].filtered_pos, 3);
         assert_eq!(tree_row_for_cursor(&nodes, 3), 2);
     }
 
