@@ -1161,6 +1161,34 @@ impl App {
         if self.cursor >= self.filtered_indices.len() {
             self.cursor = self.filtered_indices.len().saturating_sub(1);
         }
+        // The tree is derived from the filtered set, so a filter change makes
+        // the painted one stale. Rebuild it here rather than in the key handler
+        // that needs it: `move_cursor_in_tree` and the click handler both read
+        // `dep_tree_nodes`, and either running against last frame's filter is
+        // the same off-by-one-filter bug in a second place.
+        if self.left_tree_mode {
+            self.rebuild_dep_tree();
+        }
+    }
+
+    /// Recompute `dep_tree_nodes` from `filtered_indices`.
+    ///
+    /// Called from `apply_filter` (the set changed) and from `render_list`
+    /// (the pane is being painted). The cursor's tree row is recomputed here
+    /// too, so callers never have to derive it.
+    fn rebuild_dep_tree(&mut self) {
+        let filtered: Vec<&crate::ListRow> = self
+            .filtered_indices
+            .iter()
+            .map(|&i| &self.rows[i])
+            .collect();
+        let (nodes, _cursor_row) = crate::views::deptree::tree_preview(
+            &filtered,
+            &self.issue_map,
+            MAX_DEP_TREE_DEPTH,
+            self.cursor,
+        );
+        self.dep_tree_nodes = nodes;
     }
     /// Update cass session count for the selected bead (Go getCassSessionCount).
     fn update_session_count(&mut self) {
@@ -1973,6 +2001,8 @@ impl App {
                     if let Some(t) = &mut self.tutorial {
                         t.next_page();
                     }
+                } else if self.left_tree_mode {
+                    self.move_cursor_in_tree(1);
                 } else if self.cursor + 1 < self.filtered_indices.len() {
                     self.cursor += 1;
                     self.update_session_count();
@@ -2016,6 +2046,8 @@ impl App {
                     if let Some(t) = &mut self.tutorial {
                         t.prev_page();
                     }
+                } else if self.left_tree_mode {
+                    self.move_cursor_in_tree(-1);
                 } else {
                     self.cursor = self.cursor.saturating_sub(1);
                     self.update_session_count();
@@ -2339,7 +2371,11 @@ impl App {
             // `b`, `E`, `G`) and defaults to flat.
             KeyCode::Char('D') if self.current_view == ViewMode::List => {
                 self.left_tree_mode = !self.left_tree_mode;
-                if !self.left_tree_mode {
+                if self.left_tree_mode {
+                    // Pre-build so the first `j` after the toggle already has
+                    // the tree under it (`render_list` rewrites it anyway).
+                    self.rebuild_dep_tree();
+                } else {
                     self.dep_tree_nodes.clear();
                     self.dep_tree_window = 0..0;
                 }
@@ -3382,6 +3418,50 @@ impl App {
         {
             self.cursor = pos;
         }
+    }
+
+    /// Move the cursor `delta` rows in tree mode.
+    ///
+    /// `j`/`k` have to walk the *tree*, not `filtered_indices`. The tree is
+    /// depth-first, so `filtered_indices` order (priority, then id
+    /// descending) puts a child several rows away from its parent — moving
+    /// the flat cursor by one step used to jump the highlight all over the
+    /// pane. `cursor` still indexes `filtered_indices`; only the *step* is
+    /// computed from the tree row order.
+    ///
+    /// A node that appears twice (a diamond) only advances one tree row per
+    /// keypress, so the cursor stays on the issue until the walk moves off
+    /// the last occurrence of it.
+    fn move_cursor_in_tree(&mut self, delta: isize) {
+        let nodes = &self.dep_tree_nodes;
+        if nodes.is_empty() {
+            // Nothing painted yet (first frame, or an empty filter): fall
+            // back to the flat walk so navigation never dead-ends.
+            let next = self.cursor as isize + delta;
+            self.cursor = next
+                .max(0)
+                .min(self.filtered_indices.len().saturating_sub(1) as isize)
+                as usize;
+            self.update_session_count();
+            return;
+        }
+        let current = crate::views::deptree::tree_row_for_cursor(nodes, self.cursor);
+        // Skip repeats of the same issue: a diamond shows one bead on several
+        // rows, and one keypress should move one *distinct* bead, not one row.
+        let leaving = nodes[current].filtered_pos;
+        let mut step = current as isize + delta;
+        while step >= 0 && (step as usize) < nodes.len() {
+            let pos = nodes[step as usize].filtered_pos;
+            if pos != leaving {
+                break;
+            }
+            step += delta;
+        }
+        if step < 0 || (step as usize) >= nodes.len() {
+            return; // clamped at the ends of the tree
+        }
+        self.cursor = nodes[step as usize].filtered_pos;
+        self.update_session_count();
     }
 
     /// Go `revealRecipeIssue` — clear filters that would hide the target so
@@ -4610,15 +4690,12 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     // tree's, and `painted_row_for_screen` indexes `dep_tree_nodes` by the
     // same offset `handle_mouse` subtracts.
     if app.left_tree_mode {
-        let filtered: Vec<&crate::ListRow> =
-            app.filtered_indices.iter().map(|&i| &app.rows[i]).collect();
-        let (nodes, tree_cursor) = crate::views::deptree::tree_preview(
-            &filtered,
-            &app.issue_map,
-            MAX_DEP_TREE_DEPTH,
-            app.cursor,
-        );
-        app.dep_tree_nodes = nodes;
+        // Rebuild here as well as in `apply_filter`: the resize that lands
+        // between two keystrokes changes `row_capacity`, and a rebuild is
+        // cheap (borrowed slices, no clones — see `views/tree.rs`).
+        app.rebuild_dep_tree();
+        let tree_cursor =
+            crate::views::deptree::tree_row_for_cursor(&app.dep_tree_nodes, app.cursor);
         app.dep_tree_window =
             crate::views::tree::visible_range(app.dep_tree_nodes.len(), tree_cursor, row_capacity);
         app.list_window = app.dep_tree_window.clone();

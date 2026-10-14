@@ -8,6 +8,7 @@
 
 use bv_tui::views::tree::visible_range;
 use bv_tui::App;
+use crossterm::event::KeyCode;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -317,4 +318,144 @@ fn tree_mode_keeps_cursor_selection_on_the_flat_cursor_row() {
     let rows = render_list_rows(&mut app);
     let markers = rows.iter().filter(|l| l.contains('▸')).count();
     assert_eq!(markers, 1, "exactly one row carries the cursor: {rows:?}");
+}
+
+#[test]
+fn tree_mode_j_walks_the_tree_not_the_flat_order() {
+    // The bug this pins: `j` moved `cursor` over `filtered_indices`, which
+    // `apply_filter` sorts by (priority, Reverse(id)). The pane, however, is
+    // depth-first, so the highlight jumped to an unrelated row. Here the flat
+    // order is the reverse of the tree order, so a flat walk would move to a
+    // different issue than a tree walk.
+    //
+    // Chain: A -> B -> C, all priority 2. Flat order is C, B, A (id desc);
+    // the tree paints A, then B under it, then C under that.
+    let mut issues: Vec<_> = (0..3).map(issue).collect();
+    let (a, b, c) = (
+        issues[0].id.clone(),
+        issues[1].id.clone(),
+        issues[2].id.clone(),
+    );
+    issues[0].dependencies.push(bv_core::model::Dependency {
+        issue_id: a.clone(),
+        depends_on_id: b.clone(),
+        depends_on_legacy: String::new(),
+        target_id_legacy: String::new(),
+        r#type: bv_core::model::DependencyType::ParentChild,
+        created_at: None,
+        created_by: String::new(),
+    });
+    issues[1].dependencies.push(bv_core::model::Dependency {
+        issue_id: b.clone(),
+        depends_on_id: c.clone(),
+        depends_on_legacy: String::new(),
+        target_id_legacy: String::new(),
+        r#type: bv_core::model::DependencyType::ParentChild,
+        created_at: None,
+        created_by: String::new(),
+    });
+    let mut app = App::new(issues);
+    app.left_tree_mode = true;
+    render_list_rows(&mut app);
+    // The chain A -> B -> C makes A the root, so the flat order (priority,
+    // then id descending) puts the *root* on the last flat row and the
+    // deepest leaf on the first. Put the cursor on the root to start from
+    // the top of the tree.
+    let root_pos = app
+        .filtered_indices
+        .iter()
+        .position(|&i| app.rows[i].id == a)
+        .unwrap();
+    app.cursor = root_pos;
+    render_list_rows(&mut app);
+    assert_eq!(
+        app.selected().unwrap().id,
+        a,
+        "cursor starts on the tree root"
+    );
+
+    // One `j` must descend to B. A flat walk would go the other way (to the
+    // next id in descending order, i.e. off the end of the chain entirely),
+    // which is the behaviour this pins down.
+    app.handle_key(KeyCode::Down);
+    render_list_rows(&mut app);
+    assert_eq!(
+        app.selected().unwrap().id,
+        b,
+        "first `j` should descend to the child B"
+    );
+
+    app.handle_key(KeyCode::Down);
+    render_list_rows(&mut app);
+    assert_eq!(
+        app.selected().unwrap().id,
+        c,
+        "second `j` should descend to C"
+    );
+
+    // And back up again.
+    app.handle_key(KeyCode::Up);
+    render_list_rows(&mut app);
+    assert_eq!(app.selected().unwrap().id, b, "`k` should climb back to B");
+    app.handle_key(KeyCode::Up);
+    render_list_rows(&mut app);
+    assert_eq!(app.selected().unwrap().id, a, "next `k` should climb to A");
+}
+
+#[test]
+fn tree_mode_k_comes_back_up_the_tree() {
+    let mut issues: Vec<_> = (0..3).map(issue).collect();
+    let (a, b, c) = (
+        issues[0].id.clone(),
+        issues[1].id.clone(),
+        issues[2].id.clone(),
+    );
+    issues[0].dependencies.push(bv_core::model::Dependency {
+        issue_id: a.clone(),
+        depends_on_id: b.clone(),
+        depends_on_legacy: String::new(),
+        target_id_legacy: String::new(),
+        r#type: bv_core::model::DependencyType::ParentChild,
+        created_at: None,
+        created_by: String::new(),
+    });
+    issues[1].dependencies.push(bv_core::model::Dependency {
+        issue_id: b.clone(),
+        depends_on_id: c.clone(),
+        depends_on_legacy: String::new(),
+        target_id_legacy: String::new(),
+        r#type: bv_core::model::DependencyType::ParentChild,
+        created_at: None,
+        created_by: String::new(),
+    });
+    let mut app = App::new(issues);
+    app.left_tree_mode = true;
+    render_list_rows(&mut app);
+    // Flat order is id-descending, so the *last* flat row is the deepest
+    // child, not the first — pin the position rather than trusting a
+    // hardcoded index.
+    let deepest = app
+        .filtered_indices
+        .iter()
+        .position(|&i| app.rows[i].id == c)
+        .unwrap();
+    app.cursor = deepest;
+    render_list_rows(&mut app);
+    assert_eq!(
+        app.selected().unwrap().id,
+        c,
+        "cursor starts on the deepest child"
+    );
+
+    app.handle_key(KeyCode::Up);
+    render_list_rows(&mut app);
+    assert_eq!(app.selected().unwrap().id, b, "`k` should climb to B");
+    app.handle_key(KeyCode::Up);
+    render_list_rows(&mut app);
+    assert_eq!(app.selected().unwrap().id, a, "next `k` should climb to A");
+    // At the root, `k` must stay put rather than wrap or move the flat
+    // cursor to something unrelated.
+    app.handle_key(KeyCode::Up);
+    render_list_rows(&mut app);
+    assert_eq!(app.selected().unwrap().id, a, "`k` is clamped at the root");
 }
