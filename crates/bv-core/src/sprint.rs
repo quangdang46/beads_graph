@@ -837,6 +837,12 @@ pub struct CapacityOutput {
     pub bottlenecks: Vec<Bottleneck>,
 }
 
+/// Go `Issue.IsDeferredAt` (pkg/model/types.go:261) — the scheduler's deferral
+/// is active while the instant is still in the future.
+fn issue_is_deferred_at(issue: &Issue, now: jiff::Timestamp) -> bool {
+    crate::model::parse_ts(&issue.defer_until).is_some_and(|d| d > now)
+}
+
 /// Compute capacity analysis for open issues.
 ///
 /// Go `run_robot_capacity`:
@@ -862,6 +868,7 @@ pub fn calculate_capacity(
     agents: i64,
     label_filter: Option<&str>,
     critical_path_score: &BTreeMap<String, f64>,
+    now: jiff::Timestamp,
 ) -> CapacityOutput {
     let agents = agents.max(1);
     let median_minutes = compute_median_estimated_minutes(issues);
@@ -940,15 +947,25 @@ pub fn calculate_capacity(
         }
     }
 
-    // Find actionable: issues with no open blockers — Go: iterate openIssues
+    // Find actionable — Go: `readiness.Ready(issue.ID, now)` over the open
+    // issues (robot_registry.go:3598-3602).
+    //
+    // Go's `Ready` is three gates, not one: the status must be open or
+    // in-progress, the bead must not be scheduler-deferred, and its
+    // dependencies must be satisfied. The port checked only the third, so a
+    // DEFERRED bead with no open blockers was reported as actionable work: on
+    // a 382-bead repository `--robot-capacity` counted 15 actionable issues
+    // where the oracle counts 11.
     let open_ids: HashSet<&str> = open_issues.iter().map(|i| i.id.as_str()).collect();
     let mut actionable: Vec<String> = open_issues
         .iter()
         .filter(|iss| {
-            blocked_by
-                .get(iss.id.as_str())
-                .map(|deps| deps.iter().all(|dep_id| !open_ids.contains(dep_id)))
-                .unwrap_or(true)
+            iss.status.is_open()
+                && !issue_is_deferred_at(iss, now)
+                && blocked_by
+                    .get(iss.id.as_str())
+                    .map(|deps| deps.iter().all(|dep_id| !open_ids.contains(dep_id)))
+                    .unwrap_or(true)
         })
         .map(|iss| iss.id.clone())
         .collect();
@@ -1765,7 +1782,7 @@ mod tests {
 
     #[test]
     fn capacity_empty_issues() {
-        let out = calculate_capacity(&[], 1, None, &BTreeMap::new());
+        let out = calculate_capacity(&[], 1, None, &BTreeMap::new(), jiff::Timestamp::UNIX_EPOCH);
         assert_eq!(out.open_issue_count, 0);
         assert_eq!(out.total_minutes, 0);
         assert!(out.critical_path.is_empty());
@@ -1776,7 +1793,13 @@ mod tests {
     fn capacity_all_closed() {
         let a = make_issue("A", Status::Closed);
         let b = make_issue("B", Status::Closed);
-        let out = calculate_capacity(&[a, b], 1, None, &BTreeMap::new());
+        let out = calculate_capacity(
+            &[a, b],
+            1,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(out.open_issue_count, 0);
         assert_eq!(out.total_minutes, 0);
     }
@@ -1788,7 +1811,13 @@ mod tests {
         let mut b = make_issue("B", Status::Open);
         b.estimated_minutes = Some(120);
 
-        let out = calculate_capacity(&[a, b], 1, None, &BTreeMap::new());
+        let out = calculate_capacity(
+            &[a, b],
+            1,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(out.open_issue_count, 2);
         assert_eq!(out.total_minutes, 180);
         // No dependencies: critical path = longest single issue (B: 120m)
@@ -1813,7 +1842,13 @@ mod tests {
             created_by: String::new(),
         }];
 
-        let out = calculate_capacity(&[a, b], 1, None, &BTreeMap::new());
+        let out = calculate_capacity(
+            &[a, b],
+            1,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(out.open_issue_count, 2);
         // A is actionable (no blockers), B is blocked by A
         assert_eq!(out.actionable_count, 1);
@@ -1853,7 +1888,13 @@ mod tests {
             created_by: String::new(),
         }];
 
-        let out = calculate_capacity(&[a, b, c, d], 1, None, &BTreeMap::new());
+        let out = calculate_capacity(
+            &[a, b, c, d],
+            1,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
         // A blocks C and D -> bottleneck
         assert!(!out.bottlenecks.is_empty());
         assert_eq!(out.bottlenecks[0].id, "A");
@@ -1869,7 +1910,13 @@ mod tests {
         b.labels = vec!["frontend".into()];
         b.estimated_minutes = Some(120);
 
-        let out = calculate_capacity(&[a, b], 1, Some("backend"), &BTreeMap::new());
+        let out = calculate_capacity(
+            &[a, b],
+            1,
+            Some("backend"),
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(out.open_issue_count, 1); // only A
         assert_eq!(out.label.as_deref(), Some("backend"));
     }
@@ -1890,7 +1937,13 @@ mod tests {
             created_by: String::new(),
         }];
 
-        let out = calculate_capacity(&[a, b], 1, None, &BTreeMap::new());
+        let out = calculate_capacity(
+            &[a, b],
+            1,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
         // Related dependency doesn't block: both actionable
         assert_eq!(out.actionable_count, 2);
         // Critical path: max(A, B) since they're independent = B (120m)
@@ -1904,7 +1957,13 @@ mod tests {
         let mut b = make_issue("B", Status::Open);
         b.estimated_minutes = Some(100);
 
-        let out = calculate_capacity(&[a, b], 1, None, &BTreeMap::new());
+        let out = calculate_capacity(
+            &[a, b],
+            1,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
         // No dependencies: critical path = one issue (100m)
         // parallelizable = (200 - 100) / 200 * 100 = 50%
         assert!((out.parallelizable_pct - 50.0).abs() < 1.0);
@@ -1917,8 +1976,20 @@ mod tests {
         let mut b = make_issue("B", Status::Open);
         b.estimated_minutes = Some(480);
 
-        let out1 = calculate_capacity(&[a.clone(), b.clone()], 1, None, &BTreeMap::new());
-        let out2 = calculate_capacity(&[a, b], 2, None, &BTreeMap::new());
+        let out1 = calculate_capacity(
+            &[a.clone(), b.clone()],
+            1,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
+        let out2 = calculate_capacity(
+            &[a, b],
+            2,
+            None,
+            &BTreeMap::new(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
 
         // With 2 agents, parallel work is halved
         assert!(out2.estimated_days < out1.estimated_days);

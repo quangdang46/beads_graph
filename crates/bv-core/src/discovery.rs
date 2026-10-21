@@ -32,6 +32,12 @@ pub enum DiscoveryError {
     RedirectDepth(usize),
     #[error("git: {0}")]
     Git(String),
+    /// A beads-directory failure. Go's `FindJSONLPathWithWarnings` wraps the
+    /// `*fs.PathError` with no prefix (pkg/loader/loader.go:682), so this
+    /// message prints bare — the `git:` prefix belongs to the revision
+    /// errors, not to this one.
+    #[error("{0}")]
+    BeadsDirectory(String),
     /// A revision that could not be resolved. Go wraps this at
     /// `LoadAtWithReport` (git.go:151) and prints it with no `git:` prefix, so
     /// it gets its own variant rather than borrowing `Git`'s.
@@ -170,6 +176,36 @@ fn get_main_repo_root(repo_path: &Path) -> Option<PathBuf> {
 
 /// Go: `GetBeadsDir`. Resolution order:
 /// BEADS_DB > BEADS_DIR > `<repo>/.beads` > main-repo `.beads` (worktrees).
+/// Go's `os.Getwd()`.
+///
+/// Go prefers `$PWD` when it names the same directory as `.`, and returns it
+/// VERBATIM — the symlink path, the path with the case the user typed. The
+/// port used `std::env::current_dir()`, which is the physical path, so on a
+/// case-insensitive filesystem (or through a symlink) every path a payload
+/// named — the beads directory, the claim command's working directory — was
+/// the resolved one while the oracle's was the typed one. An agent that
+/// copies a claim command out of the payload got a different string from the
+/// oracle's.
+///
+/// The comparison has to RESOLVE both sides first: comparing the two
+/// `Result`s directly reads as "they match" when both canonicalize calls
+/// fail, which returned a stale `$PWD`.
+pub fn go_getwd() -> PathBuf {
+    let physical = std::env::current_dir().unwrap_or_default();
+    if let Ok(pwd) = std::env::var("PWD") {
+        let pwd = PathBuf::from(pwd);
+        if let (Ok(a), Ok(b)) = (
+            std::fs::canonicalize(&pwd),
+            std::fs::canonicalize(&physical),
+        ) {
+            if a == b {
+                return pwd;
+            }
+        }
+    }
+    physical
+}
+
 pub fn get_beads_dir(repo_path: &Path) -> Result<PathBuf, DiscoveryError> {
     if let Ok(env_db) = std::env::var(BEADS_DB_ENV) {
         if !env_db.is_empty() {
@@ -182,7 +218,8 @@ pub fn get_beads_dir(repo_path: &Path) -> Result<PathBuf, DiscoveryError> {
         }
     }
     let repo = if repo_path.as_os_str().is_empty() {
-        std::env::current_dir().map_err(|e| DiscoveryError::Git(e.to_string()))?
+        // Go main.go:214-220 — `os.Getwd()`, not the physical path.
+        go_getwd()
     } else {
         repo_path.to_path_buf()
     };
@@ -201,6 +238,26 @@ pub fn get_beads_dir(repo_path: &Path) -> Result<PathBuf, DiscoveryError> {
     Ok(local)
 }
 
+/// Go's `*fs.PathError.Error()` — `<op> <path>: <err>`, with `err` the bare
+/// errno description.
+///
+/// `io::Error`'s own `Display` is the same description but capitalised and with
+/// `(os error N)` glued on, so the two are not interchangeable: Go prints
+/// `open /x: no such file or directory` where Rust would print
+/// `open /x: No such file or directory (os error 2)`.
+pub fn go_path_error(op: &str, path: &str, e: &std::io::Error) -> String {
+    let mut msg = e.to_string();
+    if e.raw_os_error().is_some() {
+        if let Some(cut) = msg.rfind(" (os error ") {
+            msg.truncate(cut);
+        }
+    }
+    if let Some(first) = msg.get_mut(0..1) {
+        first.make_ascii_lowercase();
+    }
+    format!("{op} {path}: {msg}")
+}
+
 /// Go: `FindJSONLPathWithWarnings`. Picks the first preferred name with
 /// size > 0; skips backups/merge artifacts; warns about left/right files.
 pub fn find_jsonl_path_with_warnings(
@@ -210,11 +267,15 @@ pub fn find_jsonl_path_with_warnings(
     let entries = match std::fs::read_dir(beads_dir) {
         Ok(e) => e,
         Err(e) => {
-            return Err(DiscoveryError::Git(format!(
-                "failed to read beads directory {}: {}",
-                beads_dir.display(),
-                e
-            )))
+            // Go `os.ReadDir` returns a `*fs.PathError`, and
+            // `FindJSONLPathWithWarnings` wraps it as
+            // `failed to read beads directory: %w` (pkg/loader/loader.go:682).
+            // The port spelled the path into its own sentence and left Go's
+            // `open <path>: <errno>` wording out.
+            return Err(DiscoveryError::BeadsDirectory(format!(
+                "failed to read beads directory: {}",
+                go_path_error("open", &beads_dir.to_string_lossy(), &e)
+            )));
         }
     };
     let mut candidates: Vec<String> = Vec::new();
@@ -277,7 +338,13 @@ pub fn load_issues_from_repo(
     // the SQLite db. Preferring the db here diverged on the v0.25.0
     // `data_hash` because the SQLite reader omits fields (e.g. dependency
     // created_at/created_by) that the JSONL carries. Match Go: JSONL first.
-    if let Ok(Some(jsonl)) = find_jsonl_path_with_warnings(&beads_dir, |_| {}) {
+    // Go's legacy JSONL path propagates the discovery failure
+    // (pkg/loader/loader.go:682), so a missing `.beads` directory is
+    // reported as `failed to read beads directory: open <dir>: no such file
+    // or directory`. The port swallowed it and printed a message of its own
+    // inventing, which the oracle never emits.
+    let jsonl = find_jsonl_path_with_warnings(&beads_dir, |_| {})?;
+    if let Some(jsonl) = jsonl {
         if let Ok(raw) = std::fs::read_to_string(&jsonl) {
             let mut rdr = raw.as_bytes();
             if let Ok(parsed) =

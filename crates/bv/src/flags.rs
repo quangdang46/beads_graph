@@ -11,10 +11,6 @@ pub struct FlagDef {
     pub name: &'static str,
     /// Value kind — used for clap value parsing and validation.
     pub kind: FlagKind,
-    /// True when this flag alone is a "primary command" (exclusive group).
-    pub primary: bool,
-    /// Exclusive group id when primary (Go: 37 groups).
-    pub group: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,24 +33,18 @@ const fn b(name: &'static str) -> FlagDef {
     FlagDef {
         name,
         kind: FlagKind::Bool,
-        primary: false,
-        group: None,
     }
 }
 const fn s(name: &'static str) -> FlagDef {
     FlagDef {
         name,
         kind: FlagKind::Str,
-        primary: false,
-        group: None,
     }
 }
 const fn i(name: &'static str) -> FlagDef {
     FlagDef {
         name,
         kind: FlagKind::Int,
-        primary: false,
-        group: None,
     }
 }
 
@@ -1335,255 +1325,237 @@ pub fn render_help(prog: &str) -> String {
     out
 }
 
-/// Robot primary commands (~41). Group = exclusive-command family.
+/// Robot primary commands (~41). The exclusive-command family each one
+/// belongs to lives in [`PRIMARY_GROUPS`].
 pub const ROBOT_PRIMARIES: &[FlagDef] = &[
     FlagDef {
         name: "robot-help",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("meta"),
     },
     FlagDef {
         name: "robot-capabilities",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("meta"),
     },
     FlagDef {
         name: "robot-docs",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("meta"),
     },
     FlagDef {
         name: "robot-schema",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("meta"),
     },
     FlagDef {
         name: "robot-recipes",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("meta"),
     },
     FlagDef {
         name: "robot-metrics",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("meta"),
     },
-    // triage family shares one group
+    // The triage family shares one exclusive group; see [`PRIMARY_GROUPS`].
     FlagDef {
         name: "robot-triage",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("triage"),
     },
     FlagDef {
         name: "robot-next",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("triage"),
     },
     FlagDef {
         name: "robot-triage-by-track",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("triage"),
     },
     FlagDef {
         name: "robot-triage-by-label",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("triage"),
     },
     FlagDef {
         name: "robot-insights",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("insights"),
     },
     FlagDef {
         name: "robot-plan",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("plan"),
     },
     FlagDef {
         name: "robot-priority",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("priority"),
     },
     FlagDef {
         name: "robot-alerts",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("alerts"),
     },
     FlagDef {
         name: "robot-suggest",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("suggest"),
     },
     FlagDef {
         name: "robot-graph",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("graph"),
     },
     FlagDef {
         name: "robot-search",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("search"),
     },
     FlagDef {
         name: "robot-diff",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("diff"),
     },
     FlagDef {
         name: "robot-drift",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("drift"),
     },
     FlagDef {
         name: "robot-history",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("history"),
     },
     FlagDef {
         name: "robot-explain-correlation",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("corr-feedback"),
     },
     FlagDef {
         name: "robot-confirm-correlation",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("corr-feedback"),
     },
     FlagDef {
         name: "robot-reject-correlation",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("corr-feedback"),
     },
     FlagDef {
         name: "robot-correlation-stats",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("corr-stats"),
     },
     FlagDef {
         name: "robot-orphans",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("orphans"),
     },
     FlagDef {
         name: "robot-file-beads",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("file-beads"),
     },
     FlagDef {
         name: "robot-file-hotspots",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("hotspots"),
     },
     FlagDef {
         name: "robot-impact",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("impact"),
     },
     FlagDef {
         name: "robot-file-relations",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("file-relations"),
     },
     FlagDef {
         name: "robot-related",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("related"),
     },
     FlagDef {
         name: "robot-blocker-chain",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("blocker-chain"),
     },
     FlagDef {
         name: "robot-impact-network",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("impact-network"),
     },
     FlagDef {
         name: "robot-causality",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("causality"),
     },
     FlagDef {
         name: "robot-sprint-list",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("sprints"),
     },
     FlagDef {
         name: "robot-sprint-show",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("sprints"),
     },
     FlagDef {
         name: "robot-forecast",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("forecast"),
     },
     FlagDef {
         name: "robot-capacity",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("capacity"),
     },
     FlagDef {
         name: "robot-burndown",
         kind: FlagKind::Str,
-        primary: true,
-        group: Some("burndown"),
     },
     FlagDef {
         name: "robot-label-health",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("label-health"),
     },
     FlagDef {
         name: "robot-label-flow",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("label-flow"),
     },
     FlagDef {
         name: "robot-label-attention",
         kind: FlagKind::Bool,
-        primary: true,
-        group: Some("label-attention"),
     },
+];
+
+/// Go's `primaryRobotCommandGroups` (cmd/bv/main.go:1849-1889), in Go's
+/// declaration order and with Go's membership.
+///
+/// The check Go runs is NOT "two primaries were given". It is "two GROUPS
+/// have an active flag" (main.go:351-366): every group that has an active
+/// flag contributes one entry, and more than one entry is the violation.
+/// That makes the group boundaries load-bearing in both directions:
+///
+/// - `--robot-triage --robot-triage-by-track` is ONE group, so it is allowed
+///   (the two are alternative spellings of the same command).
+/// - `--robot-next --robot-triage` is TWO groups, so it is rejected.
+/// - `--robot-insights --robot-plan` is TWO groups, so it is rejected even
+///   though neither group holds more than one flag.
+///
+/// Rust's check counted the flags inside a single group instead, so it
+/// rejected the first case and accepted the last one — the two halves of the
+/// same rule, both backwards.
+pub const PRIMARY_GROUPS: &[&[&str]] = &[
+    &["robot-help"],
+    &["robot-capabilities"],
+    &["robot-docs"],
+    &["robot-insights"],
+    &["robot-plan"],
+    &["robot-priority"],
+    &["robot-next"],
+    &[
+        "robot-triage",
+        "robot-triage-by-track",
+        "robot-triage-by-label",
+    ],
+    &["robot-diff"],
+    &["robot-recipes"],
+    &["robot-label-health"],
+    &["robot-label-flow"],
+    &["robot-label-attention"],
+    &["robot-alerts"],
+    &["robot-metrics"],
+    &["robot-schema"],
+    &["robot-suggest"],
+    &["robot-graph"],
+    &["robot-search"],
+    &["robot-drift"],
+    &["robot-history", "bead-history"],
+    &["robot-explain-correlation"],
+    &["robot-confirm-correlation"],
+    &["robot-reject-correlation"],
+    &["robot-correlation-stats"],
+    &["robot-orphans"],
+    &["robot-file-beads"],
+    &["robot-file-hotspots"],
+    &["robot-impact"],
+    &["robot-file-relations"],
+    &["robot-related"],
+    &["robot-blocker-chain"],
+    &["robot-impact-network"],
+    &["robot-causality"],
+    &["robot-sprint-list"],
+    &["robot-sprint-show"],
+    &["robot-forecast"],
+    &["robot-burndown"],
+    &["robot-capacity"],
 ];
 
 /// Non-primary flags (general/scoping/modifiers). Complete Go inventory.
@@ -1630,7 +1602,7 @@ pub const MODIFIER_FLAGS: &[FlagDef] = &[
     s("alert-type"),
     s("alert-label"),
     s("suggest-type"),
-    s("suggest-confidence"),
+    f64f("suggest-confidence"),
     s("suggest-bead"),
     // Scoping
     s("label"),
@@ -1646,16 +1618,16 @@ pub const MODIFIER_FLAGS: &[FlagDef] = &[
     s("bead-history"),
     s("history-since"),
     i("history-limit"),
-    s("min-confidence"),
-    s("id-pattern"), // repeatable
+    f64f("min-confidence"),
+    sa("id-pattern"), // repeatable
     s("correlation-by"),
     s("correlation-reason"),
     i("orphans-min-score"),
     i("file-beads-limit"),
     i("hotspots-limit"),
-    s("relations-threshold"),
+    f64f("relations-threshold"),
     i("relations-limit"),
-    s("related-min-relevance"),
+    pof("related-min-relevance"),
     i("related-max-results"),
     b("related-include-closed"),
     i("network-depth"),
@@ -1717,8 +1689,32 @@ const fn f2(name: &'static str) -> FlagDef {
     FlagDef {
         name,
         kind: FlagKind::Float,
-        primary: false,
-        group: None,
+    }
+}
+
+/// Go's `flag.Float64` (cmd/bv/main.go:1503, :1515, :1550, :1571) — a
+/// `strconv.ParseFloat(s, 64)` value.
+const fn f64f(name: &'static str) -> FlagDef {
+    FlagDef {
+        name,
+        kind: FlagKind::Float64,
+    }
+}
+
+/// Go's `percentOrFraction` (cmd/bv/flag_types.go:21) — a custom pflag value
+/// that accepts an int 0-100 or a float 0.0-1.0.
+const fn pof(name: &'static str) -> FlagDef {
+    FlagDef {
+        name,
+        kind: FlagKind::PercentOrFraction,
+    }
+}
+
+/// Go's pflag `stringArray` — repeatable, like `--id-pattern`.
+const fn sa(name: &'static str) -> FlagDef {
+    FlagDef {
+        name,
+        kind: FlagKind::StringArray,
     }
 }
 
@@ -2914,11 +2910,24 @@ mod tests {
 
     #[test]
     fn triage_family_is_one_exclusive_group() {
-        let group: Vec<_> = ROBOT_PRIMARIES
+        // Go's group 8 (cmd/bv/main.go:1857) holds the three triage
+        // spellings. `--robot-next` is a group of its own (main.go:1856), so
+        // naming it alongside `--robot-triage` is a conflict.
+        let group = PRIMARY_GROUPS
             .iter()
-            .filter(|f| f.group == Some("triage"))
-            .collect();
-        assert_eq!(group.len(), 4);
+            .find(|g| g.contains(&"robot-triage"))
+            .expect("no group holds robot-triage");
+        assert_eq!(
+            *group,
+            [
+                "robot-triage",
+                "robot-triage-by-track",
+                "robot-triage-by-label"
+            ]
+        );
+        assert!(PRIMARY_GROUPS
+            .iter()
+            .all(|g| !g.contains(&"robot-next") || *g == ["robot-next"]));
     }
 
     /// Issue #5: the six long flags Go advertises in `bv --help` must be

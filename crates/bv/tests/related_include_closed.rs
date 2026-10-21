@@ -176,19 +176,24 @@ fn last_occurrence_wins() {
 }
 
 /// A bool gets `NoOptDefVal = "true"`, so it never consumes the following
-/// token. What this asserts is the flag's own parse: the switch reads true and
-/// `false` is left over as a separate argument. Go additionally rejects that
-/// leftover positional with `unknown command "false" for "bv"` and exit 1
-/// (main.go:4548-4550); bvr does not, which is a separate bare-positional gap
-/// in `argv::unconsumed_positional` and not this flag's — note that
-/// `--robot-related <bead> bogusxyz` diverges identically without any boolean
-/// involved, so it is left out of scope here.
+/// token: the switch reads true and `false` is left over as a separate
+/// argument.
+///
+/// Go then rejects that leftover positional with `unknown command "false" for
+/// "bv"` and exit 1 (cmd/bv/main.go:4548-4550) — the flag's own parse is
+/// right, and the run fails on the word that was left over. bvr used to
+/// accept the leftover silently; `argv::unconsumed_positional` now reports
+/// it, as the oracle does.
 #[test]
 fn space_separated_token_is_not_consumed_as_the_value() {
     let (code, stdout, stderr) = bvr(&["--related-include-closed", "false"]);
-    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(code, 1, "stderr: {stderr}");
     assert!(
-        !payload(&stdout)["concurrent"].is_null(),
-        "the bare switch is true and must not swallow `false`: {stdout}"
+        stderr.contains("unknown command \"false\""),
+        "the leftover positional is rejected: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a rejected run publishes no payload: {stdout}"
     );
 }

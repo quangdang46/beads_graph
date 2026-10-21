@@ -179,33 +179,69 @@ pub fn generate_mermaid_graph(issues: &[Issue]) -> String {
 }
 
 /// Subgraph rooted at `root` up to `depth` hops (Go --graph-root/--graph-depth).
-pub fn subgraph<'a>(issues: &'a [&'a Issue], root: &str, depth: usize) -> Vec<&'a Issue> {
-    let map: std::collections::HashMap<&String, &Issue> =
-        issues.iter().copied().map(|i| (&i.id, i)).collect();
-    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut frontier = [root.to_string()].into_iter().collect::<Vec<_>>();
-    visited.insert(root.to_string());
-    for _ in 0..depth {
-        let mut next = Vec::new();
-        for id in &frontier {
-            if let Some(issue) = map.get(id) {
-                for dep in &issue.dependencies {
-                    let t = dep.effective_depends_on().to_string();
-                    if visited.insert(t.clone()) {
-                        next.push(t);
-                    }
-                }
+///
+/// Go's `extractSubgraph` (pkg/export/graph_export.go:187-257) walks BOTH
+/// dependency directions: the root's prerequisites AND the issues it unblocks,
+/// transitively. The port walked only the dependency direction, so
+/// `--robot-graph --graph-root <epic>` returned the epic and its
+/// prerequisites while the oracle returned the whole neighbourhood — 3 nodes
+/// here against the oracle's 30.
+///
+/// `depth` is Go's `maxDepth`: 0 (or negative) means unlimited, which is its
+/// `maxDepth > 0` test, and a node at a depth past the limit is left
+/// unvisited rather than marked and kept.
+pub fn subgraph<'a>(issues: &'a [&'a Issue], root: &str, depth: i64) -> Vec<&'a Issue> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let map: HashMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), *i)).collect();
+
+    // Reverse dependency map, so the BFS can reach the issues the root
+    // unblocks. Go skips a dependency whose target is not in the issue set.
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for issue in issues {
+        for dep in &issue.dependencies {
+            let target = dep.effective_depends_on();
+            if !map.contains_key(target) {
+                continue;
+            }
+            dependents
+                .entry(target)
+                .or_default()
+                .push(issue.id.as_str());
+        }
+    }
+
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<(&str, i64)> = VecDeque::new();
+    queue.push_back((root, 0));
+    while let Some((id, node_depth)) = queue.pop_front() {
+        if visited.contains(id) {
+            continue;
+        }
+        if depth > 0 && node_depth > depth {
+            continue;
+        }
+        visited.insert(id);
+        let Some(issue) = map.get(id) else {
+            continue;
+        };
+        for dep in &issue.dependencies {
+            let target = dep.effective_depends_on();
+            if !visited.contains(target) {
+                queue.push_back((target, node_depth + 1));
             }
         }
-        if next.is_empty() {
-            break;
+        for dependent in dependents.get(id).into_iter().flatten() {
+            if !visited.contains(*dependent) {
+                queue.push_back((dependent, node_depth + 1));
+            }
         }
-        frontier = next;
     }
+
     issues
         .iter()
         .copied()
-        .filter(|i| visited.contains(&i.id))
+        .filter(|i| visited.contains(i.id.as_str()))
         .collect()
 }
 
@@ -315,6 +351,11 @@ mod tests {
         assert!(d.ends_with("}\n"));
     }
 
+    /// Go `extractSubgraph` (pkg/export/graph_export.go:187-257) walks BOTH
+    /// dependency directions: the root's prerequisites AND the issues that
+    /// depend on it. The port walked only the dependency direction, so
+    /// `--robot-graph --graph-root <epic>` returned a different subgraph than
+    /// the oracle's.
     #[test]
     fn subgraph_limits_depth() {
         let issues = [
@@ -323,9 +364,13 @@ mod tests {
             issue("c", Status::Open, vec![]),
         ];
         let refs: Vec<&Issue> = issues.iter().collect();
+        // From "a": a and its prerequisite b are within one hop; c is two.
         assert_eq!(subgraph(&refs, "a", 1).len(), 2);
         assert_eq!(subgraph(&refs, "a", 5).len(), 3);
-        assert_eq!(subgraph(&refs, "c", 3).len(), 1);
+        // From "c": the direction reverses — c's DEPENDENTS are b and a.
+        assert_eq!(subgraph(&refs, "c", 3).len(), 3);
+        // One hop from "c" reaches b only.
+        assert_eq!(subgraph(&refs, "c", 1).len(), 2);
     }
 
     #[test]

@@ -748,7 +748,7 @@ pub fn compute_project_velocity(
 
     let mut closed_last_7 = 0usize;
     let mut closed_last_30 = 0usize;
-    let mut total_close_secs = 0.0f64;
+    let mut total_close_ns = 0i128;
     let mut close_samples = 0usize;
     let mut estimated = false;
 
@@ -801,14 +801,39 @@ pub fn compute_project_velocity(
             .as_deref()
             .and_then(|s| s.parse::<jiff::Timestamp>().ok())
         {
-            let dur = closed_at - created;
-            total_close_secs += dur.total(jiff::Unit::Second).unwrap_or(0.0);
+            // Go subtracts two `time.Time` values, which is an exact
+            // nanosecond difference. `jiff`'s `Span` only exposes its
+            // components, so the total is assembled from the timestamp's
+            // second and nanosecond parts — exact, and the same integer Go
+            // accumulates in its `time.Duration`.
+            let delta_ns = (closed_at.as_second() - created.as_second()) as i128 * 1_000_000_000
+                + (closed_at.subsec_nanosecond() - created.subsec_nanosecond()) as i128;
+            total_close_ns += delta_ns;
             close_samples += 1;
         }
     }
 
+    // Go's `totalCloseDur` is a `time.Duration` — an exact nanosecond count —
+    // and `Duration.Hours()` is NOT `ns / 3.6e12`:
+    //
+    // ```go
+    // func (d Duration) Hours() float64 {
+    //     h := d / Hour
+    //     return float64(h) + float64(d%Hour)/float64(Hour)
+    // }
+    // ```
+    //
+    // The port summed per-issue durations as f64 SECONDS and divided by
+    // 86400, which is a different rounding: the oracle printed
+    // `0.43940849803530097` where the port printed `0.439408498035301`.
+    // Reproducing Go's integer-hours-plus-fraction form makes the two agree
+    // to the last bit.
     let avg_days = if close_samples > 0 {
-        total_close_secs / 86400.0 / close_samples as f64
+        const NANOS_PER_HOUR: i128 = 3_600_000_000_000;
+        let whole_hours = total_close_ns / NANOS_PER_HOUR;
+        let remainder = total_close_ns % NANOS_PER_HOUR;
+        let hours = whole_hours as f64 + (remainder as f64) / (NANOS_PER_HOUR as f64);
+        hours / 24.0 / close_samples as f64
     } else {
         0.0
     };
@@ -923,6 +948,60 @@ pub fn build_triage_with_weights(
 /// `--recipe triage` on the ultraworkers set — 20 epics, whose children are
 /// all outside the recipe — that withheld readiness from 2 of the 20 and
 /// reported `actionable_count` 18 where Go reports 20.
+/// Go `extractDescendantSubgraph` (pkg/analysis/triage.go:528-572).
+///
+/// "Rooted at" means the root itself plus every issue that transitively
+/// DEPENDS on it — the descendants in the dependency DAG. The BFS runs over
+/// the reverse adjacency (blocker → dependents), and the result keeps the
+/// original issue order.
+///
+/// This is the triage-side scoping, and it is NOT the same traversal as the
+/// export-side one: `bv_export::graph_export::subgraph` (Go
+/// `extractSubgraph`) walks BOTH directions, so the root's prerequisites come
+/// along too. `--robot-triage --graph-root` uses this one.
+pub fn extract_descendant_subgraph(issues: &[Issue], root_id: &str) -> Vec<Issue> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    // Reverse adjacency: a dependency `issue -> X` means X is the blocker and
+    // `issue` is its child, so the edge runs X -> issue.
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut known: HashSet<&str> = HashSet::with_capacity(issues.len());
+    for issue in issues {
+        known.insert(issue.id.as_str());
+        for dep in &issue.dependencies {
+            children
+                .entry(dep.effective_depends_on())
+                .or_default()
+                .push(issue.id.as_str());
+        }
+    }
+    // Go returns nil for a root that is not in the set, which leaves triage
+    // with an empty analysis rather than the whole set.
+    if !known.contains(root_id) {
+        return Vec::new();
+    }
+
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    queue.push_back(root_id);
+    while let Some(current) = queue.pop_front() {
+        if !visited.insert(current) {
+            continue;
+        }
+        for child in children.get(current).into_iter().flatten() {
+            if !visited.contains(child) {
+                queue.push_back(child);
+            }
+        }
+    }
+
+    issues
+        .iter()
+        .filter(|i| visited.contains(i.id.as_str()))
+        .cloned()
+        .collect()
+}
+
 pub fn build_triage_with_readiness(
     issues: &[Issue],
     g: &DiGraph,
@@ -1363,7 +1442,18 @@ fn build_triage_inner(
     // exactly base_score * 0.15 and reordered the whole list.
     let mut blocker_depths: BTreeMap<String, i64> = BTreeMap::new();
     for issue in issues {
-        if !issue.status.is_open() {
+        // Every SCORED issue needs a depth, not just the open ones. Go
+        // asks `TriageContext.BlockerDepth(id)` per recommendation
+        // (triage.go:1386) and that accessor computes the depth for
+        // whatever id it is given — a deferred or in-progress bead with no
+        // open blockers has depth 0, so the quick-win gate
+        // (`depth <= max && depth >= 0`, triage.go:1386) admits it. The map
+        // here held only OPEN issues, so every other status fell back to
+        // the -1 default, lost the boost, and dropped out of the ranking
+        // entirely: on a 382-bead repository `--robot-triage` named
+        // `epic-b7v2` eighth where the oracle named the deferred
+        // `m8-w4-097`.
+        if matches!(issue.status, Status::Closed | Status::Tombstone) {
             continue;
         }
         let mut visited: std::collections::BTreeSet<String> = Default::default();
@@ -1424,7 +1514,17 @@ fn build_triage_inner(
             0.0
         };
 
-        rec.score = base_score * TRIAGE_BASE_WEIGHT + unblock_boost + quickwin_boost;
+        // Go's `base.Score*opts.BaseScoreWeight + factors.UnblockBoost +
+        // factors.QuickWinBoost` (triage.go:1410). On the architectures whose
+        // backend has an FMA instruction — arm64 among them — Go's compiler
+        // contracts the multiply and the add into ONE rounded operation, so
+        // the oracle's value is `fma(base, 0.70, unblock)` and not
+        // `(base * 0.70) + unblock`. The two differ in the last ulp, which is
+        // enough to reorder two equally-scored recommendations and change
+        // which bead `--robot-next` names. `mul_add` is the single-rounding
+        // form on every platform, matching the FMADDD the Go binary emits —
+        // the same rule `impact.rs` and `label_health.rs` already follow.
+        rec.score = base_score.mul_add(TRIAGE_BASE_WEIGHT, unblock_boost) + quickwin_boost;
         // Go marks a quick win by `QuickWinBoost > 0.05` (triage.go:1759) and
         // rewrites the action hint for a genuinely startable bead
         // (triage.go:1605-1622). The boost is only known here, so the hint is

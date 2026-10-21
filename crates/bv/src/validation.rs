@@ -2,7 +2,7 @@
 //! Port of Go validateModifierFlags / validateExclusivePrimaryCommands.
 
 use crate::flags::{FlagKind, MODIFIER_FLAGS, MODIFIER_REQUIRES, ROBOT_PRIMARIES};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ValidationError {
@@ -14,8 +14,10 @@ pub enum ValidationError {
         required: String,
         message: String,
     },
-    #[error("only one primary command allowed (found {count}: {found})")]
-    ExclusivePrimaries { count: usize, found: String },
+    /// Go's `multiple primary robot commands specified: %s`
+    /// (cmd/bv/main.go:365) — the active groups, joined with `" | "`.
+    #[error("multiple primary robot commands specified: {groups}")]
+    ExclusivePrimaries { groups: String },
     /// Go rejects `--watch-export` alongside `--as-of` before any export runs
     /// (cmd/bv/main.go:1903-1906): watching would re-export the snapshot
     /// repeatedly instead of exporting the one fixed ref the user asked for.
@@ -210,30 +212,51 @@ fn takes_value(name: &str) -> bool {
         .is_some_and(|f| {
             matches!(
                 f.kind,
-                FlagKind::Str | FlagKind::Int | FlagKind::Float | FlagKind::StringArray
+                FlagKind::Str
+                    | FlagKind::Int
+                    | FlagKind::Float
+                    | FlagKind::Float64
+                    | FlagKind::PercentOrFraction
+                    | FlagKind::StringArray
             )
         })
 }
 
+/// Go's `validateExclusivePrimaryCommands` (cmd/bv/main.go:351-366).
+///
+/// Go counts ACTIVE GROUPS, not active flags: every group in
+/// `primaryRobotCommandGroups` that has an active flag contributes one entry
+/// to `activeGroups`, and more than one entry is the violation. The message
+/// joins those entries with `" | "`, and each entry joins the active flags of
+/// its own group with `", "`.
+///
+/// The group boundaries therefore decide both directions of the rule, which is
+/// why they live in [`crate::flags::PRIMARY_GROUPS`] rather than in a
+/// per-flag tag: `--robot-triage --robot-triage-by-track` are two spellings of
+/// one command and are allowed, while `--robot-next --robot-triage` and
+/// `--robot-insights --robot-plan` are two commands and are rejected.
+///
+/// A group's flags are listed with `--` in Go's message (`activePrimaryFlags`
+/// prefixes each name), and the groups appear in Go's declaration order.
 pub fn validate_exclusive_primaries(present: &Presence) -> Vec<ValidationError> {
-    let mut group_counts: HashMap<&str, Vec<&str>> = HashMap::new();
-    for f in ROBOT_PRIMARIES {
-        if f.primary && present.has(f.name) {
-            if let Some(g) = f.group {
-                group_counts.entry(g).or_default().push(f.name);
-            }
+    let mut active_groups: Vec<String> = Vec::new();
+    for group in crate::flags::PRIMARY_GROUPS {
+        let active: Vec<String> = group
+            .iter()
+            .filter(|name| present.has(name))
+            .map(|name| format!("--{name}"))
+            .collect();
+        if active.is_empty() {
+            continue;
         }
+        active_groups.push(active.join(", "));
     }
-    let mut violations = Vec::new();
-    for (_g, names) in group_counts {
-        if names.len() > 1 {
-            violations.push(ValidationError::ExclusivePrimaries {
-                count: names.len(),
-                found: names.join(", "),
-            });
-        }
+    if active_groups.len() <= 1 {
+        return Vec::new();
     }
-    violations
+    vec![ValidationError::ExclusivePrimaries {
+        groups: active_groups.join(" | "),
+    }]
 }
 
 /// Go's fourth and last validation stage (cmd/bv/main.go:1903-1906): reject
@@ -314,13 +337,41 @@ mod tests {
         }
     }
 
+    /// Go counts ACTIVE GROUPS, not active flags (cmd/bv/main.go:351-366), so
+    /// `--robot-next` and `--robot-triage` — different groups — conflict even
+    /// though neither group holds more than one flag.
     #[test]
     fn two_triage_family_flags_conflict() {
         let v = check(&["bvr", "--robot-triage", "--robot-next"]);
-        assert!(matches!(
-            v.first(),
-            Some(ValidationError::ExclusivePrimaries { count: 2, .. })
-        ));
+        assert_eq!(
+            v.first().map(|e| e.to_string()),
+            Some(
+                "multiple primary robot commands specified: --robot-next | --robot-triage"
+                    .to_string()
+            )
+        );
+    }
+
+    /// The other half of the same rule: the two triage spellings share ONE
+    /// group, so naming both is one command, not two.
+    #[test]
+    fn two_spellings_of_one_group_are_allowed() {
+        assert!(check(&["bvr", "--robot-triage", "--robot-triage-by-track"]).is_empty());
+        assert!(check(&["bvr", "--robot-triage-by-track", "--robot-triage-by-label"]).is_empty());
+    }
+
+    /// `--robot-insights` and `--robot-plan` are different groups, each with a
+    /// single flag, and are still a conflict.
+    #[test]
+    fn one_flag_in_each_of_two_groups_conflicts() {
+        let v = check(&["bvr", "--robot-insights", "--robot-plan"]);
+        assert_eq!(
+            v.first().map(|e| e.to_string()),
+            Some(
+                "multiple primary robot commands specified: --robot-insights | --robot-plan"
+                    .to_string()
+            )
+        );
     }
 
     #[test]

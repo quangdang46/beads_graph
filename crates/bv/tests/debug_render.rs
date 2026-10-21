@@ -274,18 +274,19 @@ fn unknown_view_returns_go_string_and_exits_zero() {
 fn empty_view_value_is_not_a_render_request() {
     // Go main.go:4527 is `if *debugRender != ""`, so an explicit empty value
     // is "not requested" and falls through to the TUI — RenderDebugView's
-    // default arm never runs. Asserted only on stdout, because the fall-through
-    // really does try to open a TUI and its exit code depends on whether the
-    // test runner has a terminal.
+    // default arm never runs. The fall-through really does try to open a
+    // TUI, and Go reports that failure on STDOUT (`fmt.Printf`,
+    // cmd/bv/main.go:4535), so the port's stdout carries the one-line
+    // explanation where the oracle's does.
     let dir = Scratch::new("emptyview");
     let rows = chain("core");
     dir.single_repo(&rows.iter().map(String::as_str).collect::<Vec<_>>());
 
     let out = run(dir.path(), &["--debug-render", ""]);
-    assert_eq!(
-        stdout_of(&out),
-        "",
-        "an empty --debug-render must not render, and must not print \"Unknown view: \""
+    let stdout = stdout_of(&out);
+    assert!(
+        !stdout.contains("Unknown view: "),
+        "an empty --debug-render must not render, and must not print \"Unknown view: \": {stdout}"
     );
 }
 

@@ -29,8 +29,10 @@ pub fn compute_staleness(updated_at: Option<&str>, now: &jiff::Timestamp) -> f64
     };
     match raw.parse::<jiff::Timestamp>() {
         Ok(t) => {
-            let secs = (*now - t).total(jiff::Unit::Second).unwrap_or(0.0);
-            let days = secs / 86400.0;
+            // Go `now.Sub(updatedAt).Hours() / 24` (priority.go:396) — the
+            // oracle's `Duration.Hours()` is the integer hours plus the
+            // fractional remainder, not `seconds / 86400`.
+            let days = crate::go_time::duration_days(crate::go_time::duration_nanos(*now, t));
             (days / 30.0).clamp(0.0, 1.0)
         }
         Err(_) => 0.5,
@@ -61,7 +63,14 @@ pub fn compute_time_to_impact(
     let depth_norm = (critical_path_depth / MAX_CRITICAL_PATH_DEPTH).min(1.0);
     const MAX_MINUTES: f64 = 480.0;
     let time_factor = (1.0 - (effective / MAX_MINUTES)).clamp(0.0, 1.0);
-    depth_norm * 0.7 + time_factor * 0.3
+    // Go's `score := depthNorm*0.7 + timeFactor*0.3` (priority.go:509). On
+    // arm64 the Go compiler contracts the multiply and the add into one
+    // rounded operation — its rule is `FADDD a (FMULD x y)`, and the product
+    // is the RIGHT operand of the add (ARM64.rules:1772) — so the oracle's
+    // value is `fma(depthNorm, 0.7, timeFactor*0.3)`. The unfused sum
+    // differed in the last digit, and that digit is published as the
+    // time-to-impact weight in every priority explanation.
+    depth_norm.mul_add(0.7, time_factor * 0.3)
 }
 
 /// Go: `computeUrgency` — label weights + exponential decay (half-life 7d).
@@ -83,11 +92,12 @@ pub fn compute_urgency(labels: &[String], created_at: Option<&str>, now: &jiff::
     }
     if let Some(raw) = created_at {
         if let Ok(created) = raw.parse::<jiff::Timestamp>() {
-            let secs = (*now - created).total(jiff::Unit::Second).unwrap_or(0.0);
-            let days = secs / 86400.0;
+            // Go `now.Sub(issue.CreatedAt).Hours() / 24` (priority.go:573).
+            let days = crate::go_time::duration_days(crate::go_time::duration_nanos(*now, created));
             if days > 0.0 {
-                // 0.5 * (1 - e^(-days/halfLife))
-                score += 0.5 * (1.0 - (-(days / URGENCY_DECAY_DAYS)).exp());
+                // 0.5 * (1 - e^(-days/halfLife)), fused the way Go's
+                // compiler contracts `score += 0.5 * (...)`.
+                score = 0.5f64.mul_add(1.0 - (-(days / URGENCY_DECAY_DAYS)).exp(), score);
             }
         }
     }
@@ -230,7 +240,15 @@ fn compute_fan_variance(issue: &Issue, g: &DiGraph) -> f64 {
     if mean == 0.0 {
         return 0.0;
     }
-    let variance = degrees.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / degrees.len() as f64;
+    // Go `sumSquares += diff * diff` (risk.go:334) — the product is the
+    // RIGHT operand of the add, so the Go compiler contracts it into one
+    // rounded `fma(diff, diff, sumSquares)`.
+    let mut sum_squares = 0.0f64;
+    for d in &degrees {
+        let diff = d - mean;
+        sum_squares = diff.mul_add(diff, sum_squares);
+    }
+    let variance = sum_squares / degrees.len() as f64;
     let std_dev = variance.sqrt();
     let cv = std_dev / mean;
     // Normalize: CV > 2 is considered high variance
@@ -248,8 +266,9 @@ fn compute_activity_churn(issue: &Issue, now: &jiff::Timestamp) -> f64 {
         None => return 0.0,
     };
 
-    let age_secs = (*now - created).total(jiff::Unit::Second).unwrap_or(0.0);
-    let age_days = (age_secs / 86400.0).max(1.0); // minimum 1 day
+    // Go `now.Sub(issue.CreatedAt).Hours() / 24` (risk.go:145-147).
+    let age_days =
+        (crate::go_time::duration_days(crate::go_time::duration_nanos(*now, created))).max(1.0); // minimum 1 day
 
     // Comment frequency: comments per day (normalized around 1)
     let comment_count = issue.comments.len() as f64;
@@ -258,8 +277,10 @@ fn compute_activity_churn(issue: &Issue, now: &jiff::Timestamp) -> f64 {
     // Update recency: how much of the issue's lifetime has seen updates
     let update_recency = if let Some(updated_raw) = issue.updated_at.as_deref() {
         if let Ok(updated) = updated_raw.parse::<jiff::Timestamp>() {
+            // Go `issue.UpdatedAt.Sub(issue.CreatedAt).Hours() / 24`
+            // (risk.go:163).
             let update_span =
-                (updated - created).total(jiff::Unit::Second).unwrap_or(0.0) / 86400.0;
+                crate::go_time::duration_days(crate::go_time::duration_nanos(updated, created));
             if update_span > 0.0 && age_days > 1.0 {
                 update_span / age_days
             } else {
@@ -272,7 +293,10 @@ fn compute_activity_churn(issue: &Issue, now: &jiff::Timestamp) -> f64 {
         0.0
     };
 
-    let churn = comments_per_day * 0.6 + update_recency * 0.4;
+    // Go `churn := (commentChurn*0.6 + updateRecency*0.4)` (risk.go:171) —
+    // the product is the RIGHT operand of the add, so the Go compiler
+    // contracts it into `fma(commentChurn, 0.6, updateRecency*0.4)`.
+    let churn = comments_per_day.mul_add(0.6, update_recency * 0.4);
     churn.min(1.0)
 }
 
@@ -396,9 +420,19 @@ pub fn compute_risk_signals(
     // 0.060021405199838354. Both fused association orders -- left and right --
     // reproduce the oracle's value exactly, and no plain ordering does. The
     // fused form is correct; the source text is not the whole story.
+    //
+    // Go's arm64 backend contracts `FADDD a (FMULD x y)` — the multiply has
+    // to be the RIGHT operand of the add
+    // (cmd/compile/internal/ssa/_gen/ARM64.rules:1772) — so the source
+    // order `((fan*w + churn*w) + cross*w) + status*w` contracts to
+    // `fma(status, w, fma(cross, w, fma(churn, w, fan*w)))`: LEFT
+    // associated, in the order the source names them. The port associated
+    // from the right and reversed the terms, which agrees on some inputs
+    // and not others — the risk weight of a bead came out a digit off, and
+    // the priority explanation published that digit.
     let composite = status_risk.mul_add(
         0.20,
-        cross_repo.mul_add(0.20, churn.mul_add(0.30, fan_variance.mul_add(0.30, 0.0))),
+        cross_repo.mul_add(0.20, churn.mul_add(0.30, fan_variance * 0.30)),
     );
     RiskSignals {
         fan_variance,
@@ -457,11 +491,24 @@ pub struct IssueImpact {
     #[serde(rename = "type")]
     pub issue_type: String,
     pub status: String,
+    /// Go `Recommendation.Assignee` (triage.go:938) — the bead's assignee,
+    /// omitted when empty. The port had no field for it, so a claimed bead
+    /// arrived with no owner even though the oracle names one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assignee: String,
     pub priority: i32,
     /// Go `Recommendation.Labels` is a plain `[]string` with no omitempty, so
     /// an issue with no labels serializes as `null` rather than `[]`.
     #[serde(serialize_with = "crate::impact::serialize_labels")]
     pub labels: Vec<String>,
+    /// Go `Recommendation.DeferUntil` (triage.go:939) — the scheduler's
+    /// deferral instant, omitted when the bead carries none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "bv_core::model::serialize_go_time"
+    )]
+    pub defer_until: Option<String>,
     pub score: f64,
     pub breakdown: Breakdown,
     /// Go `reasons.ActionHint` (triage.go:1538-1546) — the suggested next
@@ -789,22 +836,53 @@ pub fn compute_impact_scores_with_weights(
         let defer_until = bv_core::model::parse_ts(&issue.defer_until);
         let is_future_deferred = defer_until.is_some_and(|d| d > inputs.now);
 
+        //
+        //    Go's "claimed by" source is the ISSUE'S OWN ASSIGNEE
+        //    (triage.go:1662: `claimedByAgent = issue.Assignee`), not a
+        //    separate claim store — the earlier port read that as a store
+        //    with no Rust counterpart and dropped the arms. A bead somebody
+        //    owns therefore arrived with no owner, no "👤 Claimed by" line
+        //    and the generic action hint, where the oracle named the owner
+        //    and said to contact them.
+        let assignee = issue.assignee.as_str();
+        let mut claim_action: Option<String> = None;
         if is_future_deferred {
             reasons.push(format!(
                 "⏸️ Deferred until {} - not ready to claim",
                 defer_until.expect("checked above")
             ));
+            if !assignee.is_empty() {
+                reasons.push(format!("👤 Claimed by {assignee}"));
+            }
         } else if is_in_progress {
-            reasons.push("🚧 In progress - already being worked".to_string());
+            if !assignee.is_empty() {
+                reasons.push(format!("👤 Claimed by {assignee}"));
+                claim_action = Some(format!("Contact {assignee} if you want to help"));
+            } else {
+                reasons.push("🚧 In progress - already being worked".to_string());
+            }
         } else if is_blocked_status {
             reasons.push("⛔ Status is blocked - not ready to claim".to_string());
+            if !assignee.is_empty() {
+                reasons.push(format!("👤 Claimed by {assignee}"));
+                claim_action = Some(format!(
+                    "Contact {assignee} or resolve blockers before claiming"
+                ));
+            }
         } else if is_non_open_status {
             reasons.push(format!(
                 "⏸️ Status is {} - not ready to claim",
                 issue.status.as_str()
             ));
-        } else if is_open_status && issue.assignee.is_empty() {
+            if !assignee.is_empty() {
+                reasons.push(format!("👤 Claimed by {assignee}"));
+                claim_action = Some(format!("Contact {assignee} if you want to help"));
+            }
+        } else if is_open_status && assignee.is_empty() {
             reasons.push("✅ Currently unclaimed - available for work".to_string());
+        } else if !assignee.is_empty() {
+            reasons.push(format!("👤 Claimed by {assignee}"));
+            claim_action = Some(format!("Contact {assignee} if you want to help"));
         }
 
         // 7. Blocked-by reason (Go triage.go:1696-1705). Go gates purely on
@@ -846,11 +924,27 @@ pub fn compute_impact_scores_with_weights(
             title: issue.title.clone(),
             issue_type: issue.issue_type.clone(),
             status: issue.status.as_str().to_string(),
+            assignee: issue.assignee.clone(),
             priority: issue.priority,
             labels: issue.labels.clone(),
+            defer_until: issue.defer_until.clone(),
             score,
             breakdown: b,
-            action: blocked_action_hint.unwrap_or_else(|| action_hint(issue)),
+            // Go's action hint is written in three places: the status hint
+            // first (triage.go:1540-1548), then the claim-status ladder
+            // (triage.go:1656-1690), then the blocked-by context
+            // (triage.go:1704). The last writer wins, so the order here is
+            // the reverse of the source order.
+            action: blocked_action_hint.or(claim_action).unwrap_or_else(|| {
+                if is_future_deferred {
+                    format!(
+                        "Deferred until {} - do not claim before then",
+                        defer_until.expect("checked above")
+                    )
+                } else {
+                    action_hint(issue)
+                }
+            }),
             reasons,
             // Filled in by the triage layer, which owns the unblocks map;
             // the impact scorer has no dependency graph context.

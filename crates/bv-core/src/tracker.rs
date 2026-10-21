@@ -559,8 +559,73 @@ fn executable_extensions(name: &str) -> Vec<String> {
 /// command that works from Go's form can be handed a form no shell parses the
 /// same way. The prefix is only a Win32 API detail, so it is dropped here
 /// rather than at every call site.
+/// Go's `filepath.EvalSymlinks` (path/filepath/symlink.go).
+///
+/// The difference from `std::fs::canonicalize` is the CASE. Go's walk keeps
+/// the spelling of every component that is not a symlink; `canonicalize`
+/// calls `realpath`, which returns the names as they are spelled ON DISK.
+/// On a case-insensitive filesystem the two disagree, and the disagreement
+/// reached the payload: the claim command named
+/// `/Users/x/projects/repo` where the oracle named `/Users/x/Projects/repo`.
+///
+/// A symlink still resolves, which is the point of the function — Go
+/// resolves one so that the origin's database path points at the live file.
+pub fn eval_symlinks(path: &Path) -> std::io::Result<PathBuf> {
+    let raw = path.to_string_lossy().into_owned();
+    let mut dest: PathBuf = if path.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        std::env::current_dir()?
+    };
+    let mut pending: Vec<String> = raw
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    // Go bails out after 255 hops (path/filepath/symlink.go:23).
+    let mut hops = 0usize;
+    while !pending.is_empty() {
+        let component = pending.remove(0);
+        match component.as_str() {
+            "." => {}
+            ".." => {
+                dest.pop();
+            }
+            _ => {
+                let candidate = dest.join(&component);
+                let meta = std::fs::symlink_metadata(&candidate)?;
+                if !meta.file_type().is_symlink() {
+                    // Not a symlink: keep the component EXACTLY as it was
+                    // spelled. This is the whole difference from `realpath`.
+                    dest.push(&component);
+                    continue;
+                }
+                hops += 1;
+                if hops > 255 {
+                    return Err(std::io::Error::other("too many levels of symbolic links"));
+                }
+                let target = std::fs::read_link(&candidate)?;
+                let target_text = target.to_string_lossy().into_owned();
+                let mut expanded: Vec<String> = target_text
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                expanded.append(&mut pending);
+                pending = expanded;
+                if target.is_absolute() {
+                    dest = PathBuf::from("/");
+                }
+                // A relative target is resolved against the directory the
+                // link was found in, which is where `dest` already stands.
+            }
+        }
+    }
+    Ok(dest)
+}
+
 fn resolve_executable(path: &Path) -> PathBuf {
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let resolved = eval_symlinks(path).unwrap_or_else(|_| path.to_path_buf());
     #[cfg(windows)]
     {
         let text = resolved.to_string_lossy();
@@ -671,7 +736,7 @@ pub fn resolve_issue_origin(source_path: &str, local_id: &str) -> IssueOrigin {
         // the two sides were never equal and the tracker refused its own
         // metadata-declared live export with "source is not the
         // metadata-declared live database or export".
-        std::fs::canonicalize(&joined)
+        eval_symlinks(&joined)
             .ok()
             .map(|resolved| resolve_executable(&resolved))
     };

@@ -1402,12 +1402,12 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     } else {
         output_path.to_string()
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, stats) = match load_issues_tracked(&cwd) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -1545,11 +1545,11 @@ fn main() -> ExitCode {
 
     // Go's pflag parses every registered flag for every command, so a value it
     // cannot read fails before cobra reaches the help flag, `--version`, or the
-    // modifier-requires table: `bv --help --related-max-results=abc` exits 1
+    // modifier-requires table: `bv --help --robot-max-results=abc` exits 1
     // with the parse error, not with the help text. Reproduce that ordering
     // here rather than leaving the check inside the `--robot-related` handler,
     // where it would run too late to be observed.
-    if let Err(msg) = parse_related_max_results(&args) {
+    if let Some(msg) = go_flag_parse_error(&args) {
         eprintln!("{msg}");
         return ExitCode::from(1);
     }
@@ -1563,19 +1563,43 @@ fn main() -> ExitCode {
         return ExitCode::from(0);
     }
 
-    // --version handled before validation (Go parity). Go prints
-    // "bv <version>" from `pkg/version`, whose fallback at the parity commit
-    // is v0.25.0 — the same string the envelope already carries. `--version`
-    // reports the emulated tool's identity, not the binary's own name, so it
-    // uses VERSION_PROGRAM rather than the HELP_PROGRAM the help page prints.
-    if args.iter().any(|a| a == "--version") {
-        // The port's own version, not the Go-parity envelope string: this is
-        // the version someone installed and would report in a bug.
-        println!("{} {}", flags::VERSION_PROGRAM, bv_update::PORT_VERSION);
-        return ExitCode::from(0);
+    // Go's cobra rejects a stray positional with `unknown command "X" for
+    // "bv"` (exit 1) in `ValidateArgs`, which runs after the flag parse and
+    // after the help flag is consulted, but BEFORE `RunE` — so before every
+    // validation stage Go runs inside `RunE` and before any command is
+    // dispatched.
+    //
+    // The port checked this on the TUI path only, so `bvr --robot-triage
+    // somejunk` ran the triage and exited 0 where the oracle exits 1, and
+    // `bvr --robot-triage --robot-next somejunk` reported the exclusive-
+    // primary conflict where the oracle reports the unknown command.
+    if let Some(unknown) = argv::unconsumed_positional(&args) {
+        eprintln!("unknown command \"{unknown}\" for \"bvr\"");
+        return ExitCode::from(1);
     }
 
+    // `--version` is NOT handled here. Go dispatches it from the robot
+    // registry (cmd/bv/robot_registry.go:692) at main.go:2053 — after the
+    // modifier-requires table, the enum table, the exclusive-primary check,
+    // the `--watch-export`/`--as-of` guard and the `--format` check, and
+    // after `--robot-help`. Handling it at the top of `main` made
+    // `bvr --version --robot-diff` exit 0 where Go exits 1 with
+    // "--robot-diff requires --diff-since", so a run the oracle rejects
+    // reported success here. The dispatch now sits where Go's does.
+
     let presence = validation::Presence::from_args(&args);
+
+    // --generate-docs runs FIRST in Go's RunE (cmd/bv/main.go:1745), before the
+    // `--id-pattern` compile, the theme warning, the modifier-requires table
+    // and every dispatch, and it exits 0 after writing the artifacts. Rust ran
+    // it much later, so `bvr --generate-docs --robot-triage --robot-next` was
+    // rejected by the exclusive-primary check where the oracle writes the
+    // docs and exits 0. Without a handler it also fell through to the TUI
+    // launcher, which hangs in any TTY and is the footgun AGENTS.md warns
+    // about.
+    if presence.has("generate-docs") {
+        return run_generate_docs();
+    }
 
     // Go main.go:1768-1783 registers `--id-pattern` BEFORE the modifier rules
     // are validated and before any correlation work, so both explicit matching
@@ -1689,6 +1713,43 @@ fn main() -> ExitCode {
         return code;
     }
 
+    // Go main.go:2031 — `robotShowToonStats = *toonStats || TOON_STATS=1`.
+    // Only the TOON encoder reads it, so the flag is a no-op in JSON mode.
+    set_show_toon_stats(presence.has("stats") || std::env::var("TOON_STATS").as_deref() == Ok("1"));
+
+    // Format validation (Go: exit 2 on invalid).
+    //
+    // Go checks `--format` at main.go:2032, which is AFTER the four
+    // validation stages above and BEFORE every dispatch — the robot registry
+    // is consulted at main.go:2052 onwards. Rust checked it after the robot
+    // dispatches, so `bvr --robot-help --format xml` printed the help and
+    // exited 0 where the oracle exits 2, and `--agents-check --format xml`
+    // reported an agent file instead of the bad format. The check belongs
+    // here: after the stages Go runs first, before the first command Go
+    // dispatches.
+    if presence.has("format") {
+        let fmt_val = args
+            .iter()
+            .position(|a| a == "--format")
+            .and_then(|i| args.get(i + 1))
+            .unwrap_or(&"json".to_string())
+            .clone();
+        if fmt_val != "json" && fmt_val != "toon" {
+            eprintln!("Invalid --format \"{fmt_val}\" (expected json|toon)");
+            return ExitCode::from(2);
+        }
+        // Go (cmd/bv/main.go:2037-2038) warns and downgrades toon -> json when
+        // the external `tru` encoder is absent, doing it *before* the payload is
+        // built so `output_format` never claims "toon" over JSON bytes on
+        // stdout.
+        if fmt_val == "toon" && !bv_robot::envelope::tru_available() {
+            eprintln!("warning: tru not available; falling back to JSON");
+            set_output_format("json");
+        } else {
+            set_output_format(&fmt_val);
+        }
+    }
+
     // Go main.go:1908-1933 opens the file and starts the sampler right after
     // the exclusive-primary and `--watch-export`/`--as-of` checks, so a run
     // rejected by either of those never creates the file. The guard drops when
@@ -1793,7 +1854,39 @@ fn main() -> ExitCode {
     // commands included, so it runs here rather than on the TUI path.
     warn_unknown_theme(&args);
 
+    // Go main.go:2052-2054 — the robot registry is consulted in this order,
+    // and each dispatch exits, so the first one present wins:
+    //
+    //   2052  robot-help
+    //   2053  version
+    //   2054  robot-capabilities
+    //
+    // Rust dispatched `--version` at the top of `main` and the self-update
+    // flags before `--robot-help`, so `bvr --robot-help --version` printed
+    // the version where Go prints the help, and `--robot-help --check-update`
+    // reached the network where Go never leaves the registry.
+    if presence.has("robot-help") {
+        print_robot_help();
+        return ExitCode::from(0);
+    }
+    // Go prints "bv <version>" from `pkg/version`, whose fallback at the
+    // parity commit is v0.25.0 — the same string the envelope already
+    // carries. `--version` reports the emulated tool's identity, not the
+    // binary's own name, so it uses VERSION_PROGRAM rather than the
+    // HELP_PROGRAM the help page prints.
+    if presence.has("version") {
+        // The port's own version, not the Go-parity envelope string: this is
+        // the version someone installed and would report in a bug.
+        println!("{} {}", flags::VERSION_PROGRAM, bv_update::PORT_VERSION);
+        return ExitCode::from(0);
+    }
+    if presence.has("robot-capabilities") {
+        return run_robot_capabilities();
+    }
+
     // Self-update (Go: --check-update / --update-dry-run / --update / --rollback).
+    // Go reaches these at main.go:2057 onwards, after the three registry
+    // dispatches above.
     if presence.has("check-update") {
         return run_check_update();
     }
@@ -1806,11 +1899,7 @@ fn main() -> ExitCode {
     if presence.has("rollback") {
         return run_rollback();
     }
-    if presence.has("robot-help") {
-        print_robot_help();
-        return ExitCode::from(0);
-    }
-    // Go main.go:2172 — any action, or either modifier, enters the agents
+    // Go main.go:2171-2172 — any action, or either modifier, enters the agents
     // command. `--agents-dry-run` and `--agents-force` on their own used to fall
     // through to the TUI, which an agent invoking them cannot drive.
     if presence.has("agents-add")
@@ -1821,9 +1910,6 @@ fn main() -> ExitCode {
         || presence.has("agents-force")
     {
         return run_agents_commands(&presence, &args);
-    }
-    if presence.has("robot-capabilities") {
-        return run_robot_capabilities();
     }
 
     /// Go `analysis.NewAnalyzer(issues).ComputeImpactScores()` (main.go:2505-2506)
@@ -1872,7 +1958,7 @@ fn main() -> ExitCode {
     let fb_reset = presence.has("feedback-reset");
     let fb_show = presence.has("feedback-show");
     if !fb_accept.is_empty() || !fb_ignore.is_empty() || fb_reset || fb_show {
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = go_working_dir();
         let beads_dir = match bv_core::discovery::get_beads_dir(&cwd) {
             Ok(d) => d,
             Err(e) => {
@@ -1959,13 +2045,6 @@ fn main() -> ExitCode {
         return run_robot_docs(&args);
     }
 
-    // --generate-docs runs FIRST in Go's RunE (cmd/bv/main.go:1757) and exits 0
-    // after writing the artifacts. Without a handler it falls through to the TUI
-    // launcher, which hangs in any TTY and is the footgun AGENTS.md warns about.
-    if presence.has("generate-docs") {
-        return run_generate_docs();
-    }
-
     // --export (Go main.go:4372) writes a report using recipe defaults, with
     // --export-format / --export-include-graph / --export-template as overrides.
     // Also must not fall through to the TUI.
@@ -1989,12 +2068,12 @@ fn main() -> ExitCode {
             .get(output_path_idx + 1)
             .cloned()
             .unwrap_or_else(|| "report.md".to_string());
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = go_working_dir();
         let (issues, stats) = match load_issues_tracked(&cwd) {
             Ok(x) => x,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
-                    return emit_unresolved_source();
+                    return emit_unresolved_source(&e.to_string());
                 }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
@@ -2032,12 +2111,12 @@ fn main() -> ExitCode {
     // Export graph (Go --export-graph: .html interactive / json|dot|mermaid).
     if let Some(idx) = args.iter().position(|a| a == "--export-graph") {
         let output_path = args.get(idx + 1).cloned().unwrap_or_default();
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = go_working_dir();
         let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
             Ok(x) => x,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
-                    return emit_unresolved_source();
+                    return emit_unresolved_source(&e.to_string());
                 }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
@@ -2220,34 +2299,6 @@ fn main() -> ExitCode {
                 eprintln!("Error writing {out}: {e}");
                 return ExitCode::from(1);
             }
-        }
-    }
-
-    // Go main.go:2031 — `robotShowToonStats = *toonStats || TOON_STATS=1`.
-    // Only the TOON encoder reads it, so the flag is a no-op in JSON mode.
-    set_show_toon_stats(presence.has("stats") || std::env::var("TOON_STATS").as_deref() == Ok("1"));
-
-    // Format validation (Go: exit 2 on invalid)
-    if presence.has("format") {
-        let fmt_val = args
-            .iter()
-            .position(|a| a == "--format")
-            .and_then(|i| args.get(i + 1))
-            .unwrap_or(&"json".to_string())
-            .clone();
-        if fmt_val != "json" && fmt_val != "toon" {
-            eprintln!("Invalid --format \"{fmt_val}\" (expected json|toon)");
-            return ExitCode::from(2);
-        }
-        // Go (cmd/bv/main.go:2037-2038) warns and downgrades toon -> json when
-        // the external `tru` encoder is absent, doing it *before* the payload is
-        // built so `output_format` never claims "toon" over JSON bytes on
-        // stdout.
-        if fmt_val == "toon" && !bv_robot::envelope::tru_available() {
-            eprintln!("warning: tru not available; falling back to JSON");
-            set_output_format("json");
-        } else {
-            set_output_format(&fmt_val);
         }
     }
 
@@ -2471,7 +2522,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = go_working_dir();
 
         // Go main.go:3061-3214 wraps the export in a `doExport` closure with an
         // `exportCount` captured beside it, so `--watch-export` re-runs the
@@ -3102,17 +3153,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // Go's `flag` package rejects any non-flag argument with
-    // `unknown command "X" for "bv"` (exit 1). Without this guard `bvr
-    // version` fell through to the TUI, which an agent or CI caller cannot
-    // drive — it blocks until the process is killed. Reject before the TUI.
-    if let Some(unknown) = argv::unconsumed_positional(&args) {
-        eprintln!("unknown command \"{unknown}\" for \"bvr\"");
-        return ExitCode::from(1);
-    }
-
     // Interactive TUI: no robot flags present.
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     // Go main.go:4493-4500 — the background-mode rollout. The mutual-exclusion
     // check is TUI-path only: it sits after every `dispatchRobotFlagOrExit`
     // call, which is why Go's own e2e test still exits 0 for
@@ -3217,14 +3259,22 @@ fn main() -> ExitCode {
             // gets a one-line answer either way, but only one of them says
             // what to do.
             if let Err(e) = open_tty() {
-                eprintln!("Error running beads viewer: could not open a new TTY: {e}");
+                // Go prints this to STDOUT (`fmt.Printf`, cmd/bv/main.go:4535),
+                // not to stderr. The port put it on stderr, so a caller that
+                // reads stdout — the channel the robot contract reserves for
+                // data — saw an empty stream where the oracle had the
+                // one-line explanation. Same bytes, different stream.
+                println!("Error running beads viewer: could not open a new TTY: {e}");
                 return ExitCode::from(1);
             }
             eprintln!("Loaded {} issues — launching TUI", issues.len());
             launch_tui(&mut app, &issues)
         }
         Err(e) => {
+            // Go main.go:2734-2735 — the single-repo load failure prints the
+            // error and the "br init" hint, whatever the command was.
             eprintln!("Error loading beads: {e}");
+            eprintln!("Make sure you are in a project initialized with 'br init'.");
             ExitCode::from(1)
         }
     }
@@ -3555,10 +3605,9 @@ fn expected_jsonl_path() -> String {
 /// Go writes the envelope to stdout first and the two diagnostic lines to
 /// stderr after it (cmd/bv/main.go:2686-2688). The order matters to anything
 /// capturing both streams together, and stdout stays pure JSON either way.
-fn emit_unresolved_source() -> ExitCode {
+fn emit_unresolved_source(error: &str) -> ExitCode {
     let path = expected_jsonl_path();
-    let error = format!("no beads issues found at {path}");
-    let authority = failed_source_authority(&path, &error);
+    let authority = failed_source_authority(&path, error);
     let ahash = bv_robot::authority_hash(&authority);
     let mut payload = serde_json::json!({
         "generated_at": jiff_now(),
@@ -3634,10 +3683,15 @@ fn is_unresolved_source_error(e: &str) -> bool {
 /// degraded envelope. Rust validated the repository first and reported "not a
 /// git repository" instead, which names a different problem than the one an
 /// agent will actually hit.
-fn unresolved_source_probe(cwd: &std::path::Path) -> bool {
-    load_issues_tracked(cwd)
-        .err()
-        .is_some_and(|e| is_unresolved_source_error(&e.to_string()))
+fn unresolved_source_probe(cwd: &std::path::Path) -> Option<String> {
+    load_issues_tracked(cwd).err().and_then(|e| {
+        let text = e.to_string();
+        if is_unresolved_source_error(&text) {
+            Some(text)
+        } else {
+            None
+        }
+    })
 }
 
 fn load_issues_auto(
@@ -3870,13 +3924,24 @@ fn apply_repo_scope(issues: &[bv_core::model::Issue]) -> Vec<bv_core::model::Iss
 /// loader's hash alone and only sets `DataHashMatchesIssues = false`. Getting
 /// that backwards would change the `data_hash` on every `--label` golden.
 fn apply_scope(issues: &[bv_core::model::Issue]) -> (Vec<bv_core::model::Issue>, Option<String>) {
-    let (_label, recipe, repo) = active_scope_flags();
+    let (label, recipe, repo) = active_scope_flags();
     let repo_scoped = apply_repo_scope(issues);
     let hash_override = if repo.is_empty() {
         None
     } else {
         Some(bv_core::data_hash::compute_data_hash(&repo_scoped))
     };
+    // Go main.go:2795-2797 — a label scope that matched no issue at all is
+    // reported on stderr, but only outside robot mode (there stdout carries
+    // the payload and the warning would corrupt it). The port printed
+    // nothing, so `bv --label <typo>` looked exactly like a repository with
+    // no issues.
+    if !label.is_empty() && !env_robot() {
+        let (candidate_ids, _) = bv_analysis::label_health::label_scope_ids(&label, &repo_scoped);
+        if candidate_ids.is_empty() {
+            eprintln!("Warning: No issues found with label {label:?}");
+        }
+    }
     (
         apply_recipe_scope(&apply_label_scope(&repo_scoped), &recipe),
         hash_override,
@@ -4217,7 +4282,7 @@ fn run_pages_wizard(args: &[String]) -> ExitCode {
         .or_else(|| {
             std::env::var_os(bv_core::discovery::BEADS_DIR_ENV).map(std::path::PathBuf::from)
         })
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(".beads"));
+        .unwrap_or_else(|| go_working_dir().join(".beads"));
 
     let mut wizard = bv_export::pages_wizard::Wizard::new(&beads_path);
     match wizard.run() {
@@ -4283,7 +4348,7 @@ fn run_pages_steps_5_to_7(
     }
     println!("Exporting static site...");
 
-    let issues = match load_issues_auto(&std::env::current_dir().unwrap_or_default(), None) {
+    let issues = match load_issues_auto(&go_working_dir(), None) {
         Ok((i, _, _)) => i,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -5177,7 +5242,7 @@ fn run_robot_next() -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -6019,7 +6084,7 @@ fn load_robot_feedback() -> (
     Option<bv_analysis::feedback::FeedbackData>,
     Option<bv_analysis::scoring::Weights>,
 ) {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let Ok(beads_dir) = bv_core::discovery::get_beads_dir(&cwd) else {
         return (None, None);
     };
@@ -6272,7 +6337,7 @@ fn run_robot_triage() -> ExitCode {
             Ok(x) => x,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
-                    return emit_unresolved_source();
+                    return emit_unresolved_source(&e.to_string());
                 }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
@@ -6298,7 +6363,28 @@ fn run_robot_triage() -> ExitCode {
     // DataHashMatchesIssues=false so the payload still names the file it came
     // from (main.go:4890-4900).
     let data_hash = loaded_hash;
-    let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
+    // bv-140: `--graph-root` scopes the ANALYSIS to the subtree rooted at
+    // that issue — the root plus everything that transitively depends on it.
+    // Go filters the issue set inside `ComputeTriageWithOptionsAndTime`
+    // (pkg/analysis/triage.go:472-473) and the ENVELOPE still describes the
+    // whole loaded set, so the two sets are kept apart here: the analysis
+    // runs on the subtree, the envelope on the scope the loader produced.
+    //
+    // The port ignored `--graph-root` here, so `--robot-triage --graph-root
+    // <epic>` reported the whole project — 48 issues and the project's
+    // priorities — where the oracle reports the epic's 32.
+    let graph_root = flag_value(
+        &std::env::args().skip(1).collect::<Vec<String>>(),
+        "graph-root",
+    )
+    .unwrap_or_default()
+    .to_string();
+    let analysis_issues: Vec<bv_core::model::Issue> = if graph_root.is_empty() {
+        issues.clone()
+    } else {
+        bv_analysis::triage::extract_descendant_subgraph(&issues, &graph_root)
+    };
+    let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&analysis_issues));
     // Go's `RobotContext.Readiness` is built over the whole loaded source and
     // survives the recipe narrowing (`buildRobotContext`, main.go:4904-4920);
     // triage then runs on the narrowed `ctx.Issues` against it
@@ -6316,7 +6402,7 @@ fn run_robot_triage() -> ExitCode {
     // rather than applied to the finished ranking.
     let (feedback_data, feedback_weights) = load_robot_feedback();
     let mut out = bv_analysis::triage::build_triage_with_readiness(
-        &issues,
+        &analysis_issues,
         &g,
         robot_now(),
         as_of.is_some(),
@@ -6342,7 +6428,7 @@ fn run_robot_triage() -> ExitCode {
         restate_unblock_reason(&mut rec.reasons, &rec.unblocks_ids);
     }
 
-    let views = triage_views(&out, &issues, g.edge_count());
+    let views = triage_views(&out, &analysis_issues, g.edge_count());
     // Unwrapped back to lists: the payload below inserts them as JSON arrays and
     // emptiness-gates two of them, and `json!(vec)` is not the same value as
     // `json!(array_value)` once it has been through `Value` twice.
@@ -6890,7 +6976,7 @@ type BaselineCapture = (
 );
 
 fn capture_baseline() -> Result<BaselineCapture, String> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, _hash, _as_of_commit) = load_issues_auto(&cwd, None)?;
     capture_baseline_for(&issues)
 }
@@ -8439,16 +8525,7 @@ impl Drop for CpuProfileGuard {
 /// errno strings both systems share, which is every one a failed `os.Create`
 /// can produce here.
 fn go_path_error(op: &str, path: &str, e: &std::io::Error) -> String {
-    let mut msg = e.to_string();
-    if e.raw_os_error().is_some() {
-        if let Some(cut) = msg.rfind(" (os error ") {
-            msg.truncate(cut);
-        }
-    }
-    if let Some(first) = msg.get_mut(0..1) {
-        first.make_ascii_lowercase();
-    }
-    format!("{op} {path}: {msg}")
+    bv_core::discovery::go_path_error(op, path, e)
 }
 
 /// Go main.go:1910-1933 — `os.Create` the path, start the sampler, and return
@@ -8611,7 +8688,7 @@ fn run_check_drift() -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -8869,23 +8946,11 @@ fn env_robot() -> bool {
 }
 
 fn go_working_dir() -> std::path::PathBuf {
-    let physical = std::env::current_dir().unwrap_or_default();
-    // Both sides must RESOLVE and then match. Comparing the two Results
-    // directly is not enough: when both canonicalize calls fail,
-    // None == None reads as "they match" and a stale $PWD is returned.
-    // That is how --generate-docs came to look for README.md under a
-    // fixture while running from the repository root.
-    if let Ok(pwd) = std::env::var("PWD") {
-        let pwd = std::path::PathBuf::from(pwd);
-        match (
-            std::fs::canonicalize(&pwd),
-            std::fs::canonicalize(&physical),
-        ) {
-            (Ok(a), Ok(b)) if a == b => return pwd,
-            _ => {}
-        }
-    }
-    physical
+    // Go's `os.Getwd()`: `$PWD` when it names the same directory as `.`,
+    // returned verbatim. The beads discovery needs the same rule — a
+    // canonicalized path there changed the working directory a claim command
+    // named — so the implementation lives in bv-core and both call it.
+    bv_core::discovery::go_getwd()
 }
 
 fn validate_correlation_repository(repo: &std::path::Path) -> Result<(), String> {
@@ -8997,8 +9062,8 @@ fn run_robot_history() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
-        if unresolved_source_probe(&cwd) {
-            return emit_unresolved_source();
+        if let Some(load_error) = unresolved_source_probe(&cwd) {
+            return emit_unresolved_source(&load_error);
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
@@ -9009,7 +9074,7 @@ fn run_robot_history() -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -9117,8 +9182,8 @@ fn run_robot_history() -> ExitCode {
 fn run_robot_orphans() -> ExitCode {
     let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
-        if unresolved_source_probe(&cwd) {
-            return emit_unresolved_source();
+        if let Some(load_error) = unresolved_source_probe(&cwd) {
+            return emit_unresolved_source(&load_error);
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
@@ -9129,7 +9194,7 @@ fn run_robot_orphans() -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -9260,7 +9325,7 @@ fn load_and_analyze(as_of: Option<&str>) -> Result<AnalysisTuple, ExitCode> {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return Err(emit_unresolved_source());
+                return Err(emit_unresolved_source(&e.to_string()));
             }
             eprintln!("Error: {e}");
             return Err(ExitCode::from(1));
@@ -9899,6 +9964,12 @@ mod go_json_tests {
     }
 }
 
+/// The last element is where the issues came from.
+///
+/// `--robot-insights --as-of <ref>` reads a git revision, and the envelope
+/// has to say so: Go names the source `.beads@<ref>` with kind `git`
+/// (cmd/bv/main.go:2803-2804), and the authority's entry names the file at
+/// the resolved commit (cmd/bv/main.go:2645-2652).
 type AnalysisResultFull = (
     Vec<bv_core::model::Issue>,
     String,
@@ -9906,22 +9977,53 @@ type AnalysisResultFull = (
     bv_analysis::MetricStatus,
     std::sync::Arc<bv_graph_core::DiGraph>,
     bv_analysis::GraphAnalysisPhase2,
+    SourceMeta,
 );
 
 fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     let cwd = go_working_dir();
     let as_of = extract_as_of();
+    // The source the issues were read from. Go names it in the envelope
+    // (cmd/bv/main.go:2803-2804): a git revision becomes
+    // `source_path: ".beads@<ref>"` with `source_kind: "git"`, and the
+    // authority's own entry names the file at the resolved commit
+    // (cmd/bv/main.go:2645-2652). Without it the insights payload described
+    // the WORKING TREE while its contents came from a commit.
+    let mut source: Option<SourceMeta> = None;
     let issues = if let Some(ref revision) = as_of {
         let loader = bv_core::discovery::GitLoader::new(&cwd);
         match loader.load_at(revision) {
             Ok(issues) => {
                 if let Ok(sha) = loader.resolve_revision(revision) {
-                    eprintln!(
-                        "Loaded {} issues from {} ({})",
-                        issues.len(),
-                        revision,
-                        &sha[..sha.len().min(7)]
-                    );
+                    // Go guards this line with `if !envRobot`
+                    // (cmd/bv/main.go:2671): in robot mode stdout carries only
+                    // the payload and stderr stays clean, so the message was
+                    // being written where the oracle writes nothing at all.
+                    if !env_robot() {
+                        eprintln!(
+                            "Loaded {} issues from {} ({})",
+                            issues.len(),
+                            revision,
+                            &sha[..sha.len().min(7)]
+                        );
+                    }
+                    set_as_of(revision.clone(), sha.clone());
+                    let (loaded, stats) = loader
+                        .load_at_with_stats(revision)
+                        .unwrap_or_else(|_| (issues.clone(), Default::default()));
+                    source = Some(SourceMeta {
+                        path: format!(".beads/issues.jsonl@{sha}"),
+                        envelope_path: format!(".beads@{revision}"),
+                        kind: "git".to_string(),
+                        valid: stats.valid,
+                        errors: stats.errors,
+                        skipped: stats.skipped,
+                        tombstones: stats.tombstones(),
+                        file_hash: bv_core::data_hash::source_issues_hash(
+                            &loaded,
+                            &stats.tombstone_ids,
+                        ),
+                    });
                 }
                 issues
             }
@@ -9961,7 +10063,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
             Ok((issues, _)) => issues,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
-                    return Err(emit_unresolved_source());
+                    return Err(emit_unresolved_source(&e.to_string()));
                 }
                 eprintln!("Error: {e}");
                 return Err(ExitCode::from(1));
@@ -9972,6 +10074,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     // (main.go:4883-4884), `--label` keeps the loader's hash (:4901).
     let (issues, hash_override) = apply_scope(&issues);
     let data_hash = hash_override.unwrap_or_else(|| bv_core::data_hash::compute_data_hash(&issues));
+    let source = source.unwrap_or_else(|| source_meta_for(&issues));
     let g = std::sync::Arc::new(bv_analysis::build_graph(&issues));
     let p1 = bv_analysis::analyze_phase1(&g);
     let budget = bv_analysis::AnalysisBudget {
@@ -9980,7 +10083,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     };
     let gc = std::sync::Arc::clone(&g);
     let (status, phase2) = bv_analysis::analyze_phase2_blocking(gc, &budget);
-    Ok((issues, data_hash, p1, status, g, phase2))
+    Ok((issues, data_hash, p1, status, g, phase2, source))
 }
 
 fn to_id_map(
@@ -10129,7 +10232,7 @@ fn run_robot_insights() -> ExitCode {
 /// writes the identical insights object).
 fn build_robot_insights() -> Result<serde_json::Value, ExitCode> {
     let all = load_full()?;
-    let (issues, hash, p1, status, g, phase2) = all;
+    let (issues, hash, p1, status, g, phase2, source) = all;
 
     let pr_obj = to_id_map(&g, &bv_graph_core::pagerank_default(&g));
     // Go's betweenness here is the config-driven Phase 2 result, not a
@@ -10188,7 +10291,8 @@ fn build_robot_insights() -> Result<serde_json::Value, ExitCode> {
         g.edge_count() as f64 / (n * (n - 1.0))
     };
 
-    let mut payload = full_envelope_for(&hash, &issues);
+    let mut payload =
+        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&source), &issues);
     payload["analysis_config"] = insights_analysis_config(g.len());
     // Go's `statusEntry.MarshalJSON` (pkg/analysis/graph.go:131-147) omits
     // `reason` only when it is empty, and every Go site that sets
@@ -11435,7 +11539,7 @@ fn run_robot_plan() -> ExitCode {
             Ok(x) => x,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
-                    return emit_unresolved_source();
+                    return emit_unresolved_source(&e.to_string());
                 }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
@@ -12692,7 +12796,7 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -12775,14 +12879,14 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
 fn run_profile_startup(json_output: bool) -> ExitCode {
     use std::time::Instant;
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
 
     let load_start = Instant::now();
     let (issues, _hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -13126,7 +13230,7 @@ fn run_robot_alerts() -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -13147,7 +13251,7 @@ fn run_robot_alerts() -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -13485,7 +13589,7 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -13504,17 +13608,27 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // The envelope's `scope_hash` covers the issue set as LOADED, not the
+    // graph-root subgraph: Go computes it from `ctx.Issues`
+    // (cmd/bv/robot_registry.go:253-257) and the root filter runs later,
+    // inside the handler. Hashing the filtered set instead gave a different
+    // `scope_hash` for the same data.
+    let scope_issues = issues.clone();
     let mut issues: Vec<bv_core::model::Issue> = issues;
-    if let Some(gi) = args.iter().position(|a| a == "--graph-root") {
-        let root = args.get(gi + 1).cloned().unwrap_or_default();
-        let depth = args
-            .iter()
-            .position(|a| a == "--graph-depth")
-            .and_then(|i| args.get(i + 1))
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
+    // Go's `GraphExportConfig` carries the root and the depth as it was
+    // given on the command line (cmd/bv/robot_registry.go:1063-1069), and
+    // `filterIssues` applies the root subgraph whenever the root is set
+    // (pkg/export/graph_export.go:179-181). The depth is Go's `int`, so 0
+    // means unlimited rather than "no hops".
+    let graph_root = flag_value(args, "graph-root")
+        .unwrap_or_default()
+        .to_string();
+    let graph_depth: i64 = flag_value(args, "graph-depth")
+        .and_then(|raw| go_parse_int_base0(raw).ok())
+        .unwrap_or(0);
+    if !graph_root.is_empty() {
         let refs: Vec<&bv_core::model::Issue> = issues.iter().collect();
-        issues = bv_export::graph_export::subgraph(&refs, &root, depth)
+        issues = bv_export::graph_export::subgraph(&refs, &graph_root, graph_depth)
             .into_iter()
             .cloned()
             .collect();
@@ -13526,7 +13640,7 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
         } else {
             bv_export::graph_export::generate_mermaid_graph(&issues)
         };
-        let mut payload = full_envelope_for(&hash, &issues);
+        let mut payload = full_envelope_for(&hash, &scope_issues);
         payload["format"] = serde_json::json!(fmt);
         payload["graph"] = serde_json::json!(content);
         payload["nodes"] = serde_json::json!(issues.len());
@@ -13595,10 +13709,35 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
     // Go emits the v0.25.0 envelope first, then format/nodes/edges/
     // explanation/adjacency. This branch hand-rolled its payload and put
     // data_hash last, so it missed the envelope entirely.
-    let mut payload = full_envelope_for(&hash, &issues);
+    let mut payload = full_envelope_for(&hash, &scope_issues);
     payload["format"] = serde_json::json!("json");
     payload["nodes"] = serde_json::json!(sorted_issues.len());
     payload["edges"] = serde_json::json!(edge_count);
+    // Go's `filters_applied` (pkg/export/graph_export.go:107-113, plus the
+    // label scope the robot registry adds at cmd/bv/robot_registry.go:1078-
+    // 1082): a `map[string]string`, so the keys are sorted, and the field is
+    // omitted entirely when nothing was filtered. The port never emitted the
+    // field, so an agent could not tell a scoped graph from a whole one.
+    let mut filters_applied: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    if graph_depth > 0 {
+        filters_applied.insert("depth".into(), serde_json::json!(graph_depth.to_string()));
+    }
+    let (label_scope, _, _) = active_scope_flags();
+    if !label_scope.is_empty() {
+        filters_applied.insert("label".into(), serde_json::json!(label_scope));
+    }
+    if !graph_root.is_empty() {
+        filters_applied.insert("root".into(), serde_json::json!(graph_root));
+    }
+    if !filters_applied.is_empty() {
+        let mut sorted: Vec<(String, serde_json::Value)> = filters_applied.into_iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut ordered = serde_json::Map::new();
+        for (k, v) in sorted {
+            ordered.insert(k, v);
+        }
+        payload["filters_applied"] = serde_json::Value::Object(ordered);
+    }
     payload["explanation"] = serde_json::json!({
         "what": "Dependency graph as JSON adjacency list",
         "when_to_use": "When you need programmatic access to the graph structure",
@@ -13720,6 +13859,123 @@ fn go_underscore_ok(s: &str) -> bool {
         i += 1;
     }
     saw != b'_'
+}
+
+/// Go's pflag parse pass, run before any command logic — the single place
+/// where a malformed invocation is rejected.
+///
+/// Go merges the stdlib `flag.CommandLine` into cobra's flag set
+/// (cmd/bv/main.go:518) and cobra parses that set inside `execute()`, BEFORE
+/// it consults `--help` and before `RunE` runs. So the first problem in argv
+/// order wins, and it wins over `--help`, over `--version`, and over the
+/// modifier-requires table:
+///
+/// ```text
+///   bv --help --unknown-flag        -> exit 1, "unknown flag: --unknown-flag"
+///   bv --version --robot-max-results abc
+///                                  -> exit 1, "invalid argument "abc" for ..."
+///   bv --robot-max-results --format json
+///                                  -> exit 1, "invalid argument "--format" ..."
+/// ```
+///
+/// The third line is the load-bearing one: a value-taking flag consumes the
+/// next token UNCONDITIONALLY, even one that looks like another flag, so
+/// `--format` is the value and `json` is a stray positional.
+///
+/// Three problems are reported, in this order of precedence within one argv
+/// position: an unregistered long flag, a value-taking flag with nothing left
+/// to consume, and a value the flag's own type rejects. The numeric kinds are
+/// checked here because Go's `flag.Int`/`flag.Float64` convert during parsing
+/// (pflag's `intValue.Set` calls `strconv.ParseInt(s, 0, 64)`), so an
+/// unparseable value is a parse error rather than a silent fall back to the
+/// default. Rust validated two flags by hand (`--related-max-results`,
+/// `--related-min-relevance`) and left the other twenty to their call sites,
+/// where a bad value was either reported as a modifier-requires violation or
+/// — for `--robot-max-results` — accepted outright.
+fn go_flag_parse_error(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        // Go's pflag keeps parsing after a positional (interspersed args), so a
+        // flag that follows a subcommand word is still parsed. Only `--` ends
+        // flag parsing.
+        if !arg.starts_with('-') || arg == "-" || arg == "--" {
+            if arg == "--" {
+                return None;
+            }
+            i += 1;
+            continue;
+        }
+        let (name, inline) = match arg.split_once('=') {
+            Some((n, v)) => (n, Some(v.to_string())),
+            None => (arg.as_str(), None),
+        };
+        let has_inline = inline.is_some();
+        let bare = name.trim_start_matches('-');
+        let Some(kind) = flags::flag_kind(bare) else {
+            // Cobra registers `--help`/`-h` on the root command, so they are
+            // known flags that take no value. They are not in the port's
+            // registry because Rust handles them before the registry is
+            // consulted, but the parse pass has to recognise them: reporting
+            // "unknown flag: --help" for `--help --unknown-flag-xyz` named
+            // the wrong flag.
+            if bare == "help" || bare == "h" {
+                i += 1;
+                continue;
+            }
+            // An unregistered long flag is the first thing Go's parser
+            // rejects, and its message carries the "Did you mean" recovery
+            // line (cmd/bv/main.go:1273-1289).
+            return Some(match argv::suggest_closest_flag(bare) {
+                Some(suggestion) => format!(
+                    "unknown flag: --{bare}\nDid you mean `{}`?\nRun `bvr --help` for all flags or `bvr --robot-help` for agent-focused docs.",
+                    argv::corrected_unknown_flag_command(args, bare, &suggestion)
+                ),
+                None => format!("unknown flag: --{bare}"),
+            });
+        };
+        let takes_value = !matches!(kind, flags::FlagKind::Bool);
+        let value = match inline {
+            Some(v) => Some(v),
+            None if takes_value => match args.get(i + 1) {
+                Some(v) => Some(v.clone()),
+                None => {
+                    // Go's pflag `failf("flag needs an argument: %s", s)`, with
+                    // the recovery line `enrichFlagParseError` appends
+                    // (cmd/bv/main.go:1269-1271).
+                    return Some(format!(
+                        "flag needs an argument: --{bare}\nUse --{bare} VALUE. Run `bvr --help` for all flags or `bvr --robot-help` for agent-focused docs."
+                    ));
+                }
+            },
+            None => None,
+        };
+        if let Some(raw) = &value {
+            if let Some(detail) = numeric_flag_detail(bare, kind, raw) {
+                return Some(format!(
+                    "invalid argument {raw:?} for \"--{bare}\" flag: {detail}"
+                ));
+            }
+        }
+        i += if has_inline || !takes_value { 1 } else { 2 };
+    }
+    None
+}
+
+/// The conversion error a numeric flag's own type produces, in Go's wording.
+///
+/// Go's `flag` package registers these as `flag.Int` (base 0, 64-bit) and
+/// `flag.Float64` (cmd/bv/main.go:1494-1632), plus one custom
+/// `percentOrFraction` value (flag_types.go:66-101). pflag calls each
+/// value's `Set` while parsing, so the failure is a parse error and not a
+/// usage error.
+fn numeric_flag_detail(name: &str, kind: flags::FlagKind, raw: &str) -> Option<String> {
+    match kind {
+        flags::FlagKind::Int => go_parse_int_base0(raw).err(),
+        flags::FlagKind::Float | flags::FlagKind::Float64 => go_parse_float(raw).err(),
+        flags::FlagKind::PercentOrFraction => parse_percent_or_fraction(name, raw).err(),
+        _ => None,
+    }
 }
 
 /// Go registers `--related-max-results` as a pflag `flag.Int` (main.go:1584,
@@ -14501,12 +14757,113 @@ fn search_adjust_weights_for_query(
 /// payload Go accepts into an "invalid weights JSON" error. `Option<f64>`
 /// accepts `null` and a number and nothing else, so a string, bool or array
 /// for a weight is still a type error exactly as in Go.
+/// Go's `encoding/json` error wording for a failed `json.Unmarshal`.
+///
+/// Go reports the SCANNER's complaint — "invalid character 'i' looking for
+/// beginning of value" — where `serde_json` reports "expected value at line 1
+/// column 1". The two read as different failures to anything that matches on
+/// the text, and the contract is byte equality with the oracle.
+///
+/// The cases below are the ones a caller can actually reach: a value that
+/// does not start where a value is expected, a truncated document, trailing
+/// content, a bad object key, and a value of the wrong JSON type.
+fn go_json_unmarshal_error(raw: &str, err: &serde_json::Error) -> String {
+    // serde_json appends " at line L column C" to every message; the detail
+    // is what carries the meaning.
+    let detail = err.to_string();
+    let detail = detail.split(" at line ").next().unwrap_or(&detail);
+    let offending = || go_json_offending_char(raw, err);
+    match detail {
+        "expected value" | "expected ident" => match offending() {
+            Some(c) => format!("invalid character {c:?} looking for beginning of value"),
+            None => "unexpected end of JSON input".to_string(),
+        },
+        "EOF while parsing a value"
+        | "EOF while parsing an object"
+        | "EOF while parsing a list"
+        | "EOF while parsing a string" => "unexpected end of JSON input".to_string(),
+        // A trailing comma: Go's scanner looks for the next key and reports
+        // the character it found there.
+        "trailing comma" => match offending() {
+            Some(']') => "invalid character ']' after array element".to_string(),
+            Some(c) => {
+                format!("invalid character {c:?} looking for beginning of object key string")
+            }
+            None => "unexpected end of JSON input".to_string(),
+        },
+        "trailing characters" => match offending() {
+            Some(c) => format!("invalid character {c:?} after top-level value"),
+            None => "unexpected end of JSON input".to_string(),
+        },
+        "key must be a string" => match offending() {
+            Some(c) => {
+                format!("invalid character {c:?} looking for beginning of object key string")
+            }
+            None => "unexpected end of JSON input".to_string(),
+        },
+        "expected `:`" => match offending() {
+            Some(c) => format!("invalid character {c:?} after object key"),
+            None => "unexpected end of JSON input".to_string(),
+        },
+        "expected `,` or `}`" => match offending() {
+            Some(c) => format!("invalid character {c:?} after object key:value pair"),
+            None => "unexpected end of JSON input".to_string(),
+        },
+        "expected `,` or `]`" => match offending() {
+            Some(c) => format!("invalid character {c:?} after array element"),
+            None => "unexpected end of JSON input".to_string(),
+        },
+        // A type mismatch: serde says "invalid type: <found>, expected <want>".
+        // Go names the JSON kind and the Go type it could not put there.
+        _ if detail.starts_with("invalid type:") => {
+            let found = detail
+                .split("invalid type: ")
+                .nth(1)
+                .and_then(|rest| rest.split(", expected ").next())
+                .unwrap_or("");
+            let want_map = detail.contains("expected a map");
+            let kind = match found.split_whitespace().next().unwrap_or("") {
+                "sequence" => "array",
+                "map" => "object",
+                "boolean" => "bool",
+                "integer" | "floating" => "number",
+                "string" => "string",
+                "null" => "null",
+                _ => "value",
+            };
+            let target = if want_map {
+                "map[string]float64"
+            } else {
+                "float64"
+            };
+            format!("json: cannot unmarshal {kind} into Go value of type {target}")
+        }
+        _ => err.to_string(),
+    }
+}
+
+/// The character Go's scanner would have stopped on, given where `serde_json`
+/// reported the failure. `serde_json`'s line and column are 1-based.
+fn go_json_offending_char(raw: &str, err: &serde_json::Error) -> Option<char> {
+    let line = err.line().max(1);
+    let column = err.column().max(1);
+    let mut offset = 0usize;
+    for (i, l) in raw.split('\n').enumerate() {
+        if i + 1 == line {
+            offset += column - 1;
+            break;
+        }
+        offset += l.chars().count() + 1;
+    }
+    raw.chars().nth(offset)
+}
+
 fn search_parse_weights_json(raw: &str) -> Result<bv_search::hybrid::Weights, String> {
     const REQUIRED: [&str; 6] = [
         "text", "pagerank", "status", "impact", "priority", "recency",
     ];
-    let payload: std::collections::BTreeMap<String, Option<f64>> =
-        serde_json::from_str(raw).map_err(|e| format!("invalid weights JSON: {e}"))?;
+    let payload: std::collections::BTreeMap<String, Option<f64>> = serde_json::from_str(raw)
+        .map_err(|e| format!("invalid weights JSON: {}", go_json_unmarshal_error(raw, &e)))?;
     for key in REQUIRED {
         if !payload.contains_key(key) {
             return Err(format!("weights JSON missing {key:?}"));
@@ -15110,7 +15467,7 @@ fn run_robot_search(args: &[String]) -> ExitCode {
         Ok(dim) => dim,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -15123,7 +15480,7 @@ fn run_robot_search(args: &[String]) -> ExitCode {
         Ok(d) => d,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -15135,7 +15492,7 @@ fn run_robot_search(args: &[String]) -> ExitCode {
             Ok(x) => x,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
-                    return emit_unresolved_source();
+                    return emit_unresolved_source(&e.to_string());
                 }
                 eprintln!("Error: {e}");
                 return ExitCode::from(1);
@@ -15478,8 +15835,8 @@ fn run_robot_causality(args: &[String]) -> ExitCode {
         .unwrap_or_default();
     let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
-        if unresolved_source_probe(&cwd) {
-            return emit_unresolved_source();
+        if let Some(load_error) = unresolved_source_probe(&cwd) {
+            return emit_unresolved_source(&load_error);
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
@@ -15490,7 +15847,7 @@ fn run_robot_causality(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -15754,8 +16111,8 @@ fn run_robot_related(args: &[String]) -> ExitCode {
 
     let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
-        if unresolved_source_probe(&cwd) {
-            return emit_unresolved_source();
+        if let Some(load_error) = unresolved_source_probe(&cwd) {
+            return emit_unresolved_source(&load_error);
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
@@ -15766,7 +16123,7 @@ fn run_robot_related(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -15859,7 +16216,14 @@ fn run_robot_related(args: &[String]) -> ExitCode {
             payload[k] = v;
         }
     }
-    emit_json(&payload)
+    // Go's `withEnvelope` returns a `map[string]json.RawMessage`
+    // (cmd/bv/robot_registry.go:309), and `encoding/json` marshals a map with
+    // its keys SORTED — so the oracle's `--robot-related` payload is in
+    // alphabetical order, not the envelope's. `serde_json` is built with
+    // `preserve_order`, so the insertion order above would otherwise leak into
+    // the bytes. The sibling `--robot-impact-network` handler already sorts
+    // for the same reason.
+    emit_json(&emit_sorted_object(&payload))
 }
 
 /// Go `handleRobotImpactNetwork` — `--robot-impact-network <bead-id|all>`.
@@ -15888,8 +16252,8 @@ fn run_robot_impact_network(args: &[String]) -> ExitCode {
     // not reported it itself (robot_registry.go:506-509), so a bare `Error:`
     // here loses the command the failure belongs to.
     if let Err(e) = validate_correlation_repository(&cwd) {
-        if unresolved_source_probe(&cwd) {
-            return emit_unresolved_source();
+        if let Some(load_error) = unresolved_source_probe(&cwd) {
+            return emit_unresolved_source(&load_error);
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
@@ -15900,7 +16264,7 @@ fn run_robot_impact_network(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16075,12 +16439,12 @@ fn sort_json_maps_like_go_inner_fn(item: &serde_json::Value) -> serde_json::Valu
 
 /// Go `robot-sprint-list` — loads `.beads/sprints.jsonl` and emits all sprints.
 fn run_robot_sprint_list() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16090,7 +16454,7 @@ fn run_robot_sprint_list() -> ExitCode {
         Ok(s) => s,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16114,12 +16478,12 @@ fn run_robot_sprint_show(args: &[String]) -> ExitCode {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16129,7 +16493,7 @@ fn run_robot_sprint_show(args: &[String]) -> ExitCode {
         Ok(s) => s,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16176,12 +16540,12 @@ fn run_robot_burndown(args: &[String]) -> ExitCode {
     // sprint passed to `--robot-burndown` was silently discarded and the run
     // fell through to the active-sprint lookup.
     let target = flag_value(args, "robot-burndown").unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16191,7 +16555,7 @@ fn run_robot_burndown(args: &[String]) -> ExitCode {
         Ok(s) => s,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16252,12 +16616,12 @@ fn run_robot_forecast(args: &[String]) -> ExitCode {
         .unwrap_or("all")
         .to_string();
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16373,7 +16737,7 @@ fn run_emit_script(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16525,7 +16889,7 @@ struct BriefTriage {
 }
 
 fn compute_brief_triage() -> Result<BriefTriage, ExitCode> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (loaded, hash, _as_of_commit, loaded_source) = match load_issues_auto_meta_raw(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
@@ -16794,12 +17158,12 @@ fn run_robot_capacity(args: &[String]) -> ExitCode {
         .and_then(|v| go_parse_int_base0(v).ok())
         .filter(|v| *v > 0)
         .unwrap_or(1);
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -16823,7 +17187,13 @@ fn run_robot_capacity(args: &[String]) -> ExitCode {
             .enumerate()
             .map(|(i, v)| (cap_graph.node_id(i).unwrap_or_default().to_string(), *v))
             .collect();
-    let out = bv_core::sprint::calculate_capacity(&issues, agents, label.as_deref(), &cp_scores);
+    let out = bv_core::sprint::calculate_capacity(
+        &issues,
+        agents,
+        label.as_deref(),
+        &cp_scores,
+        robot_now(),
+    );
     let mut payload = full_envelope_for(&hash, &issues);
     let obj = payload.as_object_mut().expect("envelope is an object");
     for (k, v) in serde_json::to_value(&out)
@@ -17006,12 +17376,12 @@ fn run_robot_explain_correlation(args: &[String]) -> ExitCode {
         }
     };
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, _, _) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -17050,7 +17420,7 @@ fn run_robot_explain_correlation(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -17101,12 +17471,12 @@ fn describe_correlation_feedback(fb: &bv_correlation::feedback::CorrelationFeedb
 /// numbers come from the feedback store alone: no correlation report is
 /// generated on this path.
 fn run_robot_correlation_stats() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     // Go loads the issues before it reaches the feedback store, so a directory
     // with no beads source fails there — with the degraded envelope — rather
     // than reporting correlation counts over a repository never read.
-    if unresolved_source_probe(&cwd) {
-        return emit_unresolved_source();
+    if let Some(load_error) = unresolved_source_probe(&cwd) {
+        return emit_unresolved_source(&load_error);
     }
     let Some(store) = load_correlation_feedback_store(&cwd) else {
         eprintln!("Error: getting beads directory");
@@ -17158,7 +17528,7 @@ fn file_lookup_envelope(
     ),
     String,
 > {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     validate_correlation_repository(&cwd).map_err(|e| e.to_string())?;
     let mut opts = bv_correlation::history::HistoryOptions {
         limit: 500,
@@ -17230,7 +17600,7 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
         Ok((issues, _, _)) => issues,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -17240,7 +17610,7 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error handling --robot-file-beads: {e}");
             return ExitCode::from(1);
@@ -17278,8 +17648,8 @@ fn run_robot_file_beads(args: &[String]) -> ExitCode {
 fn run_robot_file_hotspots(args: &[String]) -> ExitCode {
     let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
-        if unresolved_source_probe(&cwd) {
-            return emit_unresolved_source();
+        if let Some(load_error) = unresolved_source_probe(&cwd) {
+            return emit_unresolved_source(&load_error);
         }
         // Go returns this as a plain error, so its dispatcher wraps it
         // as `Error handling <flag>: <err>` (robot_registry.go:508).
@@ -17290,7 +17660,7 @@ fn run_robot_file_hotspots(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -17358,12 +17728,12 @@ fn run_robot_file_relations(args: &[String]) -> ExitCode {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let issues = match load_issues_auto(&cwd, None) {
         Ok((issues, _, _)) => issues,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -17373,7 +17743,7 @@ fn run_robot_file_relations(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -18598,7 +18968,7 @@ fn run_robot_schema(args: &[String]) -> ExitCode {
 /// and `go_cache_stats` rather than forwarded from `bv_analysis::metrics`,
 /// which registers a different set of names.
 fn run_robot_metrics() -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     // Go times this same load: `pkg/loader/loader.go:918` defers
     // `metrics.Timer(metrics.LoaderParse)` around the issue-file parse.
     let collect = bv_analysis::metrics::metrics_enabled();
@@ -18609,7 +18979,7 @@ fn run_robot_metrics() -> ExitCode {
         Ok((issues, _stats)) => issues,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -18720,12 +19090,12 @@ fn run_robot_blocker_chain(args: &[String]) -> ExitCode {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -18784,12 +19154,12 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
         }
     };
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, _, _) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -18832,7 +19202,7 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
         }
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -18971,7 +19341,7 @@ fn run_robot_label_attention() -> ExitCode {
         }
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -19075,12 +19445,12 @@ fn run_robot_impact(args: &[String]) -> ExitCode {
         eprintln!("Error: --robot-impact requires comma-separated file paths");
         return ExitCode::from(2);
     }
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let issues = match load_issues_auto(&cwd, None) {
         Ok((issues, _, _)) => issues,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -19090,7 +19460,7 @@ fn run_robot_impact(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -19134,12 +19504,12 @@ fn run_robot_diff(args: &[String]) -> ExitCode {
         eprintln!("Error: --robot-diff requires --diff-since <git-ref>");
         return ExitCode::from(2);
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (current, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);
@@ -19200,12 +19570,12 @@ fn run_robot_not_ready_labels(args: &[String]) -> ExitCode {
         eprintln!("Error: --robot-not-ready-labels requires comma-separated labels");
         return ExitCode::from(2);
     }
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source();
+                return emit_unresolved_source(&e.to_string());
             }
             eprintln!("Error: {e}");
             return ExitCode::from(1);

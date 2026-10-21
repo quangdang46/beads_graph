@@ -723,19 +723,28 @@ fn primary_flag_name(arg: &str, names: &[&str]) -> bool {
 /// would just block. Returns `None` when every bare token was consumed
 /// (rewritten to a flag) or belongs to a flag's value.
 pub fn unconsumed_positional(rewritten: &[String]) -> Option<String> {
-    // Track whether the previous token was a flag awaiting a value. A flag
-    // that takes a value swallows the next token, so `bv --label triage`
-    // must not report `triage` as an unknown command.
-    let mut prev_is_flag = false;
+    // A value-taking flag swallows the NEXT token unconditionally, even one
+    // that looks like a flag — Go's pflag does not re-examine it
+    // (pflag's `parseLongArg`: `case len(args) > 0: value = args[0]`). So
+    // `bv --export-md --export-format json` gives `--export-md` the value
+    // `--export-format` and leaves `json` as the leftover word, which Go
+    // reports as `unknown command "json"`. Reading the next token as a flag
+    // instead swallowed `json` and the run continued.
+    let mut skip_next = false;
     // Input is argv-minus-program (see `rewrite_args`), so index 0 is
     // the first real argument — do not skip it.
     for tok in rewritten.iter() {
-        if prev_is_flag && !tok.starts_with('-') {
-            prev_is_flag = false;
+        if skip_next {
+            skip_next = false;
             continue;
         }
-        if tok.starts_with('-') {
-            prev_is_flag = flag_takes_value(tok);
+        if tok.starts_with('-') && tok != "-" {
+            if tok == "--" {
+                // Go's pflag stops parsing at `--`; everything after it is
+                // positional.
+                continue;
+            }
+            skip_next = flag_takes_value(tok);
             continue;
         }
         return Some(tok.clone());
@@ -968,29 +977,22 @@ fn flag_takes_value(tok: &str) -> bool {
     if tok.contains('=') {
         return false;
     }
-    // Boolean switches listed in the Go flag registry never consume the next
-    // token. Everything else in the registry is a string/number flag.
+    // A BOOLEAN flag never consumes the next token; every other registered
+    // flag does.
     //
-    // `cpu-profile` is deliberately absent: Go declares it as a string flag
-    // (`flag.String("cpu-profile", "", ...)` at cmd/bv/main.go:1460, wired into
-    // cobra via AddFlagSet at :518), so `--cpu-profile out.pprof` swallows the
-    // path. Listing it here made `unconsumed_positional` report that path as an
-    // unknown command and exit 1 before any profiling could start.
+    // The list of booleans used to be spelled out by hand, and it was short:
+    // `--robot-triage` was missing from it, so the token after it was read
+    // as its value. `bvr --robot-triage somejunk` therefore never reported
+    // `somejunk` as the unknown command Go reports, and the stray word
+    // disappeared instead. The registry already knows each flag's kind, so
+    // asking it is both shorter and self-maintaining.
+    //
+    // `cpu-profile` is a STRING flag in Go (`flag.String("cpu-profile", "",
+    // ...)` at cmd/bv/main.go:1460, wired into cobra via AddFlagSet at :518),
+    // so `--cpu-profile out.pprof` swallows the path - as it must.
     !matches!(
-        name,
-        "help"
-            | "version"
-            | "robot-robot"
-            | "brief"
-            | "no-cache"
-            | "stats"
-            | "export-include-graph"
-            | "generate-docs"
-            | "force-full-analysis"
-            | "profile-startup"
-            | "profile-json"
-            | "check-update"
-            | "baseline-info"
+        crate::flags::flag_kind(name),
+        Some(crate::flags::FlagKind::Bool)
     )
 }
 

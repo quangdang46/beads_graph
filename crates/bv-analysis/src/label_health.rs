@@ -158,7 +158,7 @@ pub fn compute_velocity_metrics(issues: &[Issue], now: jiff::Timestamp) -> Veloc
     let prev_week_start = now - jiff::SignedDuration::from_secs(14 * 86400);
 
     let (mut closed7, mut closed30, mut prev_week, mut current_week) = (0i64, 0i64, 0i64, 0i64);
-    let mut total_close_days = 0.0;
+    let mut total_close_ns = 0i128;
     let mut close_samples = 0i64;
 
     for iss in issues {
@@ -180,21 +180,26 @@ pub fn compute_velocity_metrics(issues: &[Issue], now: jiff::Timestamp) -> Veloc
             current_week += 1;
         }
         if let Some(created_at) = parse_ts(&iss.created_at) {
-            let secs = (closed_at - created_at)
-                .total(jiff::Unit::Second)
-                .unwrap_or(0.0);
-            // Go accumulates a time.Duration and only converts at the end via
-            // `totalCloseDur.Hours() / 24.0` (label_health.go:379). Dividing
-            // by 86400 per issue here rounded differently, so avg_days_to_close
-            // disagreed in the last f64 digits.
-            total_close_days += secs / 3600.0;
+            // Go accumulates a time.Duration — an exact nanosecond count — and
+            // converts once at the end via `totalCloseDur.Hours() / 24.0`
+            // (label_health.go:370-379). The port summed per-issue durations
+            // as f64 HOURS, which rounds differently and left
+            // avg_days_to_close off in the last digits.
+            total_close_ns += (closed_at.as_second() - created_at.as_second()) as i128
+                * 1_000_000_000
+                + (closed_at.subsec_nanosecond() - created_at.subsec_nanosecond()) as i128;
             close_samples += 1;
         }
     }
 
     let avg_days = if close_samples > 0 {
-        // total_close_days holds summed hours; Go divides by 24 here.
-        total_close_days / 24.0 / close_samples as f64
+        // Go's `Duration.Hours()` is the integer hours plus the fractional
+        // remainder, not `ns / 3.6e12` (see the same shape in triage.rs).
+        const NANOS_PER_HOUR: i128 = 3_600_000_000_000;
+        let whole_hours = total_close_ns / NANOS_PER_HOUR;
+        let remainder = total_close_ns % NANOS_PER_HOUR;
+        let hours = whole_hours as f64 + (remainder as f64) / (NANOS_PER_HOUR as f64);
+        hours / 24.0 / close_samples as f64
     } else {
         0.0
     };
@@ -295,7 +300,17 @@ pub fn compute_freshness_metrics(
             if most_recent.is_none_or(|m| updated > m) {
                 most_recent = Some(updated);
             }
-            let hours = (now - updated).total(jiff::Unit::Second).unwrap_or(0.0) / 3600.0;
+            // Go's `now.Sub(iss.UpdatedAt).Hours() / 24.0`
+            // (label_health.go:440) — `Duration.Hours()` is the integer
+            // hours plus the fractional remainder, not `seconds / 3600`, so
+            // the port's per-issue value rounded differently and
+            // avg_days_since_update came out a digit off.
+            const NANOS_PER_HOUR: i128 = 3_600_000_000_000;
+            let delta_ns = (now.as_second() - updated.as_second()) as i128 * 1_000_000_000
+                + (now.subsec_nanosecond() - updated.subsec_nanosecond()) as i128;
+            let whole_hours = delta_ns / NANOS_PER_HOUR;
+            let remainder = delta_ns % NANOS_PER_HOUR;
+            let hours = whole_hours as f64 + (remainder as f64) / (NANOS_PER_HOUR as f64);
             let days = hours / 24.0;
             total_staleness += days;
             count += 1;

@@ -9,6 +9,7 @@ pub mod drift;
 pub mod feedback;
 pub mod file_impact;
 pub mod go_math;
+pub mod go_time;
 pub mod impact;
 pub mod label_health;
 pub mod metrics;

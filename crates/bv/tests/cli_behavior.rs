@@ -71,11 +71,37 @@ fn all_robot_primaries_are_dispatched_or_validated() {
     assert!(stderr.contains("requires --check-drift"), "{stderr}");
 }
 
+/// Go counts ACTIVE GROUPS, not active flags (cmd/bv/main.go:351-366), so
+/// `--robot-triage` and `--robot-next` are two groups and conflict, while the
+/// two triage SPELLINGS share one group and do not. The message is Go's.
 #[test]
 fn exclusive_primaries_exit_one() {
     let (code, _, stderr) = run(&["--robot-triage", "--robot-next"]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("only one primary command"), "{stderr}");
+    assert!(
+        stderr.contains("multiple primary robot commands specified: --robot-next | --robot-triage"),
+        "{stderr}"
+    );
+}
+
+/// Two groups with one flag each still conflict — the rule is about groups.
+#[test]
+fn exclusive_primaries_count_groups_not_flags() {
+    let (code, _, stderr) = run(&["--robot-insights", "--robot-plan"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr
+            .contains("multiple primary robot commands specified: --robot-insights | --robot-plan"),
+        "{stderr}"
+    );
+}
+
+/// The triage family shares one group, so naming two of its spellings is one
+/// command, not two.
+#[test]
+fn two_spellings_of_one_exclusive_group_are_allowed() {
+    let (code, _, stderr) = run(&["--robot-triage", "--robot-triage-by-track"]);
+    assert_eq!(code, 0, "{stderr}");
 }
 
 #[test]
