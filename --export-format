@@ -1,0 +1,1761 @@
+# Beads Export
+
+*Generated: Sat, 22 Aug 2026 14:06:52 UTC*
+
+## Summary
+
+| Metric | Count |
+|--------|-------|
+| **Total** | 48 |
+| Open | 0 |
+| In Progress | 0 |
+| Blocked | 0 |
+| Closed | 48 |
+
+## Table of Contents
+
+- [⚫ beads_viewer_rust-api-freeze-b73 Phase 0.5: API Contract Freeze (api-freeze-v1)](#beads-viewer-rust-api-freeze-b73-phase-0-5-api-contract-freeze-api-freeze-v1)
+- [⚫ beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz TUI UX Parity §14 follow-ups: close the 3 documented scope cuts](#beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-tui-ux-parity-14-follow-ups-close-the-3-documented-scope-cuts)
+- [⚫ beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz.1 Verify .bvvi index byte-compat against a real Go-written index file](#beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-1-verify-bvvi-index-byte-compat-against-a-real-go-written-index-file)
+- [⚫ beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz.2 Manual interactive TUI smoke pass for §14's 5 shipped features](#beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-2-manual-interactive-tui-smoke-pass-for-14-s-5-shipped-features)
+- [⚫ beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz.3 Cass modal timestamp correlation strategy (Go's third strategy, currently scope-cut)](#beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-3-cass-modal-timestamp-correlation-strategy-go-s-third-strategy-currently-scope-cut)
+- [⚫ beads_viewer_rust-fort-epic-u31 FORT EPIC: Compatible Rust Successor of beads_viewer](#beads-viewer-rust-fort-epic-u31-fort-epic-compatible-rust-successor-of-beads-viewer)
+- [⚫ beads_viewer_rust-lw1 Port Go self-update (pkg/updater) to bvr update](#beads-viewer-rust-lw1-port-go-self-update-pkg-updater-to-bvr-update)
+- [⚫ beads_viewer_rust-p1-datasource-git-gq0 Phase 1b: datasource discovery + SQLite reader + GitLoader as-of](#beads-viewer-rust-p1-datasource-git-gq0-phase-1b-datasource-discovery-sqlite-reader-gitloader-as-of)
+- [⚫ beads_viewer_rust-p1-fuzz-ubk Phase 1c: loader fuzz targets (cargo-fuzz)](#beads-viewer-rust-p1-fuzz-ubk-phase-1c-loader-fuzz-targets-cargo-fuzz)
+- [⚫ beads_viewer_rust-p1-model-loader-pva Phase 1a: bv-core model types + JSONL tolerant parser](#beads-viewer-rust-p1-model-loader-pva-phase-1a-bv-core-model-types-jsonl-tolerant-parser)
+- [⚫ beads_viewer_rust-p10-agent-api-3ta Phase 10b: explainable scoring + richer agent API (capabilities/streaming/fast-mode)](#beads-viewer-rust-p10-agent-api-3ta-phase-10b-explainable-scoring-richer-agent-api-capabilities-streaming-fast-mode)
+- [⚫ beads_viewer_rust-p10-incremental-urb Phase 10a: incremental analysis engine (affected-subgraph metric refresh)](#beads-viewer-rust-p10-incremental-urb-phase-10a-incremental-analysis-engine-affected-subgraph-metric-refresh)
+- [⚫ beads_viewer_rust-p2-analyzer-j6g Phase 2b: two-phase analyzer + timeouts + MetricStatus](#beads-viewer-rust-p2-analyzer-j6g-phase-2b-two-phase-analyzer-timeouts-metricstatus)
+- [⚫ beads_viewer_rust-p2-cache-scoring-fin Phase 2c: disk cache v3 + ConfigForSize + scoring constants](#beads-viewer-rust-p2-cache-scoring-fin-phase-2c-disk-cache-v3-configforsize-scoring-constants)
+- [⚫ beads_viewer_rust-p2-graph-import-pj5 Phase 2a: bv-analysis import algorithms from wasm copy + Go-semantics alignment](#beads-viewer-rust-p2-graph-import-pj5-phase-2a-bv-analysis-import-algorithms-from-wasm-copy-go-semantics-alignment)
+- [⚫ beads_viewer_rust-p3-cli-surface-r6c Phase 3a: bv-robot CLI surface + validation rules + argv rewriter](#beads-viewer-rust-p3-cli-surface-r6c-phase-3a-bv-robot-cli-surface-validation-rules-argv-rewriter)
+- [⚫ beads_viewer_rust-p3-dispatch-3lv Phase 3c: robot command dispatch (triage family first)](#beads-viewer-rust-p3-dispatch-3lv-phase-3c-robot-command-dispatch-triage-family-first)
+- [⚫ beads_viewer_rust-p3-envelope-toon-bag Phase 3b: RobotEnvelope + TOON encoder + golden/toon corpus](#beads-viewer-rust-p3-envelope-toon-bag-phase-3b-robotenvelope-toon-encoder-golden-toon-corpus)
+- [⚫ beads_viewer_rust-p3d-drift-u4l Phase 3d: drift/baseline engine + check-drift CI contract (exit 0/1/2)](#beads-viewer-rust-p3d-drift-u4l-phase-3d-drift-baseline-engine-check-drift-ci-contract-exit-0-1-2)
+- [⚫ beads_viewer_rust-p3e-corr-dispatch-y4o Phase 3e: correlation-family command dispatch (history/causality/network/related/orphans/file-beads/hotspots/impact/blocker-chain)](#beads-viewer-rust-p3e-corr-dispatch-y4o-phase-3e-correlation-family-command-dispatch-history-causality-network-related-orphans-file-beads-hotspots-impact-blocker-chain)
+- [⚫ beads_viewer_rust-p3e-robot-diff-x7k Phase 3e: wire robot-diff (snapshot diff vs baseline)](#beads-viewer-rust-p3e-robot-diff-x7k-phase-3e-wire-robot-diff-snapshot-diff-vs-baseline)
+- [⚫ beads_viewer_rust-p3e-robot-impact-u9a Phase 3e: wire robot-impact (file-based impact analysis)](#beads-viewer-rust-p3e-robot-impact-u9a-phase-3e-wire-robot-impact-file-based-impact-analysis)
+- [⚫ beads_viewer_rust-p3e-robot-not-ready-labels-m2q Phase 3e: wire robot-not-ready-labels (triage claimability gate)](#beads-viewer-rust-p3e-robot-not-ready-labels-m2q-phase-3e-wire-robot-not-ready-labels-triage-claimability-gate)
+- [⚫ beads_viewer_rust-p4-caches-scorers-d9k Phase 4b: scorers + 5 disk caches + feedback store](#beads-viewer-rust-p4-caches-scorers-d9k-phase-4b-scorers-5-disk-caches-feedback-store)
+- [⚫ beads_viewer_rust-p4-extractor-6yr Phase 4a: correlation extractor (snapshot + legacy paths, cat-file batch)](#beads-viewer-rust-p4-extractor-6yr-phase-4a-correlation-extractor-snapshot-legacy-paths-cat-file-batch)
+- [⚫ beads_viewer_rust-p4-surfaces-hul Phase 4c: orphan/file-index/network/causality/related surfaces](#beads-viewer-rust-p4-surfaces-hul-phase-4c-orphan-file-index-network-causality-related-surfaces)
+- [⚫ beads_viewer_rust-p5-export-core-vkp Phase 5a: export core parity (markdown/mermaid/dot/interactive HTML/sqlite+FTS5/static bundle)](#beads-viewer-rust-p5-export-core-vkp-phase-5a-export-core-parity-markdown-mermaid-dot-interactive-html-sqlite-fts5-static-bundle)
+- [⚫ beads_viewer_rust-p5-extended-deploy-0rz Phase 5c: extended deploy (GH Pages wizard, Cloudflare, hooks, watch-export) — never blocks release](#beads-viewer-rust-p5-extended-deploy-0rz-phase-5c-extended-deploy-gh-pages-wizard-cloudflare-hooks-watch-export-never-blocks-release)
+- [⚫ beads_viewer_rust-p5-preview-gai Phase 5b: preview server (tiny_http+SSE) [core]](#beads-viewer-rust-p5-preview-gai-phase-5b-preview-server-tiny-http-sse-core)
+- [⚫ beads_viewer_rust-p7-search-mc8 Phase 7a: bv-search compatibility port (embedder/index/hybrid scorer)](#beads-viewer-rust-p7-search-mc8-phase-7a-bv-search-compatibility-port-embedder-index-hybrid-scorer)
+- [⚫ beads_viewer_rust-p7-support-zwn Phase 7b: workspace multi-repo + drift/baseline + support systems](#beads-viewer-rust-p7-support-zwn-phase-7b-workspace-multi-repo-drift-baseline-support-systems)
+- [⚫ beads_viewer_rust-p8-release-yta Phase 8: hardening sweep + packaging + v0.21.0-rust release (CP-F)](#beads-viewer-rust-p8-release-yta-phase-8-hardening-sweep-packaging-v0-21-0-rust-release-cp-f)
+- [⚫ beads_viewer_rust-p9-rust-opt-6qj Phase 9: bv-graph-core extraction + Rust optimization (FORT v2 start)](#beads-viewer-rust-p9-rust-opt-6qj-phase-9-bv-graph-core-extraction-rust-optimization-fort-v2-start)
+- [⚫ beads_viewer_rust-phase0-scaffold-xbe Phase 0: Workspace scaffolding + golden capture infrastructure](#beads-viewer-rust-phase0-scaffold-xbe-phase-0-workspace-scaffolding-golden-capture-infrastructure)
+- [⚫ beads_viewer_rust-postrel-sync-64z Post-release: activate Go upstream sync policy (monthly audit cadence)](#beads-viewer-rust-postrel-sync-64z-post-release-activate-go-upstream-sync-policy-monthly-audit-cadence)
+- [⚫ beads_viewer_rust-tui-flow-attention-v4s TUI: implement Flow-Matrix and Attention views](#beads-viewer-rust-tui-flow-attention-v4s-tui-implement-flow-matrix-and-attention-views)
+- [⚫ beads_viewer_rust-tui-graph-view-w3e TUI: implement Graph view (dependency graph visualization)](#beads-viewer-rust-tui-graph-view-w3e-tui-implement-graph-view-dependency-graph-visualization)
+- [⚫ beads_viewer_rust-tui-history-view-p8n TUI: implement History/time-travel view](#beads-viewer-rust-tui-history-view-p8n-tui-implement-history-time-travel-view)
+- [⚫ beads_viewer_rust-tui-m1-core-z9q TUI-M1: core journey — open/load/list/detail/filter/quit (weeks 1-2)](#beads-viewer-rust-tui-m1-core-z9q-tui-m1-core-journey-open-load-list-detail-filter-quit-weeks-1-2)
+- [⚫ beads_viewer_rust-tui-m2-structural-gp6 TUI-M2: structural views — board/tree/graph/actionable/label-dashboard (weeks 3-4)](#beads-viewer-rust-tui-m2-structural-gp6-tui-m2-structural-views-board-tree-graph-actionable-label-dashboard-weeks-3-4)
+- [⚫ beads_viewer_rust-tui-m3-analytics-h0i TUI-M3: analytics — insights/flow-matrix/attention/alerts/history/time-travel/pickers (weeks 5-6)](#beads-viewer-rust-tui-m3-analytics-h0i-tui-m3-analytics-insights-flow-matrix-attention-alerts-history-time-travel-pickers-weeks-5-6)
+- [⚫ beads_viewer_rust-tui-m4-worker-xgu TUI-M4: background worker + live reload infrastructure (week 7)](#beads-viewer-rust-tui-m4-worker-xgu-tui-m4-background-worker-live-reload-infrastructure-week-7)
+- [⚫ beads_viewer_rust-tui-m5-chrome-93o TUI-M5: chrome + polish buffer — tutorial/help/sidebar/modals/sprint/mouse (week 8)](#beads-viewer-rust-tui-m5-chrome-93o-tui-m5-chrome-polish-buffer-tutorial-help-sidebar-modals-sprint-mouse-week-8)
+- [⚫ beads_viewer_rust-tui-pickers-modals-j5t TUI: implement remaining pickers/modals (label/recipe/repo picker, search, velocity, update modal)](#beads-viewer-rust-tui-pickers-modals-j5t-tui-implement-remaining-pickers-modals-label-recipe-repo-picker-search-velocity-update-modal)
+- [⚫ beads_viewer_rust-tui-sprint-tutorial-k6r TUI: implement Sprint view + real Tutorial](#beads-viewer-rust-tui-sprint-tutorial-k6r-tui-implement-sprint-view-real-tutorial)
+- [⚫ beads_viewer_rust-xcut-testing-4a7 Cross-cutting: differential harness + UX golden checklist maintenance](#beads-viewer-rust-xcut-testing-4a7-cross-cutting-differential-harness-ux-golden-checklist-maintenance)
+- [⚫ beads_viewer_rust-api-freeze-2fx Dependency-tree rendering for left pane (D toggle)](#beads-viewer-rust-api-freeze-2fx-dependency-tree-rendering-for-left-pane-d-toggle)
+- [⚫ beads_viewer_rust-api-freeze-9tv Tree-mode navigation fixes (cursor + dedup)](#beads-viewer-rust-api-freeze-9tv-tree-mode-navigation-fixes-cursor-dedup)
+
+---
+
+## Dependency Graph
+
+```mermaid
+graph TD
+    classDef open fill:#50FA7B,stroke:#333,color:#000
+    classDef inprogress fill:#8BE9FD,stroke:#333,color:#000
+    classDef blocked fill:#FF5555,stroke:#333,color:#000
+    classDef closed fill:#6272A4,stroke:#333,color:#fff
+
+    beads_viewer_rust-api-freeze-2fx["beads_viewer_rust-api-freeze-2fx<br/>Dependency-tree rendering for left pa..."]
+    class beads_viewer_rust-api-freeze-2fx closed
+    beads_viewer_rust-api-freeze-9tv["beads_viewer_rust-api-freeze-9tv<br/>Tree-mode navigation fixes (cursor + ..."]
+    class beads_viewer_rust-api-freeze-9tv closed
+    beads_viewer_rust-api-freeze-b73["beads_viewer_rust-api-freeze-b73<br/>Phase 0.5: API Contract Freeze (api-f..."]
+    class beads_viewer_rust-api-freeze-b73 closed
+    beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz["beads_viewer_rust-api-freeze-tui-ux-p...<br/>TUI UX Parity §14 follow-ups: close t..."]
+    class beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz closed
+    beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz1["beads_viewer_rust-api-freeze-tui-ux-p...<br/>Verify .bvvi index byte-compat agains..."]
+    class beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz1 closed
+    beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz2["beads_viewer_rust-api-freeze-tui-ux-p...<br/>Manual interactive TUI smoke pass for..."]
+    class beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz2 closed
+    beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz3["beads_viewer_rust-api-freeze-tui-ux-p...<br/>Cass modal timestamp correlation stra..."]
+    class beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz3 closed
+    beads_viewer_rust-fort-epic-u31["beads_viewer_rust-fort-epic-u31<br/>FORT EPIC: Compatible Rust Successor ..."]
+    class beads_viewer_rust-fort-epic-u31 closed
+    beads_viewer_rust-lw1["beads_viewer_rust-lw1<br/>Port Go self-update (pkg/updater) to ..."]
+    class beads_viewer_rust-lw1 closed
+    beads_viewer_rust-p1-datasource-git-gq0["beads_viewer_rust-p1-datasource-git-gq0<br/>Phase 1b: datasource discovery + SQLi..."]
+    class beads_viewer_rust-p1-datasource-git-gq0 closed
+    beads_viewer_rust-p1-fuzz-ubk["beads_viewer_rust-p1-fuzz-ubk<br/>Phase 1c: loader fuzz targets (cargo-..."]
+    class beads_viewer_rust-p1-fuzz-ubk closed
+    beads_viewer_rust-p1-model-loader-pva["beads_viewer_rust-p1-model-loader-pva<br/>Phase 1a: bv-core model types + JSONL..."]
+    class beads_viewer_rust-p1-model-loader-pva closed
+    beads_viewer_rust-p10-agent-api-3ta["beads_viewer_rust-p10-agent-api-3ta<br/>Phase 10b: explainable scoring + rich..."]
+    class beads_viewer_rust-p10-agent-api-3ta closed
+    beads_viewer_rust-p10-incremental-urb["beads_viewer_rust-p10-incremental-urb<br/>Phase 10a: incremental analysis engin..."]
+    class beads_viewer_rust-p10-incremental-urb closed
+    beads_viewer_rust-p2-analyzer-j6g["beads_viewer_rust-p2-analyzer-j6g<br/>Phase 2b: two-phase analyzer + timeou..."]
+    class beads_viewer_rust-p2-analyzer-j6g closed
+    beads_viewer_rust-p2-cache-scoring-fin["beads_viewer_rust-p2-cache-scoring-fin<br/>Phase 2c: disk cache v3 + ConfigForSi..."]
+    class beads_viewer_rust-p2-cache-scoring-fin closed
+    beads_viewer_rust-p2-graph-import-pj5["beads_viewer_rust-p2-graph-import-pj5<br/>Phase 2a: bv-analysis import algorith..."]
+    class beads_viewer_rust-p2-graph-import-pj5 closed
+    beads_viewer_rust-p3-cli-surface-r6c["beads_viewer_rust-p3-cli-surface-r6c<br/>Phase 3a: bv-robot CLI surface + vali..."]
+    class beads_viewer_rust-p3-cli-surface-r6c closed
+    beads_viewer_rust-p3-dispatch-3lv["beads_viewer_rust-p3-dispatch-3lv<br/>Phase 3c: robot command dispatch (tri..."]
+    class beads_viewer_rust-p3-dispatch-3lv closed
+    beads_viewer_rust-p3-envelope-toon-bag["beads_viewer_rust-p3-envelope-toon-bag<br/>Phase 3b: RobotEnvelope + TOON encode..."]
+    class beads_viewer_rust-p3-envelope-toon-bag closed
+    beads_viewer_rust-p3d-drift-u4l["beads_viewer_rust-p3d-drift-u4l<br/>Phase 3d: drift/baseline engine + che..."]
+    class beads_viewer_rust-p3d-drift-u4l closed
+    beads_viewer_rust-p3e-corr-dispatch-y4o["beads_viewer_rust-p3e-corr-dispatch-y4o<br/>Phase 3e: correlation-family command ..."]
+    class beads_viewer_rust-p3e-corr-dispatch-y4o closed
+    beads_viewer_rust-p3e-robot-diff-x7k["beads_viewer_rust-p3e-robot-diff-x7k<br/>Phase 3e: wire robot-diff (snapshot d..."]
+    class beads_viewer_rust-p3e-robot-diff-x7k closed
+    beads_viewer_rust-p3e-robot-impact-u9a["beads_viewer_rust-p3e-robot-impact-u9a<br/>Phase 3e: wire robot-impact (file-bas..."]
+    class beads_viewer_rust-p3e-robot-impact-u9a closed
+    beads_viewer_rust-p3e-robot-not-ready-labels-m2q["beads_viewer_rust-p3e-robot-not-ready...<br/>Phase 3e: wire robot-not-ready-labels..."]
+    class beads_viewer_rust-p3e-robot-not-ready-labels-m2q closed
+    beads_viewer_rust-p4-caches-scorers-d9k["beads_viewer_rust-p4-caches-scorers-d9k<br/>Phase 4b: scorers + 5 disk caches + f..."]
+    class beads_viewer_rust-p4-caches-scorers-d9k closed
+    beads_viewer_rust-p4-extractor-6yr["beads_viewer_rust-p4-extractor-6yr<br/>Phase 4a: correlation extractor (snap..."]
+    class beads_viewer_rust-p4-extractor-6yr closed
+    beads_viewer_rust-p4-surfaces-hul["beads_viewer_rust-p4-surfaces-hul<br/>Phase 4c: orphan/file-index/network/c..."]
+    class beads_viewer_rust-p4-surfaces-hul closed
+    beads_viewer_rust-p5-export-core-vkp["beads_viewer_rust-p5-export-core-vkp<br/>Phase 5a: export core parity (markdow..."]
+    class beads_viewer_rust-p5-export-core-vkp closed
+    beads_viewer_rust-p5-extended-deploy-0rz["beads_viewer_rust-p5-extended-deploy-0rz<br/>Phase 5c: extended deploy (GH Pages w..."]
+    class beads_viewer_rust-p5-extended-deploy-0rz closed
+    beads_viewer_rust-p5-preview-gai["beads_viewer_rust-p5-preview-gai<br/>Phase 5b: preview server (tiny_http+S..."]
+    class beads_viewer_rust-p5-preview-gai closed
+    beads_viewer_rust-p7-search-mc8["beads_viewer_rust-p7-search-mc8<br/>Phase 7a: bv-search compatibility por..."]
+    class beads_viewer_rust-p7-search-mc8 closed
+    beads_viewer_rust-p7-support-zwn["beads_viewer_rust-p7-support-zwn<br/>Phase 7b: workspace multi-repo + drif..."]
+    class beads_viewer_rust-p7-support-zwn closed
+    beads_viewer_rust-p8-release-yta["beads_viewer_rust-p8-release-yta<br/>Phase 8: hardening sweep + packaging ..."]
+    class beads_viewer_rust-p8-release-yta closed
+    beads_viewer_rust-p9-rust-opt-6qj["beads_viewer_rust-p9-rust-opt-6qj<br/>Phase 9: bv-graph-core extraction + R..."]
+    class beads_viewer_rust-p9-rust-opt-6qj closed
+    beads_viewer_rust-phase0-scaffold-xbe["beads_viewer_rust-phase0-scaffold-xbe<br/>Phase 0: Workspace scaffolding + gold..."]
+    class beads_viewer_rust-phase0-scaffold-xbe closed
+    beads_viewer_rust-postrel-sync-64z["beads_viewer_rust-postrel-sync-64z<br/>Post-release: activate Go upstream sy..."]
+    class beads_viewer_rust-postrel-sync-64z closed
+    beads_viewer_rust-tui-flow-attention-v4s["beads_viewer_rust-tui-flow-attention-v4s<br/>TUI: implement Flow-Matrix and Attent..."]
+    class beads_viewer_rust-tui-flow-attention-v4s closed
+    beads_viewer_rust-tui-graph-view-w3e["beads_viewer_rust-tui-graph-view-w3e<br/>TUI: implement Graph view (dependency..."]
+    class beads_viewer_rust-tui-graph-view-w3e closed
+    beads_viewer_rust-tui-history-view-p8n["beads_viewer_rust-tui-history-view-p8n<br/>TUI: implement History/time-travel view"]
+    class beads_viewer_rust-tui-history-view-p8n closed
+    beads_viewer_rust-tui-m1-core-z9q["beads_viewer_rust-tui-m1-core-z9q<br/>TUI-M1: core journey — open/load/list..."]
+    class beads_viewer_rust-tui-m1-core-z9q closed
+    beads_viewer_rust-tui-m2-structural-gp6["beads_viewer_rust-tui-m2-structural-gp6<br/>TUI-M2: structural views — board/tree..."]
+    class beads_viewer_rust-tui-m2-structural-gp6 closed
+    beads_viewer_rust-tui-m3-analytics-h0i["beads_viewer_rust-tui-m3-analytics-h0i<br/>TUI-M3: analytics — insights/flow-mat..."]
+    class beads_viewer_rust-tui-m3-analytics-h0i closed
+    beads_viewer_rust-tui-m4-worker-xgu["beads_viewer_rust-tui-m4-worker-xgu<br/>TUI-M4: background worker + live relo..."]
+    class beads_viewer_rust-tui-m4-worker-xgu closed
+    beads_viewer_rust-tui-m5-chrome-93o["beads_viewer_rust-tui-m5-chrome-93o<br/>TUI-M5: chrome + polish buffer — tuto..."]
+    class beads_viewer_rust-tui-m5-chrome-93o closed
+    beads_viewer_rust-tui-pickers-modals-j5t["beads_viewer_rust-tui-pickers-modals-j5t<br/>TUI: implement remaining pickers/moda..."]
+    class beads_viewer_rust-tui-pickers-modals-j5t closed
+    beads_viewer_rust-tui-sprint-tutorial-k6r["beads_viewer_rust-tui-sprint-tutorial...<br/>TUI: implement Sprint view + real Tut..."]
+    class beads_viewer_rust-tui-sprint-tutorial-k6r closed
+    beads_viewer_rust-xcut-testing-4a7["beads_viewer_rust-xcut-testing-4a7<br/>Cross-cutting: differential harness +..."]
+    class beads_viewer_rust-xcut-testing-4a7 closed
+
+    beads_viewer_rust-api-freeze-b73 -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-api-freeze-b73 ==> beads_viewer_rust-phase0-scaffold-xbe
+    beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz1 -.-> beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz
+    beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz2 -.-> beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz
+    beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz3 -.-> beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz
+    beads_viewer_rust-p1-datasource-git-gq0 ==> beads_viewer_rust-api-freeze-b73
+    beads_viewer_rust-p1-datasource-git-gq0 -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-p1-fuzz-ubk ==> beads_viewer_rust-p1-model-loader-pva
+    beads_viewer_rust-p1-model-loader-pva ==> beads_viewer_rust-api-freeze-b73
+    beads_viewer_rust-p1-model-loader-pva -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-p10-agent-api-3ta ==> beads_viewer_rust-p10-incremental-urb
+    beads_viewer_rust-p10-incremental-urb ==> beads_viewer_rust-p9-rust-opt-6qj
+    beads_viewer_rust-p2-analyzer-j6g ==> beads_viewer_rust-p2-graph-import-pj5
+    beads_viewer_rust-p2-cache-scoring-fin ==> beads_viewer_rust-p2-analyzer-j6g
+    beads_viewer_rust-p2-graph-import-pj5 -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-p2-graph-import-pj5 ==> beads_viewer_rust-p1-model-loader-pva
+    beads_viewer_rust-p3-cli-surface-r6c ==> beads_viewer_rust-api-freeze-b73
+    beads_viewer_rust-p3-dispatch-3lv -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-p3-dispatch-3lv ==> beads_viewer_rust-p1-datasource-git-gq0
+    beads_viewer_rust-p3-dispatch-3lv ==> beads_viewer_rust-p2-cache-scoring-fin
+    beads_viewer_rust-p3-dispatch-3lv ==> beads_viewer_rust-p3-cli-surface-r6c
+    beads_viewer_rust-p3-dispatch-3lv ==> beads_viewer_rust-p3-envelope-toon-bag
+    beads_viewer_rust-p3-envelope-toon-bag ==> beads_viewer_rust-phase0-scaffold-xbe
+    beads_viewer_rust-p3d-drift-u4l ==> beads_viewer_rust-p2-cache-scoring-fin
+    beads_viewer_rust-p3e-corr-dispatch-y4o ==> beads_viewer_rust-p4-caches-scorers-d9k
+    beads_viewer_rust-p3e-robot-diff-x7k -.-> beads_viewer_rust-p3e-corr-dispatch-y4o
+    beads_viewer_rust-p3e-robot-impact-u9a -.-> beads_viewer_rust-p3e-corr-dispatch-y4o
+    beads_viewer_rust-p3e-robot-not-ready-labels-m2q -.-> beads_viewer_rust-p3-dispatch-3lv
+    beads_viewer_rust-p4-caches-scorers-d9k ==> beads_viewer_rust-p4-extractor-6yr
+    beads_viewer_rust-p4-extractor-6yr -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-p4-extractor-6yr ==> beads_viewer_rust-p1-datasource-git-gq0
+    beads_viewer_rust-p4-surfaces-hul ==> beads_viewer_rust-p4-caches-scorers-d9k
+    beads_viewer_rust-p5-export-core-vkp -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-p5-export-core-vkp ==> beads_viewer_rust-p1-model-loader-pva
+    beads_viewer_rust-p5-export-core-vkp ==> beads_viewer_rust-p2-cache-scoring-fin
+    beads_viewer_rust-p5-extended-deploy-0rz ==> beads_viewer_rust-p5-export-core-vkp
+    beads_viewer_rust-p5-extended-deploy-0rz ==> beads_viewer_rust-p5-preview-gai
+    beads_viewer_rust-p5-preview-gai ==> beads_viewer_rust-p5-export-core-vkp
+    beads_viewer_rust-p7-search-mc8 ==> beads_viewer_rust-tui-m5-chrome-93o
+    beads_viewer_rust-p7-support-zwn ==> beads_viewer_rust-p5-export-core-vkp
+    beads_viewer_rust-p8-release-yta -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-p8-release-yta ==> beads_viewer_rust-p3d-drift-u4l
+    beads_viewer_rust-p8-release-yta ==> beads_viewer_rust-p3e-corr-dispatch-y4o
+    beads_viewer_rust-p8-release-yta ==> beads_viewer_rust-p7-search-mc8
+    beads_viewer_rust-p8-release-yta ==> beads_viewer_rust-p7-support-zwn
+    beads_viewer_rust-p8-release-yta ==> beads_viewer_rust-xcut-testing-4a7
+    beads_viewer_rust-p9-rust-opt-6qj ==> beads_viewer_rust-p8-release-yta
+    beads_viewer_rust-phase0-scaffold-xbe -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-postrel-sync-64z -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-postrel-sync-64z ==> beads_viewer_rust-p8-release-yta
+    beads_viewer_rust-tui-m1-core-z9q -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-tui-m1-core-z9q ==> beads_viewer_rust-p3-dispatch-3lv
+    beads_viewer_rust-tui-m2-structural-gp6 ==> beads_viewer_rust-tui-m1-core-z9q
+    beads_viewer_rust-tui-m3-analytics-h0i ==> beads_viewer_rust-p3d-drift-u4l
+    beads_viewer_rust-tui-m3-analytics-h0i ==> beads_viewer_rust-p4-surfaces-hul
+    beads_viewer_rust-tui-m3-analytics-h0i ==> beads_viewer_rust-tui-m2-structural-gp6
+    beads_viewer_rust-tui-m4-worker-xgu ==> beads_viewer_rust-tui-m3-analytics-h0i
+    beads_viewer_rust-tui-m5-chrome-93o -.-> beads_viewer_rust-fort-epic-u31
+    beads_viewer_rust-tui-m5-chrome-93o ==> beads_viewer_rust-tui-m4-worker-xgu
+```
+
+---
+
+<a id="beads-viewer-rust-api-freeze-b73-phase-0-5-api-contract-freeze-api-freeze-v1"></a>
+
+## 📋 beads_viewer_rust-api-freeze-b73 Phase 0.5: API Contract Freeze (api-freeze-v1)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔥 Critical (P0) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:10 |
+| **Updated** | 2026-08-22 15:02 |
+| **Closed** | 2026-08-22 15:02 |
+
+### Description
+
+Plan §3.1 (Phase 0.5). MUST complete before any upper layer is written — robot/TUI consume these contracts; churn here cascades.
+
+FREEZE CONTENT (tag commit api-freeze-v1):
+1. RobotEnvelope serde struct (owned by bv-robot): generated_at(RFC3339), data_hash, output_format?, version?, load_stats?{source_path,valid,errors,skipped,warnings[]<=10}. load_stats emitted ONLY when loader errors>0 (#190 semantics).
+2. Issue/Dependency/Comment model in bv-core::model: 25 Issue fields with exact JSON tags (acceptance_criteria, issue_type, compaction_level...); Option<T> for optionals; Comment.ID string-tolerant custom Deserialize (legacy numbers stringified preserving textual form); Dependency accepts depends_on_id|depends_on|target_id.
+3. data_hash(issues)->String signature + algorithm (plan §3 item 2): sha256, issues sorted by ID, fields NUL-joined: id/title/description/notes/design/acceptance_criteria/assignee/source_repo/external_ref/status/type/priority/estimated_minutes/created_at/updated_at/closed_at(RFC3339Nano UTC)/labels(sorted)/deps(sorted dependsOn,type,createdAt,createdBy)/comments; empty->"empty". Fixed test vectors committed.
+4. AnalysisConfig/GraphStats/MetricStatus public API of bv-analysis. MetricStatus = computed|approx|timeout|skipped|pending|panic + elapsed_ms + sample_size when approx.
+5. BvError thiserror enum in core; upper crates map to own errors; NO anyhow across crate boundaries.
+6. tracing convention: target bv::<crate>, stderr-only in robot mode.
+7. docs/env.md single source of truth for all BV_* env vars + test asserting the list.
+
+RULES AFTER FREEZE: additive-only changes during parity (new variant/new optional field); anything else requires plan edit + CHANGELOG 'API change' entry.
+
+ACCEPTANCE: api-freeze-v1 tag exists; test vectors for data_hash pass against Go-produced hashes.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-phase0-scaffold-xbe`
+
+---
+
+<a id="beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-tui-ux-parity-14-follow-ups-close-the-3-documented-scope-cuts"></a>
+
+## 📋 beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz TUI UX Parity §14 follow-ups: close the 3 documented scope cuts
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-09 06:58 |
+| **Updated** | 2026-09-09 07:30 |
+| **Closed** | 2026-09-09 07:30 |
+| **Labels** | followup, parity, tui |
+
+### Description
+
+Umbrella tracking bead for the 3 items TUI_UX_PARITY_PLAN.md §14 explicitly listed as "not done in this pass" when closing the 5 UI/UX gaps found against Go v0.24.1 (row-decoration parity, quit-confirm, capslock double-tap, semantic search upgrade, cass session modal). None of these three block the shipped work — §14 is already merged and all tests pass — but each is a real, scoped gap worth closing deliberately rather than forgetting.
+
+Background: this repo (beads_viewer_rust, aka bvr) is a Rust port of the Go beads_viewer TUI/CLI (Dicklesworthstone/beads_viewer). FORT v1 parity is pinned to Go commit 9ace029/v0.20.0 per COMPREHENSIVE_PLAN_FOR_FORT_BEADS_VIEWER.md §3.2 — TUI_UX_PARITY_PLAN.md §14 is a separate, deliberately-scoped pass that also chased 5 specific UI/UX deltas that appeared in the users local Go v0.24.1 build (not the full re-sync, which stays out of scope per the projects own sizing note: 102 files / ~18k lines changed just in the ported crates between 9ace029 and v0.24.1).
+
+Children of this bead close out the "Explicitly not done in this pass" list at the bottom of §14. Read that section (and the corresponding numbered subsection for context) before starting any child.
+
+---
+
+<a id="beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-1-verify-bvvi-index-byte-compat-against-a-real-go-written-index-file"></a>
+
+## 📋 beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz.1 Verify .bvvi index byte-compat against a real Go-written index file
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-09 06:58 |
+| **Updated** | 2026-09-09 07:11 |
+| **Closed** | 2026-09-09 07:11 |
+| **Labels** | search, tui, verification |
+
+### Description
+
+TUI_UX_PARITY_PLAN.md §14 item 4 shipped a new `bv-search::vector_index` module (crates/bv-search/src/vector_index.rs) that implements the `.bvvi` binary format byte-for-byte per Go pkg/search/vector_index.go (magic "BVVI", version 1 LE, header magic[4]+version u16+reserved u16+dim u32+count u32, per-entry id_len u16+id+sha256[32]+dim*f32 LE). All validation bounds were ported (max dim 2^20, max entries 2^20, max file 512MiB, duplicate-id reject, trailing-data reject) and round-trip tests exist (save then load through the Rust side only).
+
+What was explicitly NOT verified (see the §14 "Explicitly not done" list): whether an index file *actually written by the Go binary* loads correctly in Rust, and vice versa. The current tests only prove the Rust encoder and Rust decoder agree with each other — a structural format match on paper is not the same as a verified interop test.
+
+Why this matters: if bvr and the Go bv ever run against the same project directory (shared .bv/semantic/index-hash-<dim>.bvvi path — see bv_search::index_sync::default_index_path), a subtly wrong byte offset or endianness assumption would silently corrupt the shared index or cause one binary to reject the others output. This is exactly the kind of bug that never shows up in same-language round-trip tests.
+
+Acceptance criteria:
+1. Install the users local Go bv (v0.24.1, already on PATH per prior session — `go install github.com/Dicklesworthstone/beads_viewer/cmd/bv@latest`) and run `bv --search "<query>" --search-mode hybrid` (or whatever CLI flag builds the semantic index) against a small fixture repo to produce a real `.bv/semantic/index-hash-<dim>.bvvi` file written by Go.
+2. Load that file with `bv_search::vector_index::VectorIndex::load()` in a new integration test (crates/bv-search/tests/ or a #[test] in vector_index.rs marked to only run when a fixture file is committed) and assert the entries/dims/hashes match what `bv --robot-search` reports for the same query.
+3. Conversely, write a `.bvvi` file with the Rust encoder over the same fixture and confirm the Go binary loads it without error (may require a small Go-side smoke script since we cannot call Go code from Rust tests directly — documenting the manual verification steps + a committed fixture file/checksum is an acceptable substitute for full CI automation if a live Go binary is not available in CI).
+4. If a real incompatibility is found, fix crates/bv-search/src/vector_index.rs (not the Go side) and add a regression test with the exact byte sequence that broke.
+5. If everything round-trips cleanly, commit the Go-generated fixture `.bvvi` file under crates/bv-search/tests/fixtures/ (or similar) and a test that loads it, so future changes to vector_index.rs get a real cross-binary regression guard instead of just same-language round-trip coverage.
+
+Not in scope: rebuilding the whole semantic search TUI wiring (already done in §14 item 4) — this bead is purely about the file-format interop guarantee.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz`
+
+---
+
+<a id="beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-2-manual-interactive-tui-smoke-pass-for-14-s-5-shipped-features"></a>
+
+## 📋 beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz.2 Manual interactive TUI smoke pass for §14's 5 shipped features
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-09 06:59 |
+| **Updated** | 2026-09-09 07:30 |
+| **Closed** | 2026-09-09 07:30 |
+| **Labels** | manual-qa, tui |
+
+### Description
+
+Every phase of TUI_UX_PARITY_PLAN.md (§7 through §14) has been verified only via static code reading + cargo fmt/clippy/test + one automated --robot-triage data_hash smoke check. §13 and §14 both explicitly flag the same gap: "no live interactive run of the TUI in a real terminal (no screenshot, no actual keypress-driven session) — everything above is static code reading + automated build/lint/test, not a human (or agent) actually watching the rendered output."
+
+This bead is that missing last-mile check, scoped specifically to the 5 features §14 shipped (not a re-verification of everything from §7-13, which already got a manual pass per §13):
+
+1. Row-decoration parity: run `bvr` in workspace mode (multi-repo .bv/workspace.yaml) or against a repo with source_repo set on some issues; confirm `[XXXX]` repo badges render correctly aligned in the list. Enter Time-Travel (`t` then a revision, or `T` for HEAD~5) against a repo with real history and confirm 🆕/✅/~ badges appear on the right rows with correct meaning (visually cross-check against `--robot-diff` output for the same revision). Toggle priority hints (`p`) and confirm ⭐/🔓N/↪N indicators appear and look sane against `--robot-triage`s quick_wins/blockers_to_clear.
+2. Quit-confirm: with an active filter (press `o` for open-only), press Esc once — confirm filters clear and the app does NOT quit. Press Esc again with no filters active — confirm the "Quit bv?" box renders centered and readable. Press a non-Esc/Y key — confirm it cancels back to List. Press Y — confirm it actually quits.
+3. CapsLock double-tap: press backtick once, wait >300ms, confirm Tutorial opens on page 0. Press backtick twice quickly, confirm context help opens instead (NOT Tutorial). Press `~` directly, confirm context help opens with no double-tap needed.
+4. Semantic search: press Ctrl+S, type a real multi-word query, confirm ranked results look sensible. Press Tab repeatedly, confirm the status line preset name cycles through all 5 (default/bug-hunting/sprint-planning/impact-first/text-only) and results re-rank each time. Restart bvr and repeat the same query — confirm the persistent `.bv/semantic/index-hash-384.bvvi` file was created/reused (check its mtime does not change on the second run if the issue set is unchanged — that is the staleness-check working).
+5. Cass session modal: this needs the actual `cass` CLI installed and indexed for realistic testing — if unavailable, at minimum press `V` with cass NOT installed and confirm the exact status message "⚠️ cass not available (install it for session correlation)" appears (not a crash, not a silently-empty modal). If cass IS available, press V on a bead with known correlated sessions, confirm the modal shows real session cards, j/k navigation moves the highlighted session, y copies the search command (paste it somewhere to confirm), and V/Esc/Enter/q all close the modal.
+
+Deliverable: append a short "§15 Manual interactive verification" section to TUI_UX_PARITY_PLAN.md documenting what was actually driven by a human/agent watching real rendered output, any bugs found (file separately as new beads if found — do not silently fix-and-forget), and what remains unverified (e.g. if cass CLI was unavailable, say so explicitly rather than skipping the note).
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz`
+
+---
+
+<a id="beads-viewer-rust-api-freeze-tui-ux-p14-followups-1xz-3-cass-modal-timestamp-correlation-strategy-go-s-third-strategy-currently-scope-cut"></a>
+
+## 📋 beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz.3 Cass modal timestamp correlation strategy (Go's third strategy, currently scope-cut)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-09 06:59 |
+| **Updated** | 2026-09-09 07:27 |
+| **Closed** | 2026-09-09 07:27 |
+| **Labels** | cass, scope-cut, tui |
+
+### Description
+
+crates/bv-tui/src/cass.rs ports Go pkg/cass/correlation.go Correlator.Correlate strategy order as: id-mention search first, then keywords search over title+description if id-mention finds nothing. Gos actual Correlator has a third strategy this port explicitly skips: StrategyTimestamp ("Matched via: recent activity timeframe" in formatMatchReason), which correlates sessions purely by being active during the beads open window (calculateSearchDays: for closed issues, the window between creation and closure + a 7-day buffer; for open issues, time since creation capped at 90 days).
+
+Why it was skipped (see cass.rs module doc comment): the timestamp strategy in Go needs session-mtime metadata from the cass indexs internal state that this Rust port does not parse — the Rust backend only shells out to `cass search <query> --robot --limit N` and reads the JSON `results[]` array (source_path/line_number/agent/title/score/snippet/timestamp/match_type), which does not include a way to query "all sessions active in window [start,end] regardless of text query match." Implementing this would need either (a) a new cass CLI flag/mode this port cannot assume exists, or (b) parsing cass raw session index files directly (undocumented format, high risk of drift).
+
+Investigate before implementing:
+1. Check the *currently installed* cass CLI (`cass --help`, `cass search --help`) for a date/time-range-only query mode that does not require search terms — Go may already be relying on a flag like `--days N` combined with an empty or wildcard query, which this port could reuse without needing new cass features. Read pkg/cass/search.go `buildArgs` again (already read once this session — see `Search.buildArgs`: `--days` is passed today when opts.Days > 0, but always alongside a keyword query, so check whether an EMPTY `opts.Query` with `--days` set returns "everything active in that window" or errors/no-ops).
+2. If cass supports empty-query + --days, port `calculateSearchDays` (crates/bv-tui/src/cass.rs, alongside `extract_keywords`) and add a third correlate() fallback: after id-mention and keywords both come up empty, try a days-only search.
+3. If cass does NOT support this, document that finding clearly in a code comment (update the existing scope-cut comment in cass.rs to say WHY, not just THAT it is skipped) and close this bead as wont-fix with that reasoning recorded — do not invent undocumented cass index-file parsing to work around a missing CLI feature.
+
+Acceptance: either (a) timestamp strategy implemented + tested (unit test with a fixture issue open/closed window + mocked cass output), or (b) bead closed with a documented, verified reason why it cannot be done without cass CLI changes outside this repos control.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-api-freeze-tui-ux-p14-followups-1xz`
+
+---
+
+<a id="beads-viewer-rust-fort-epic-u31-fort-epic-compatible-rust-successor-of-beads-viewer"></a>
+
+## 🚀 beads_viewer_rust-fort-epic-u31 FORT EPIC: Compatible Rust Successor of beads_viewer
+
+| Property | Value |
+|----------|-------|
+| **Type** | 🚀 epic |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:09 |
+| **Updated** | 2026-08-22 22:57 |
+| **Closed** | 2026-08-22 22:57 |
+
+### Description
+
+FORT = Forward To Rust. Port Dicklesworthstone/beads_viewer (Go v0.20.0 @ 9ace029, ~120k LOC non-test) to Rust as a COMPATIBLE RUST SUCCESSOR — not a clone.
+
+GOAL: Keep everything the bv agent ecosystem depends on byte-compatible (robot JSON schemas, CLI behavior incl. argv rewriting, exit codes 0/1/2, data_hash algorithm, issue semantics, export formats), then build a better engine underneath: cleaner crates, lower memory (target <=70% Go RSS), incremental analysis (v2), stronger agent API (v2).
+
+TWO TRACKS (never mix in one change):
+- FORT v1 = Phases 0-8: parity. Drop-in replacement verified by differential testing against frozen Go goldens.
+- FORT v2 = Phases 9-10: native upgrades, strictly additive-only schema changes.
+
+KEY STRATEGIC ASSETS:
+1. crates/bv-graph-wasm/ = VERBATIM copy (diff -r verified) of Go repo's bv-graph-wasm @ 9ace029: 6,940 LOC Rust already implementing PageRank/HITS/eigenvector/betweenness exact+approx/k-core/articulation/cycles/critical-path/slack/topo/reachability/what-if/top-k. ~70% of graph engine work is extraction, not rewrite.
+2. Gonum supplies only topo.Sort/TarjanSCC/Betweenness/HITS(1e-3) in Go; rest is hand-rolled -> no hidden library semantics beyond those four.
+3. Frozen Go binary + golden outputs serve as the acceptance oracle for every phase.
+
+FULL PLAN: COMPREHENSIVE_PLAN_FOR_FORT_BEADS_VIEWER.md (Rev 4) in workspace root. Beads reference plan sections; plan remains source of truth for constants.
+
+---
+
+<a id="beads-viewer-rust-lw1-port-go-self-update-pkg-updater-to-bvr-update"></a>
+
+## 📋 beads_viewer_rust-lw1 Port Go self-update (pkg/updater) to bvr update
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-20 15:02 |
+| **Updated** | 2026-09-28 08:16 |
+| **Closed** | 2026-09-28 08:16 |
+
+### Comments
+
+> **tranquangdang21** (2026-09-25)
+>
+> PARTIAL — library half complete, CLI half outstanding. Landed: security fix for the unconditional 'Authorization: Bearer $GITHUB_TOKEN' (Go requires BV_UPDATE_USE_TOKEN or config opt-in AND an isGitHubHost guard, stripping the header on redirect); checksums.txt now mandatory and self-verified against GitHub's own digest; release identity validation (draft/prerelease/tag format/asset state/digest); installed binary --version checked against the tag; Go's parseVersion/compareVersions ported and pinned to a 5928-row oracle rebuilt from updater.go:389-613 (byte-identical). 86 tests, clippy clean. Two bugs found beyond the original list: find_checksum_asset returned the first *.sha256 sidecar when release.yml publishes five archives and no checksums.txt, so it picked another platform's; and a literal port of verifyBinaryVersion would have failed EVERY update, because bvr --version prints the hardcoded Go-compat constant v0.25.0 rather than the crate version. STILL OPEN, all in crates/bv/src/main.rs and bv-tui/src/lib.rs: gaps 7, 9, 10, 11, 12, 13, 19, 20, 21 — double 'Rollback complete', 'Download:' vs 'Release:', missing ValidateReleaseForUpdate gate on --update and --update-dry-run, 'bvr --update < /dev/null' auto-updating where Go exits 1, presence-based BV_NO_UPDATE_CHECK, the TUI modal badge/release-link/no-update message, and the version-prefix mismatch at lib.rs:3541. validate_release_for_update is public and ready to call.
+
+---
+
+<a id="beads-viewer-rust-p1-datasource-git-gq0-phase-1b-datasource-discovery-sqlite-reader-gitloader-as-of"></a>
+
+## 📋 beads_viewer_rust-p1-datasource-git-gq0 Phase 1b: datasource discovery + SQLite reader + GitLoader as-of
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:11 |
+| **Updated** | 2026-08-22 15:37 |
+| **Closed** | 2026-08-22 15:37 |
+
+### Description
+
+Plan §4.2 discovery + readers. Gate: part of CP-A.
+
+DISCOVERY CHAIN (exact priority): BEADS_DB env (file->parent dir; ext .jsonl/.db/.sqlite/.sqlite3) > BEADS_DIR env > <repo>/.beads > main-repo .beads via worktree resolution (git rev-parse --path-format=absolute --git-common-dir; main root = parent of common dir).
+- .beads/redirect follow: max 4096 bytes, depth 10; loop/non-UTF8/bad-target = ERROR; target must be dir named .beads/_beads.
+- File pick among *.jsonl: exclude *.backup|.orig|.merge|deletions.jsonl|beads.left*|beads.right* (merge artifacts warn); preferred order [issues.jsonl, beads.jsonl, beads.base.jsonl], first preferred with size>0 wins; bd/Dolt workspace detection (.beads/dolt/|embeddeddolt/|metadata backend==dolt) NEVER falls back to stray non-issue JSONL (#189).
+- SQLite reader: rusqlite read-only DSN; column/table presence probing for issues/dependencies/comments/labels (schema variance across br versions).
+- GitLoader (--as-of): git rev-parse --verify resolve; on failure date layouts [RFC3339, YYYY-MM-DD, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS] local tz -> git rev-list -1 --before=<RFC3339> HEAD; SHA-keyed cache TTL 5min with RWMutex-equivalent (RwLock), deep clone semantics on get/set, lazy eviction. Content via git show <sha>:<path> over the 3 preferred paths. Source selection priority SQLite=100 > worktree=80 > local=50, freshest mtime first, ties by priority.
+
+ACCEPTANCE: source selection identical to Go datasource on fixture layouts incl. worktrees and bd stubs; as-of loads identical to Go GitLoader outputs.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-api-freeze-b73`
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+
+---
+
+<a id="beads-viewer-rust-p1-fuzz-ubk-phase-1c-loader-fuzz-targets-cargo-fuzz"></a>
+
+## 📋 beads_viewer_rust-p1-fuzz-ubk Phase 1c: loader fuzz targets (cargo-fuzz)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:11 |
+| **Updated** | 2026-08-22 22:48 |
+| **Closed** | 2026-08-22 22:48 |
+
+### Description
+
+Plan §5 item 9 (Fuzz). The loader is the most dangerous attack surface — fuzz before anything else.
+
+TARGETS (cargo-fuzz, nightly CI 5min each):
+1. parse_jsonl: malformed JSON, BOM, huge lines (>10MB), legacy schema variants, number-valued comment IDs.
+2. Dependency deser: depends_on_id|depends_on|target_id variants; empty type string (blocking legacy); null entries in deps array.
+3. Redirect parser: depth loops, oversized files, non-UTF8 bytes, wrong target names.
+4. TOON decoder round-trip — ACTIVATED when Phase 3b encoder lands (corpus from golden/toon/).
+5. Recipe YAML deser (serde_yaml_ng) — ACTIVATED when Phase 7 recipes port lands.
+
+Corpus seeded from Go repo testdata/. Any crash/malloc-failure = release blocker for owning phase.
+
+ACCEPTANCE: targets 1-3 clean nightly from Phase 1; 4 activates at Phase 3b merge; 5 at Phase 7.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p1-model-loader-pva`
+
+---
+
+<a id="beads-viewer-rust-p1-model-loader-pva-phase-1a-bv-core-model-types-jsonl-tolerant-parser"></a>
+
+## 📋 beads_viewer_rust-p1-model-loader-pva Phase 1a: bv-core model types + JSONL tolerant parser
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:11 |
+| **Updated** | 2026-08-22 15:23 |
+| **Closed** | 2026-08-22 15:23 |
+
+### Description
+
+Plan §4.1+§4.2 parse half. Gate: CP-A + CP-B.
+
+MODEL (bv-core::model):
+- Issue 25 fields, exact serde renames matching Go JSON tags. Status enum 10 values: open/in_progress/blocked/deferred/draft/pinned/hooked/review/closed/tombstone. IssueType: any non-empty valid (Gastown extensibility); known set epic/feature/bug/task/chore/docs/question kept separately for sort/icon. DependencyType blocks/related/parent-child/discovered-from; CRITICAL: empty string AND blocks both blocking (legacy compat — #[default] + custom deser). Validate(): ID+Title non-empty, Status in enum, reject updated_at<created_at.
+- v1 uses plain String IDs for hash/deser parity; newtype IDs deferred to Phase 9 (v2).
+
+PARSER (tolerant JSONL):
+- BOM strip line 1 only. 10MB/line buffer default (BV_MAX_LINE_SIZE_MB env). Skip malformed lines + warn; never crash on garbage (merge-conflict reality).
+- _type record routing: memory/sprint/forecast/burndown -> silent skip (counted in ParseStats.skipped); unknown _type -> skipped; no _type or issue -> parse as issue.
+- Parallel parse gate: >=4MiB AND >=512 lines, 64KiB chunks x3 per worker via rayon; warnings replayed in GLOBAL line order; byte-identical results vs serial path.
+- Validation gates: MaxJSONLErrorRate 0.10 reject threshold; reject Valid==0 && Errors+Skipped>0 (all-non-issue file); tombstone filter post-load; validation cache keyed path+mtime+size.
+- LoadReport{path,valid,errors,skipped,warnings(<=10)} recorded process-global for envelope load_stats.
+
+ACCEPTANCE (=CP-A/CP-B): field-level diff vs Go == 0 on all fixture classes incl. malformed mixes; data_hash byte-equal on every fixture (incl. edge cases); load_stats identical when records dropped.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-api-freeze-b73`
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+
+---
+
+<a id="beads-viewer-rust-p10-agent-api-3ta-phase-10b-explainable-scoring-richer-agent-api-capabilities-streaming-fast-mode"></a>
+
+## ✨ beads_viewer_rust-p10-agent-api-3ta Phase 10b: explainable scoring + richer agent API (capabilities/streaming/fast-mode)
+
+| Property | Value |
+|----------|-------|
+| **Type** | ✨ feature |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:19 |
+| **Updated** | 2026-08-22 23:32 |
+| **Closed** | 2026-08-22 23:32 |
+
+### Description
+
+Plan §6 Phase 10b — richer agent API, strictly ADDITIVE schema changes (v1 goldens must pass unchanged).
+
+EXPLAINABLE SCORING: optional reasons[] on recommendations/quick_ref entries — human+agent readable strings like 'blocks 14 issues', 'high pagerank 0.31', 'stale 20 days'. Derived from existing breakdown components (impact weights, triage factors). Optional fields only; consumers ignoring them see identical v1 behavior.
+
+CAPABILITIES DECLARATION: version/envelope gains capabilities:[...] e.g. ['incremental-analysis','streaming','explain-score'] so agents can feature-detect. bv --robot-capabilities extended accordingly.
+
+STREAMING ROBOT MODE: NDJSON streaming variant (--stream flag or content-type) emitting records progressively for large outputs (insights full_stats, history reports) — agents on slow links benefit; classic buffered output remains default and untouched.
+
+FAST MODE: opt-in env (BV_FAST_MODE=1) enabling Phase 9 fast paths (parallel/zero-copy/incremental) with documented behavioral notes; compatibility mode stays default and golden-pinned.
+
+PLUGIN ARCHITECTURE EXPLORATION: sketch-level only after the above land (recipe hooks? external analyzers?) — explicit non-goal to design it during v1/v2 parity work.
+
+ACCEPTANCE: all FORT v1 goldens pass byte-identical with new binary (additive-only verified by CI assertion); new features demonstrated in docs/examples agent workflow.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p10-incremental-urb`
+
+---
+
+<a id="beads-viewer-rust-p10-incremental-urb-phase-10a-incremental-analysis-engine-affected-subgraph-metric-refresh"></a>
+
+## ✨ beads_viewer_rust-p10-incremental-urb Phase 10a: incremental analysis engine (affected-subgraph metric refresh)
+
+| Property | Value |
+|----------|-------|
+| **Type** | ✨ feature |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:19 |
+| **Updated** | 2026-08-22 23:32 |
+| **Closed** | 2026-08-22 23:32 |
+
+### Description
+
+Plan §6 Phase 10a — THE killer feature a pure port cannot offer.
+
+CONCEPT: beads change frequently (1 issue edit); today full graph recompute runs. Instead:
+changed nodes -> affected subgraph closure -> update only affected metrics -> merge into cached GraphStats.
+
+BUILD ON: existing dataHash keying, config-hash cache keys, LRU disk caches (Phase 2c foundation).
+
+DESIGN SKETCH:
+- Dirty-set propagation via dependency edges (forward dependents closure for centrality invalidation; SCC-aware when cycles present).
+- PageRank incremental: retain previous vector as warm start with tighter iteration budget; fall back to full compute on divergence beyond 1e-9.
+- Betweenness: exact incremental is hard — approximate refresh on affected component + flag status=approx with reason 'incremental'.
+- Triage scores: cheap recompute from updated metrics maps (weights are local per-node).
+- data_hash stays FULL-graph (contract!) — incremental affects internal caching layers only, never the envelope hash semantics.
+- Expose metrics freshness in robot meta (phase2_ready semantics preserved; additive fields only e.g. incremental:true).
+
+ACCEPTANCE: single-issue-edit refresh measured >=5x faster than full recompute on 10k fixture; outputs converge to full-compute values within tolerance; all v1 goldens still pass unchanged.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p9-rust-opt-6qj`
+
+---
+
+<a id="beads-viewer-rust-p2-analyzer-j6g-phase-2b-two-phase-analyzer-timeouts-metricstatus"></a>
+
+## 📋 beads_viewer_rust-p2-analyzer-j6g Phase 2b: two-phase analyzer + timeouts + MetricStatus
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:11 |
+| **Updated** | 2026-08-22 16:23 |
+| **Closed** | 2026-08-22 16:23 |
+
+### Description
+
+Plan §4.3 two-phase analyzer.
+
+DESIGN (mirrors Go goroutine+select):
+- Phase1 synchronous: degree, topo sort, density — always immediately available.
+- Phase2: one std::thread per metric with channel recv_timeout mirroring per-metric budgets from ConfigForSize (2s small / 500ms medium / 300ms large / 200ms XL for PR+HITS+Cycles; BW exact 2s/500ms, approx 500ms). Panic inside thread -> MetricStatus=timeout (catch_unwind at thread boundary). AllPhase2Disabled short-circuit when env BV_SKIP_PHASE2 set (disables PR/BW/HITS/cycles/eigenvector/critical-path; KEEPS k-core/articulation/slack).
+- Env override BV_PHASE2_TIMEOUT_S=N (>0) replaces per-metric timeouts.
+- GraphStats carries per-metric MetricStatus {computed|approx|timeout|skipped|pending|panic} + elapsed ms (+sample size when approx).
+
+ACCEPTANCE: status flags identical to Go across fixture sizes incl. pathological graphs (dense complete graphs forcing skips); elapsed-ms ignored in diff; metrics maps equal at 1e-12.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p2-graph-import-pj5`
+
+---
+
+<a id="beads-viewer-rust-p2-cache-scoring-fin-phase-2c-disk-cache-v3-configforsize-scoring-constants"></a>
+
+## 📋 beads_viewer_rust-p2-cache-scoring-fin Phase 2c: disk cache v3 + ConfigForSize + scoring constants
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:11 |
+| **Updated** | 2026-08-22 16:45 |
+| **Closed** | 2026-08-22 16:45 |
+
+### Description
+
+Plan §4.3 cache + config + scoring constants.
+
+DISK CACHE v3 (keep Go design, replace format+filename to avoid cross-binary misreads):
+- Gated: BV_ROBOT=1 && BV_NO_CACHE!=1. Dir: $BV_CACHE_DIR else UserCacheDir()/bv.
+- Key dataHash16|configHash16. Bounds: 24h age, 10 entries LRU, 10MB entry cap.
+- .beads dir mtime staleness check invalidates. XFetch beta=1.0 probabilistic early refresh.
+- Columnar SoA shape (nodes dictionary + set/idx/vals arrays).
+- File locking fs2/fd-lock (flock unix / LockFileEx windows); no-rewrite-on-pure-read-hit; persist-only-fresh (never write after a git failure).
+- In-proc TTL cache 5min global alongside disk layer.
+
+CONFIG TIERS ConfigForSize(nodeCount,edgeCount) verbatim: density = E/(N*(N-1)); <100 nodes -> everything exact 2s timeouts, MaxCycles 1000; <500 -> exact 500ms, MaxCycles 100; <2000 -> 300ms, BW approx only if density<0.01 else skip reason 'graph too dense', MaxCycles 50; >=2000 -> BW approx always 500ms, PR 200ms, cycles DISABLED reason '>2000 nodes' MaxCycles 10, HITS only if density<0.001 else skipped.
+
+SCORING CONSTANTS (copied): impact weights PR .22/BW .20/blocker .13/staleness .05/priority .10/TTI .10/urgency .10/risk .10 (risk=fan .30 churn .30 crossrepo .20 status .20); scoreToPriority >=.7->P0 >=.5->P1 >=.3->P2 >=.15->P3 else P4; TriageScore = base*0.70 + unblockBoost(<=0.15 threshold 5) + quickWin(<=0.15 depth<=2), claimed-by-other x0.1; QuickWin = log2(unblocks+1)*.4 + simplicity*.4 + prioBonus*.2; priority rec thresholds HighPageRank>.30 HighBetweenness>.50 staleness 14d minConfidence .30 significantDelta .15.
+
+ACCEPTANCE: triage scores/reasons identical to Go on goldens (CP-C once wired through bv-robot); cache hit/miss behavior identical (timings ignored).
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p2-analyzer-j6g`
+
+---
+
+<a id="beads-viewer-rust-p2-graph-import-pj5-phase-2a-bv-analysis-import-algorithms-from-wasm-copy-go-semantics-alignment"></a>
+
+## 📋 beads_viewer_rust-p2-graph-import-pj5 Phase 2a: bv-analysis import algorithms from wasm copy + Go-semantics alignment
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:11 |
+| **Updated** | 2026-08-22 15:49 |
+| **Closed** | 2026-08-22 15:49 |
+
+### Description
+
+Plan §4.3. PARITY FIRST, PRETTY LATER.
+
+Import algorithm modules DIRECTLY from crates/bv-graph-wasm (verbatim copy @9ace029): pagerank, hits, eigenvector, betweenness(+approx w/ recommend_sample_size), kcore, articulation+bridges, cycles(tarjan_scc + enumerate + cycle_break), critical_path, slack, topo, reachability, subgraph, whatif, topk_set, parallel_cut. Module paths and feature gates preserved; ONLY the wasm-bindgen dependency severed at boundary. NO bv-graph-core restructuring — that is Phase 9 after CP-F (every pre-parity graph refactor adds a variable against the Go oracle).
+
+GO-SEMANTICS ALIGNMENTS REQUIRED (the only permitted code changes):
+- PageRank: damp 0.85, tol 1e-6, maxIter 1000, deterministic power iteration (Go hand-rolled version semantics).
+- HITS: tol 1e-3 replicating gonum network.HITS iteration/convergence behavior.
+- Eigenvector: FIXED 50 iterations, no convergence check (Go behavior).
+- Cycles: Tarjan SCC pre-check then one DFS cycle per SCC, capped by MaxCyclesToStore, sorted output.
+- Slack: longest - fwd - bwd DP over topo order.
+- Topo sort: Kahn with SORTED frontier (BTreeSet) — petgraph toposort order is unspecified; gonum topo.Sort determinism must be reproduced.
+- Betweenness approx: Fisher-Yates seed=1, scale n/k; RecommendSampleSize tiers: <100->n exact, <500->max(50,n/5), <2000->100, else 200.
+- k-core Batagelj-Zaversnik; articulation Tarjan undirected.
+- Union-find for plan tracks: path compression + smaller-root-wins merge (determinism).
+
+FLOAT DETERMINISM: all aggregations iterate in sorted node-index order; differential tolerance 1e-12 on robot-insights metrics maps.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-p1-model-loader-pva`
+
+---
+
+<a id="beads-viewer-rust-p3-cli-surface-r6c-phase-3a-bv-robot-cli-surface-validation-rules-argv-rewriter"></a>
+
+## 📋 beads_viewer_rust-p3-cli-surface-r6c Phase 3a: bv-robot CLI surface + validation rules + argv rewriter
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:12 |
+| **Updated** | 2026-08-22 17:10 |
+| **Closed** | 2026-08-22 17:10 |
+
+### Description
+
+Plan §4.6. The full CLI contract layer — agents depend on exact flag behavior.
+
+SURFACE: 142 flag registrations total, ~41 robot primaries. clap BUILDER mode (registry is dynamic; derive cannot express it).
+- Flag groups: general (db/version/update/check-update/rollback/update-dry-run/yes/format/stats/profile-startup/profile-json/no-cache/force-full-analysis/theme/background-mode/no-background-mode/cpu-profile); robot primaries ~41 (triage+brief/next/by-track/by-label/insights/plan/priority/alerts+severity+type+label/suggest+type+confidence+bead/graph+format+root+depth/label-health/flow/attention+limit/search/diff/drift/history/bead-history/explain-confirm-reject-correlation/correlation-stats/orphans+min-score/file-beads+limit/file-hotspots+limit/impact/file-relations+threshold+limit/related+min-relevance(dual int%|0-1 frac)+max-results+include-closed/blocker-chain/impact-network+depth/causality(underscore quirk!)/sprint-list/sprint-show/forecast+label+sprint+agents/capacity+agents+label/burndown); search group; scoping (-l label, -r recipe, workspace, repo); history&drift (as-of, diff-since, save-baseline, baseline-info, check-drift, bead-history, history-since, history-limit 500, min-confidence, robot-not-ready-labels, robot-history-timeout-ms -1=env=10s 0=unbounded, id-pattern repeatable); correlation feedback by/reason; exports (export-md+no-hooks, priority-brief, agent-brief dir, emit-script+limit+format bash|fish|zsh, feedback accept/ignore/reset/show); pages (export-pages, title, include-closed true, include-history true, preview-pages, no-live-reload, watch-export, pages wizard); graph snapshot (export-graph html/png/svg, preset compact|roomy, title); debug-render insights|board +width 180 +height 50; theme light|dark|auto.
+
+VALIDATION RULES:
+- modifier-requires table (~50 rules): e.g. robot-diff requires diff-since; robot-search requires search; all search-* require --search; brief requires triage family; graph-format enum json|dot|mermaid; script-format enum bash|fish|zsh.
+- 37 exclusive primary command groups.
+- Argv rewriter BEFORE parsing: agent-intent aliases bv triage|next|plan|insights... -> --robot-*; single-dash long flags normalized to double; bare --json -> --robot-triage.
+
+ACCEPTANCE: help text structure matches Go; invalid usage exit codes identical (2 for usage errors); rewriter handles Go test cases from main_test.go.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-api-freeze-b73`
+
+---
+
+<a id="beads-viewer-rust-p3-dispatch-3lv-phase-3c-robot-command-dispatch-triage-family-first"></a>
+
+## 📋 beads_viewer_rust-p3-dispatch-3lv Phase 3c: robot command dispatch (triage family first)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:12 |
+| **Updated** | 2026-08-22 20:38 |
+| **Closed** | 2026-08-22 20:38 |
+
+### Description
+
+Plan §6 Phase 3. Command dispatch in value order. Gate = CP-C then (with Phase 4) CP-D.
+
+STARTUP FLOW ORDER (strict, from Go main.go): register flags -> build registries -> argv rewrite -> theme pinning (--theme > BV_THEME > config.yaml > autodetect) -> id-pattern compile (exit 2 on bad regex) -> modifier/enum/exclusive validation -> cpu-profile -> --db=>BEADS_DB + --no-cache=>BV_NO_CACHE=1 -> robotMode detect (BV_ROBOT | any robot flag | diff-since&&!TTY), pin BV_ROBOT=1 -> output format resolve -> phase1 dispatch (help/version/capabilities/schema/docs/recipes/metrics) -> updater chain (check-update/dry-run/update+confirm/rollback) -> agents-* AGENTS.md mgmt (JSON when robot) -> feedback cmds -> recipes load -> project dir + baseline path -> LOAD ISSUES: as-of(GitLoader) | workspace.LoadAllFromConfig | datasource.LoadIssues + EnsureBVIgnored + watch file -> repo filter -> dataHash -> label subgraph -> early recipe filter -> search pipeline exit -> pages wizard/preview/export exit -> label trio dispatch -> robot-graph + export-graph -> alerts+suggest -> profile-startup -> save-baseline -> check-drift(exit 0/1/2) -> insights/plan/priority -> TRIAGE FAMILY (bounded history prologue <=10s via BV_ROBOT_HISTORY_TIMEOUT_MS => meta.history_status ok|error|timeout) -> briefs/emit-script -> history+correlation family -> metrics -> diff-since (auto JSON non-TTY) -> as-of TUI / export-md / TUI launch.
+
+COMMAND IMPLEMENTATION ORDER: triage family first (triage with quick_ref/recommendations/quick_wins/blockers_to_clear/project_health/commands; next minimal; by-track/by-label groupings; brief compact #183) -> plan (union-find tracks) -> insights (full_stats map cap 200 BV_INSIGHTS_MAP_LIMIT) -> priority -> suggest -> alerts -> graph export -> diff -> label trio -> drift/baseline.
+
+DEAD CODE RULE: Go has unreachable duplicate inline handlers in main.go — port ONLY the registry path.
+
+ACCEPTANCE (=CP-C): --robot-triage normalized-diff == 0 vs golden incl. count semantics #165 (open_count strictly status==open; not_closed==actionable+not_actionable partition).
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-p1-datasource-git-gq0`
+- ⛔ **blocks**: `beads_viewer_rust-p2-cache-scoring-fin`
+- ⛔ **blocks**: `beads_viewer_rust-p3-cli-surface-r6c`
+- ⛔ **blocks**: `beads_viewer_rust-p3-envelope-toon-bag`
+
+---
+
+<a id="beads-viewer-rust-p3-envelope-toon-bag-phase-3b-robotenvelope-toon-encoder-golden-toon-corpus"></a>
+
+## 📋 beads_viewer_rust-p3-envelope-toon-bag Phase 3b: RobotEnvelope + TOON encoder + golden/toon corpus
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔥 Critical (P0) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:12 |
+| **Updated** | 2026-08-22 15:57 |
+| **Closed** | 2026-08-22 15:57 |
+
+### Description
+
+Plan §4.6 + §5 item 10. Output contract core — highest blast radius if wrong.
+
+RobotEnvelope per api-freeze-v1. Per-command top-level schemas with STABLE FIELD ORDER (serde preserves struct declaration order).
+
+TOON ENCODER (hand-written ~100-200 LOC, embedded — removes Go's external tru binary dependency):
+- Key folding, indent options (env TOON_KEY_FOLDING/TOON_INDENT 0-16), stats estimate on stderr (--stats / TOON_STATS=1).
+- Format precedence: --format > BV_OUTPUT_FORMAT > TOON_DEFAULT_FORMAT > json. Invalid -> exit 2. JSON default compact; BV_PRETTY_JSON=1 -> 2-space indent.
+- Fallback semantics REMOVED deliberately: encoder is built-in so no tru-missing fallback path exists (deviation documented in CHANGELOG).
+
+GOLDEN/TOON CORPUS (dedicated): golden/toon/{triage,next,plan,insights,graph,history}.toon captured from Go --format toon across every fixture class. Assert BOTH byte-equality AND decode-round-trip (TOON->JSON == golden JSON). Every encoder change re-runs the entire corpus. TOON is where agent ecosystems fail hardest — this corpus is the seatbelt.
+
+ACCEPTANCE: envelope fields byte-equal vs Go (timestamps normalized); TOON corpus passes both assertions; --stats token estimates within tolerance of tru.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-phase0-scaffold-xbe`
+
+---
+
+<a id="beads-viewer-rust-p3d-drift-u4l-phase-3d-drift-baseline-engine-check-drift-ci-contract-exit-0-1-2"></a>
+
+## 📋 beads_viewer_rust-p3d-drift-u4l Phase 3d: drift/baseline engine + check-drift CI contract (exit 0/1/2)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 11:39 |
+| **Updated** | 2026-08-22 18:44 |
+| **Closed** | 2026-08-22 18:44 |
+
+### Description
+
+GAP FIX from polish round 1: drift/baseline was buried in Phase 7b but --check-drift exit codes (0 OK /1 critical /2 warning) are part of the ROBOT CONTRACT gated at CP-D — must exist before release gate, not after TUI.
+
+SCOPE (pulled forward from p7-support):
+- .bv/drift.yaml threshold schema: density 50warn/20info pct, node/edge growth 25pct, blocked +5, actionable +-30/20pct, pagerank 50pct, stale 14warn/30crit days, in_progress x0.5, cascade info>=3/warn>=5, disabled_alerts[], label_overrides.
+- Alert types implemented: new_cycle(critical), density_growth, node_count_change, edge_count_change, blocked_increase, actionable_change, pagerank_change, stale_issue, blocking_cascade(+downstream_priority_sum). Declared-but-unused Go types deliberately skipped.
+- baseline.json v1 write/read: {version,created_at,commit_sha,message,branch,description,stats{node/edge,density,status counts},top_metrics{pagerank,betweenness,critical_path,hubs,authorities},cycles}; cycleKey min-first rotation.
+- CLI wiring: --save-baseline [desc], --baseline-info, --check-drift exit 0/1/2, --robot-drift JSON {has_drift,exit_code,summary,alerts,baseline{created_at,commit_sha}}.
+
+REMAINS in p7-support: nothing drift-related — retitle there. Alerts panel TUI consumption comes via tui-m3.
+
+ACCEPTANCE: exit-code matrix verified vs Go on crafted baseline fixtures (ok/critical/warning scenarios); robot-drift JSON matches golden.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p2-cache-scoring-fin`
+
+---
+
+<a id="beads-viewer-rust-p3e-corr-dispatch-y4o-phase-3e-correlation-family-command-dispatch-history-causality-network-related-orphans-file-beads-hotspots-impact-blocker-chain"></a>
+
+## 📋 beads_viewer_rust-p3e-corr-dispatch-y4o Phase 3e: correlation-family command dispatch (history/causality/network/related/orphans/file-beads/hotspots/impact/blocker-chain)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 11:39 |
+| **Updated** | 2026-08-22 20:00 |
+| **Closed** | 2026-08-22 20:00 |
+
+### Description
+
+GAP FIX from polish round 1: correlation-family robot commands had no dispatch bead — CP-D was unreachable without them.
+
+SCOPE: dispatch + output schemas for --robot-history (+bead-history, history-since, history-limit, min-confidence filters), --robot-explain/confirm/reject-correlation (SHA:beadID format; feedback by/reason flags), --robot-correlation-stats (FeedbackStats+envelope), --robot-orphans (OrphanReport flattened: git_range/stats/candidates/by_bead), --robot-file-beads {file_path,total_beads,open_beads,closed_beads}, --robot-file-hotspots {hotspots,stats}, --robot-impact {files,risk_level,risk_score,summary,warnings,affected_beads}, --robot-file-relations {file_path,total_commits,threshold,related_files}, --robot-related (RelatedWorkResult flattened+data_hash), --robot-blocker-chain {result{target_id,is_blocked,root_blockers,chain,has_cycle}}, --robot-impact-network (ImpactNetworkResult flattened), --robot-causality (CausalityResult flattened).
+
+HARD RULE: these commands count toward CP-D ONLY after CP-CORR is green (Phase 4 gates them) — dependency wired accordingly.
+
+ACCEPTANCE: each command differential-passes Go goldens on real-repo fixtures; envelope+load_stats present per contract.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p4-caches-scorers-d9k`
+
+---
+
+<a id="beads-viewer-rust-p3e-robot-diff-x7k-phase-3e-wire-robot-diff-snapshot-diff-vs-baseline"></a>
+
+## 📋 beads_viewer_rust-p3e-robot-diff-x7k Phase 3e: wire robot-diff (snapshot diff vs baseline)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-04 12:00 |
+| **Closed** | 2026-09-04 12:00 |
+| **Labels** | cli |
+
+### Description
+
+robot-diff needs --diff-since git-snapshot comparison logic.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-p3e-corr-dispatch-y4o`
+
+---
+
+<a id="beads-viewer-rust-p3e-robot-impact-u9a-phase-3e-wire-robot-impact-file-based-impact-analysis"></a>
+
+## 📋 beads_viewer_rust-p3e-robot-impact-u9a Phase 3e: wire robot-impact (file-based impact analysis)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-04 12:00 |
+| **Closed** | 2026-09-04 12:00 |
+| **Labels** | cli |
+
+### Description
+
+Go handleRobotImpact analyzes impact of modifying specific files via the correlator pipeline.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-p3e-corr-dispatch-y4o`
+
+---
+
+<a id="beads-viewer-rust-p3e-robot-not-ready-labels-m2q-phase-3e-wire-robot-not-ready-labels-triage-claimability-gate"></a>
+
+## 📋 beads_viewer_rust-p3e-robot-not-ready-labels-m2q Phase 3e: wire robot-not-ready-labels (triage claimability gate)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-04 12:00 |
+| **Closed** | 2026-09-04 12:00 |
+| **Labels** | cli |
+
+### Description
+
+robot-not-ready-labels threads into build_triage's deeper claimability logic.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-p3-dispatch-3lv`
+
+---
+
+<a id="beads-viewer-rust-p4-caches-scorers-d9k-phase-4b-scorers-5-disk-caches-feedback-store"></a>
+
+## 📋 beads_viewer_rust-p4-caches-scorers-d9k Phase 4b: scorers + 5 disk caches + feedback store
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:14 |
+| **Updated** | 2026-08-22 19:29 |
+| **Closed** | 2026-08-22 19:29 |
+
+### Description
+
+Plan §4.5 scoring + caching half.
+
+CONFIDENCE SCORERS:
+- Explicit ID: builtin regex set ([A-Za-z]+-\d+ bracket forms, closes/fixes/resolves prefixes, beads?-_N, bv-_N, generic [A-Z]{2,10}-\d+) + --id-pattern global registry (group 1 or whole match). Normalize numeric-only -> bv-N. Base 0.90: +0.05 closes/fixes/resolves, +0.02 bracket, +0.01 refs, +0.03 bead-prefix, -0.02 per extra ID in msg. Clamp [0.70, 0.99].
+- Temporal: author email-or-name quoted-regex; window claim->close; base 0.50: concurrent active beads <=1:+0.20 ==2:+0.10 >3:-0.10; window <4h:+0.10 <24h:+0.05 >3d:-0.05 >7d:-0.15; title-keyword path-hint match +0.15 (pkg/src/lib/internal/cmd/app prefixes + auth/login/user/api/db keywords). Clamp [0.20, 0.85].
+- Co-commit: base 0.95; +0.04 msg contains bead ID; -0.10 >20 files (shotgun); -0.05 all-test-files. Clamp [0,1].
+- MethodRanges validation: co_committed [.85,.99] explicit_id [.70,.99] temporal_author [.20,.85]. CombineConfidence: max as base + headroom*0.1*score per extra signal, cap 0.99. Levels: >=.90 very high >=.75 high >=.50 moderate >=.30 low. MergeCommits dedup SHA+BeadID keeping highest-confidence method.
+- Signal weights: co_commit=50 message_match=40 timing=25+author=15 file_overlap=min(files*5,15) proximity=7 when conf>range.max*0.9.
+
+5 DISK CACHES (all goccy-equivalent serde_json, flock/fs2 locking, pass-1 no-rewrite-on-pure-hit, persist-only-fresh):
+1. report correlation_report_cache.json: <=6 entries, 24h, 64MB ceiling, key headSHA:beadsHash:optsHash.
+2. HEAD-artifact: same bounds, key headSHA:optsHash (EXCLUDES beadsHash so working-tree edits hit).
+3. per-commit-event: 30d, <=4000 commits, 96MB, namespace primaryFile+NUL+beadID, entry validates stored OIDs.
+4. per-commit-cocommit: same bounds, namespace sha256(excludePathspecArgs joined NUL).
+5. analysis (Phase 2c crate).
+
+FEEDBACK STORE: <beadsDir>/correlation_feedback.jsonl append-only 0644, key (sha,beadID) last-write-wins, CorrelationFeedback{commit_sha,bead_id,feedback_at,feedback_by,type,reason,original_conf}; stats accuracy confirmed/(confirmed+rejected).
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p4-extractor-6yr`
+
+---
+
+<a id="beads-viewer-rust-p4-extractor-6yr-phase-4a-correlation-extractor-snapshot-legacy-paths-cat-file-batch"></a>
+
+## 📋 beads_viewer_rust-p4-extractor-6yr Phase 4a: correlation extractor (snapshot + legacy paths, cat-file batch)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:14 |
+| **Updated** | 2026-08-22 19:22 |
+| **Closed** | 2026-08-22 19:22 |
+
+### Description
+
+Plan §4.5 extraction half. Most dangerous git-I/O subsystem — standalone CP-CORR gate.
+
+EXTRACTION DISPATCH: stat followed blob (git cat-file -s HEAD:<file>); size >=64KiB or undeterminable -> SNAPSHOT path; else legacy patch path.
+- SNAPSHOT: git log --raw --no-abbrev --follow [--since/--until/-nN] -c color.ui=false --format=%H%x00%aI%x00%an%x00%ae%x00%s -- <primary>; parse raw status lines (zero-SHA sides dropped); blobs streamed via ONE long-lived git cat-file --batch with strict interleave + LRU memory window by lastUse (#182). recordLineSet = 64-bit hash multiset of lines starting '{'; synthesized record diffs must be BYTE-IDENTICAL to legacy unified=0 output.
+- LEGACY retained for differential testing: git log -p --unified=0 --follow.
+- Events: created/claimed/closed/reopened/modified. claimed = ->in_progress (reopened if from closed/tombstone); ->closed|tombstone = closed; open from closed-like = reopened; else modified. Within-commit events sorted by bead ID.
+- BeadID filter pushes -G'id':\s*'quoted-id' into git log args.
+- Co-commit: 27 code extensions (.go .py .js .ts .jsx .tsx .rs .java .kt .swift .c .cpp .h .hpp .rb .php .cs .scala .yaml .yml .json .toml .md .sql .sh .bash .zsh); excluded prefixes [.beads/ .bv/ .git/ node_modules/ vendor/ __pycache__/ .venv/ venv/ dist/ build/ .next/] via :(exclude,glob) pathspecs; TWO batch passes git log --no-walk=unsorted --name-status and --numstat (mutually exclusive flags); per-commit fallback git show; rename '{old => new}' regex + ' => ' suffix handling; only claimed/closed events correlate (ExtractAllCoCommits).
+- Timeout threading: EVERY git call takes deadline context (triage prologue <=10s, BV_ROBOT_HISTORY_TIMEOUT_MS, 0=unbounded) — Rust Command + kill_on_drop + wait_timeout.
+- Incremental: threshold 100 new commits else full refresh; git rev-list --reverse sha..HEAD; batch extract via git log --format=<header> --no-walk <SHAs>.
+
+ACCEPTANCE (=CP-CORR): on real repo + synthetic git fixtures — event count, method_distribution, confidence histogram (0.1 buckets), cache hit/miss ratio ALL match Go; cold/warm blob-fetch counts match Go test patterns.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-p1-datasource-git-gq0`
+
+---
+
+<a id="beads-viewer-rust-p4-surfaces-hul-phase-4c-orphan-file-index-network-causality-related-surfaces"></a>
+
+## 📋 beads_viewer_rust-p4-surfaces-hul Phase 4c: orphan/file-index/network/causality/related surfaces
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:14 |
+| **Updated** | 2026-08-22 19:53 |
+| **Closed** | 2026-08-22 19:53 |
+
+### Description
+
+Plan §4.5 surfaces built atop extractor+caches.
+
+- ORPHAN DETECTION: git log --no-merges excluding .beads/* paths (legacy-git retry without exclude pathspec). Suspicion weights: fix/close/resolve=10 implement=8 add=5 #\d+=15 [a-z]{2,5}-\d+=20 bv-x=25 beads?\d+=25; probable-bead candidates with reasons[]; defaults min score 30 (--orphans-min-score).
+- FILE-BEAD INDEX: which beads touched a file, sorted recency, commit SHAs attached (--robot-file-beads, limit default 20); FILE HOTSPOTS top-N files by bead touches (default 10); CO-CHANGE MATRIX related files threshold fraction 0.5 default.
+- IMPACT ANALYSIS: risk_level/risk_score for modifying given file set (--robot-impact comma-separated).
+- RELATED WORK: four relation types (file-overlap, commit-overlap, dependency-cluster, concurrent-window 7d); relevance 0-100; defaults MinRelevance 20 MaxResults 10; include-closed flag.
+- BLOCKER CHAIN: root blockers + chain walk + has_cycle flag (--robot-blocker-chain).
+- IMPACT NETWORK: nodes/edges from shared-commit/shared-file/dependency edges; community clusters w/ label, internal_connectivity, central_bead; stats incl density/isolated_nodes; depth-limited subnetwork 1-3 default 2 (--robot-impact-network all|id).
+- CAUSALITY: event chain created/claimed/blocked/unblocked/commit/closed/reopened with caused_by/blocker ids; insights blocked_percentage, critical_path_desc, longest gap, recommendations (--robot-causality id).
+
+ACCEPTANCE: each surface's JSON schema + values match Go goldens on real-repo fixtures.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p4-caches-scorers-d9k`
+
+---
+
+<a id="beads-viewer-rust-p5-export-core-vkp-phase-5a-export-core-parity-markdown-mermaid-dot-interactive-html-sqlite-fts5-static-bundle"></a>
+
+## 📋 beads_viewer_rust-p5-export-core-vkp Phase 5a: export core parity (markdown/mermaid/dot/interactive HTML/sqlite+FTS5/static bundle)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:15 |
+| **Updated** | 2026-08-22 19:46 |
+| **Closed** | 2026-08-22 19:46 |
+
+### Description
+
+Plan §4.8 CORE PARITY class. Extended deploy items live in sibling bead — these never block release.
+
+MARKDOWN REPORT: sort open-first then priority asc then date desc; summary table; quick-actions bash with shellEscape; TOC slugs ([^a-z0-9]+ -> '-', dup -N suffix); embedded mermaid graph TD: classDef open #50FA7B inprogress #8BE9FD blocked #FF5555 closed #6272A4; node id["ID<br/>Title<=37runes"]; sanitizeMermaidID keeps [letters,digits,-_] else 'node' + FNV-32a hex suffix on collision; text escape '->[]{}->() <>->&lt;&gt; |->/ control-strip; edges ==> blocking (IsBlocking incl empty type) -.-> related.
+
+ROBOT-GRAPH: json adjacency {nodes{id,title,status,priority,labels,pagerank},edges{from,to,type,''->blocks}} + explanation{what,how_to_render,when_to_use} + data_hash; DOT digraph rankdir=LR box nodes label id\ntitle<=30\nP# status fillcolor-by-status penwidth=1+pr*3 dashed #999 vs bold #E53935; mermaid variant; root/depth subgraph = BFS BOTH directions (deps + reverse dependents), depth 0 unlimited.
+
+INTERACTIVE HTML: embed force-graph.min.js + marked.min.js; payload nodes full bead content + metrics(pagerank..betweenness_rank) links{source,target,type,critical=both-slack-zero} triage history_stats git_range; filename {proj}_graph_export__as_of__date__time__git_head_hash__<short>.html.
+
+STATIC BUNDLE: index.html (+title replace, ?v=<unix> cache-bust) viewer/charts/graph/hybrid_scorer/wasm_loader js + styles.css + coi-serviceworker.js + vendor/{tailwindcss,alpine,alpine-collapse,dompurify,marked,mermaid,force-graph,d3.v7,chart.umd,sql-wasm.js+.wasm,bv_graph.js+bv_graph_bg.wasm,fonts} + beads.sqlite3 (+config.json SHA256 OPFS key; %05d.bin 1MiB chunks when >5MB stale-pruned #175) + data/{meta.json,triage.json,project_health.json,graph_layout.json positions/metrics[pr,bt,blockedBy,blocks,inCycle]/links,history.json?} + README.md + _headers + .github/workflows/static.yml template.
+
+SQLITE EXPORT schema v1 via rusqlite executescript: issues(id TEXT PK, labels JSON, RFC3339 ts), dependencies(FK,type default blocks), comments composite id '<issue>:<comment>', issue_metrics(pagerank,betweenness,critical_path_depth,triage_score,blocks_count,blocked_by_count active-endpoint-only), triage_recommendations(reasons/unblocks/blocked_by JSON), export_meta kv; indexes status/priority+status/updated desc/type_status/deps x3/comments x2/score/pagerank; issue_overview_mv CTAS COALESCE metrics + GROUP_CONCAT ids filtered type IN(blocks,'') both-sides-not-closed; issues_fts FTS5 external-content porter unicode61 + rebuild + optimize; OptimizeDatabase journal_mode=DELETE page_size=1024(httpvfs) ANALYZE VACUUM last.
+
+ACCEPTANCE: bundle tree diff vs Go (hashes equal except timestamps); sqlite schema introspection equal; robot-graph outputs byte-equal.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-p1-model-loader-pva`
+- ⛔ **blocks**: `beads_viewer_rust-p2-cache-scoring-fin`
+
+---
+
+<a id="beads-viewer-rust-p5-extended-deploy-0rz-phase-5c-extended-deploy-gh-pages-wizard-cloudflare-hooks-watch-export-never-blocks-release"></a>
+
+## 📋 beads_viewer_rust-p5-extended-deploy-0rz Phase 5c: extended deploy (GH Pages wizard, Cloudflare, hooks, watch-export) — never blocks release
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:15 |
+| **Updated** | 2026-08-22 22:55 |
+| **Closed** | 2026-08-22 22:55 |
+
+### Description
+
+Plan §4.8 EXTENDED class — port AFTER core export parity is green; NEVER blocks CP-F release.
+
+GH PAGES WIZARD: saved config ~/.config/bv/pages-wizard.json (BV_NO_SAVED_CONFIG skips); flow export-opts -> target(github|cloudflare|local) -> per-target config (repo <cwd>-pages private desc | cf project+branch main | local ./bv-pages) -> prereqs (gh installed/auth/git identity | npm->wrangler install/login offer) -> caller exports -> preview step (port scan) -> deploy DeployToGitHubPagesWithFallback: gh repo create/init/add/commit 'Deploy static site via bv --pages'/push -u origin main --force-with-lease after depth-1 fetch, http.postBuffer 500MB, gh api pages enable (409=ok); rate-limited Actions -> legacy gh-pages branch push fallback; verify meta.json poll every 5s <=90s; GH fail -> offer Cloudflare fallback.
+
+CLOUDFLARE: wrangler pages deploy <bundle> --project-name X --branch main --commit-dirty=true; auth chain CLOUDFLARE_API_TOKEN env > ~/.wrangler/config/default.toml oauth_token > whoami 10s timeout; auto-create project; _headers security file; URL regex *.pages.dev verify meta.json 30s.
+
+HOOKS: .bv/hooks.yaml phases pre-export(default on_error fail)/post-export(default continue); Hook{name,command,timeout default 30s (Go duration or bare seconds),env map with ${VAR} expansion,on_error}; env passed BV_EXPORT_PATH/BV_EXPORT_FORMAT/BV_ISSUE_COUNT/BV_TIMESTAMP RFC3339; sh -c / cmd /C execution; pre-fail aborts export exit 1; post warns.
+
+WATCH-EXPORT: adaptive backoff 500ms->30s coalescing; skip re-export via canonical content+dependency hash (#159).
+
+ACCEPTANCE: wizard flows pass with stubbed gh/wrangler binaries (Go test patterns reusable); hooks env vars verified; watch-export skip logic unit-tested.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p5-export-core-vkp`
+- ⛔ **blocks**: `beads_viewer_rust-p5-preview-gai`
+
+---
+
+<a id="beads-viewer-rust-p5-preview-gai-phase-5b-preview-server-tiny-http-sse-core"></a>
+
+## 📋 beads_viewer_rust-p5-preview-gai Phase 5b: preview server (tiny_http+SSE) [core]
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:15 |
+| **Updated** | 2026-08-22 20:20 |
+| **Closed** | 2026-08-22 20:20 |
+
+### Description
+
+Plan §4.8 preview server — CORE parity (needed for static-site UX), tiny_http per §6.1 no-tokio decision.
+
+- Bind 127.0.0.1 only; port scan 9000->9100 first-free.
+- Static file serving with no-cache headers; safePreviewDir path-traversal guard.
+- GET /__preview__/status JSON health endpoint.
+- SSE /__preview__/events livereload: notify watcher on bundle dir (root+1 level depth), 200ms debounce, events connected/reload.
+- Script injection before </body> (Content-Length header dropped; response buffered until </html> found).
+- Browser open after 500ms delay unless BV_NO_BROWSER=1 / BV_TEST_MODE set.
+
+ACCEPTANCE: curl status endpoint 200 JSON; SSE connect receives connected event; file edit triggers reload event <1s; traversal attempt blocked.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p5-export-core-vkp`
+
+---
+
+<a id="beads-viewer-rust-p7-search-mc8-phase-7a-bv-search-compatibility-port-embedder-index-hybrid-scorer"></a>
+
+## 📋 beads_viewer_rust-p7-search-mc8 Phase 7a: bv-search compatibility port (embedder/index/hybrid scorer)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:18 |
+| **Updated** | 2026-08-22 22:11 |
+| **Closed** | 2026-08-22 22:11 |
+
+### Description
+
+Plan §4.4 — CLASSIFIED compatibility port (drift-prone; pinned to goldens like everything else). Deliberately scheduled LAST: not a parity blocker.
+
+- Hash embedder: FNV-1a 64-bit signed buckets -> f32[dim] -> L2-normalize; default dim 384 (BV_SEMANTIC_DIM); provider BV_SEMANTIC_EMBEDDER default hash; ~60 LOC.
+- Vector index .bvvi format byte-compatible: magic 'BVVI' v1 LE at .bv/semantic/index-<provider>-<dim>.bvvi; sync batch 32; sha256 content-hash skip.
+- Hybrid scorer weights presets EXACT: default .40/.20/.15/.10/.10/.05 (text/pagerank/status/impact/priority/recency); bug-hunting .30/.15/.15/.15/.20/.05; sprint-planning .30/.20/.25/.15/.05/.05; impact-first .25/.30/.10/.20/.10/.05; text-only 1.0 rest 0.
+- Normalizers: status open=1.0->tombstone=0.0 linear; priority P0=1.0->P4=0.2; recency exp(-days/30). Short-query boost .35; text floor .55; candidate floors 200/300.
+- Env: BV_SEARCH_MODE text|hybrid, BV_SEARCH_PRESET, BV_SEARCH_WEIGHTS JSON override.
+- robot-search output schema: query/provider/model/dim/index_path/index/loaded/limit/mode/preset/weights/results[{issue_id,score,text_score,component_scores}].
+- FTS5 lives in export only (already done Phase 5a).
+- TUI semantic mode wiring: ctrl+s toggle semantic/fuzzy; H hybrid toggle; alt+h preset cycle; SemanticIndexReadyMsg/SemanticFilterResultMsg equivalents via crossbeam.
+
+ACCEPTANCE: --robot-search results identical to Go on fixture corpora incl. short intent-heavy queries and long descriptive queries.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-tui-m5-chrome-93o`
+
+---
+
+<a id="beads-viewer-rust-p7-support-zwn-phase-7b-workspace-multi-repo-drift-baseline-support-systems"></a>
+
+## 📋 beads_viewer_rust-p7-support-zwn Phase 7b: workspace multi-repo + drift/baseline + support systems
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:18 |
+| **Updated** | 2026-08-22 22:18 |
+| **Closed** | 2026-08-22 22:18 |
+
+### Description
+
+Plan §4.9 remaining support systems. NOTE: drift/baseline MOVED OUT to dedicated bead p3d-drift (robot contract gates at CP-D).
+
+WORKSPACE multi-repo: .bv/workspace.yaml {name?,repos:[{name?,path REQUIRED,prefix? default lower(name)+'-',beads_path? default .beads,enabled? default true}],discovery{enabled false,patterns ['*','packages/*','apps/*','services/*','libs/*','modules/*'],exclude [node_modules,vendor,.git,dist,build,target],max_depth 2},defaults}; validate >=1 repo or discovery.enabled + unique lowercase prefixes; config found by walking up to root; parallel load limit 32 (scoped threads); per-repo failures tolerated unless ALL fail; namespacing idempotent QualifyID prefix+local; dep qualification local-if-no-known-prefix else leave; comments qualified too; IDResolver Resolve/Qualify/RepoForPrefix/DisplayID semantics; --repo filter case-insensitive accepting -:_ separators plus source_repo match; --as-of overrides --workspace with warning.
+
+REMAINING SUPPORT: agents blurb mgmt flags (add/remove/update/check/dry-run/force over AGENTS.md>CLAUDE.md marker bv-agent-instructions-v3 atomic writes; prefs ~/.config/bv/agent-prompts/<sha256(path)[:8]>.json); updater (GitHub releases/latest GET 2s timeout ureq UA header 403/429 silent semver-with-prerelease+dev-labels compare asset bv_<os>_<arch> checksums.txt sha256 download cap 512MB extract->smoke->backup-rename->install chmod0755 rollback from .backup; TUI star indicator async); cass detector (health unknown/not-installed/needs-index/healthy cache 5min TTL 2s timeout) + searcher wrap cass search --robot + V-key modal support hooks; instance-lock CLI-side enforcement.
+
+ACCEPTANCE: workspace fixtures load identical to Go; updater dry-run matches Go behavior with stubbed network.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p5-export-core-vkp`
+
+---
+
+<a id="beads-viewer-rust-p8-release-yta-phase-8-hardening-sweep-packaging-v0-21-0-rust-release-cp-f"></a>
+
+## 📋 beads_viewer_rust-p8-release-yta Phase 8: hardening sweep + packaging + v0.21.0-rust release (CP-F)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:18 |
+| **Updated** | 2026-08-22 22:30 |
+| **Closed** | 2026-08-22 22:30 |
+
+### Description
+
+Plan §6 Phase 8 (1.5 weeks). Gate = CP-F. FORT v1 COMPLETE.
+
+HARDENING:
+- Full differential sweep: all ~41 commands x all fixture classes x json+toon formats.
+- Proptest burn (graph invariants overnight); cargo-fuzz targets overnight.
+- race/loom where concurrency exists (worker channels, cache locking).
+- Cross-compile matrix green: mac-arm64, linux-x86_64/arm64, windows (bundled sqlite cc strategy per Phase 0 verdict).
+
+PACKAGING:
+- brew tap formula (dicklesworthstone-style tap or own), scoop manifest, install.sh + install.ps1 ports, nix flake, cargo-dist for release automation.
+- Binary name decision: bvr during beta; v0.21.0-rust may ship as bv if drop-in confirmed.
+
+DOCS: README port (English, notes Rust origin + deviations: cache format rename, tru removal, dead-code trims); CHANGELOG documenting parity scope; docs/env.md final; migration notes for agent ecosystems (nothing to change — contracts identical).
+
+RELEASE CHECKLIST (=CP-F): all checkpoints CP-A..CP-E tagged; DoD v1 list from plan §9 fully checked; git tag v0.21.0-rust; release artifacts + checksums published.
+
+POST-RELEASE: activate upstream sync policy §3.2 (monthly audit cadence).
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-p3d-drift-u4l`
+- ⛔ **blocks**: `beads_viewer_rust-p3e-corr-dispatch-y4o`
+- ⛔ **blocks**: `beads_viewer_rust-p7-search-mc8`
+- ⛔ **blocks**: `beads_viewer_rust-p7-support-zwn`
+- ⛔ **blocks**: `beads_viewer_rust-xcut-testing-4a7`
+
+---
+
+<a id="beads-viewer-rust-p9-rust-opt-6qj-phase-9-bv-graph-core-extraction-rust-optimization-fort-v2-start"></a>
+
+## 📋 beads_viewer_rust-p9-rust-opt-6qj Phase 9: bv-graph-core extraction + Rust optimization (FORT v2 start)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:19 |
+| **Updated** | 2026-08-22 23:12 |
+| **Closed** | 2026-08-22 23:12 |
+
+### Description
+
+Plan §6 Phase 9 — begins ONLY after CP-F. Every refactor before this point was deliberately forbidden (Go oracle as safety net).
+
+BV-GRAPH-CORE EXTRACTION: split crates/bv-graph-wasm into pure-Rust bv-graph-core (no wasm-bindgen) + thin wasm wrapper crate re-exporting for the browser viewer; viewer regression suite must pass (static bundle what-if animation, cycle detection, path finding). From this point upstream wasm changes require manual merge instead of verbatim re-copy.
+
+RUST OPTIMIZATION ITEMS (benchmark-gated each, §6.2 budget):
+- mmap/binary caches replacing JSON cache v3.
+- Zero-copy loader (bytes::Buf / memchr over mmap) keeping byte-parity semantics.
+- Rayon tuning for parallel parse + metric computation.
+- Newtype IDs (IssueId, LabelRef) behind unchanged serde shapes; SmallVec metadata where hot.
+- Leaner error model post-freeze (thiserror refinements allowed now).
+- Delete Go-shaped shims (§8 item 8).
+- Fast-mode tier groundwork: parallel loader + arena allocation paths behind opt-in env, compatibility mode remains default.
+
+RULE: every step keeps v1 goldens green; perf regressions >10% block.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p8-release-yta`
+
+---
+
+<a id="beads-viewer-rust-phase0-scaffold-xbe-phase-0-workspace-scaffolding-golden-capture-infrastructure"></a>
+
+## 📋 beads_viewer_rust-phase0-scaffold-xbe Phase 0: Workspace scaffolding + golden capture infrastructure
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:09 |
+| **Updated** | 2026-08-22 14:11 |
+| **Closed** | 2026-08-22 14:11 |
+
+### Description
+
+Plan §6 Phase 0 (1 week). Parent epic: fort-epic.
+
+SCOPE:
+1. Cargo workspace setup per plan §2 tree: crates bv-core, bv-analysis, bv-correlation, bv-search, bv-export, bv-robot, bv-tui, bv-graph-wasm (already copied verbatim), binary crate bv. Root [workspace] Cargo.toml with shared profile (opt-level, lto for release).
+2. CI skeleton: cargo fmt/clippy/test jobs + differential job (installs Go toolchain, builds Go bv from frozen commit 9ace029) + cross-compile matrix mac-arm64/linux-x86_64+arm64/windows.
+3. Golden capture scripts: build Go binary from frozen commit; run full robot-command matrix across fixture classes; freeze outputs into golden/ (incl. golden/toon/ corpus).
+4. Fixture generators: synthetic JSONL graphs — small chain, medium tree, large cyclic ~600 nodes, XL ~2500 nodes; edge cases: empty file, all-non-issue records, BOM prefix, malformed mix, bd/Dolt stub.
+5. Smoke-test rusqlite bundled cross-compilation NOW (cargo-zigbuild or cross-rs) — answers risk #3 early.
+
+WHY BEFORE EVERYTHING: goldens are the acceptance oracle; fixtures unblock every differential gate; cross-compile verdict determines CI runner strategy.
+
+ACCEPTANCE:
+- cargo test green on clean shell
+- golden/ populated and committed
+- cross-compile matrix verdict documented in docs/
+
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+
+---
+
+<a id="beads-viewer-rust-postrel-sync-64z-post-release-activate-go-upstream-sync-policy-monthly-audit-cadence"></a>
+
+## 🧹 beads_viewer_rust-postrel-sync-64z Post-release: activate Go upstream sync policy (monthly audit cadence)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 🧹 chore |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 11:39 |
+| **Updated** | 2026-08-22 22:56 |
+| **Closed** | 2026-08-22 22:56 |
+
+### Description
+
+Operationalizes plan §3.2 upstream sync policy — currently only prose in the plan.
+
+AFTER v0.21.0-rust ships (CP-F):
+1. Monthly audit: diff Go upstream since last audited SHA; categorize changes: bugfixes in algorithms/loader (cherry-pick candidates) / new features (backlog beads) / breaking robot-schema changes (escalate — contract decision needed).
+2. Cherry-pick compatible fixes -> regenerate affected goldens from NEW Go binary -> differential must pass before merging.
+3. crates/bv-graph-wasm: re-copy + re-diff when its upstream counterpart moves (cheap verbatim path).
+4. Record decisions in CHANGELOG under 'Upstream sync <month>'.
+5. Quarterly: reassess whether to cut a new parity tag (v0.22-rust...) or fold fixes into v2 track.
+
+WHY A BEAD: without an owner+cadence this silently rots and goldens drift from reality — the exact failure mode §3.2 exists to prevent.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-p8-release-yta`
+
+---
+
+<a id="beads-viewer-rust-tui-flow-attention-v4s-tui-implement-flow-matrix-and-attention-views"></a>
+
+## 📋 beads_viewer_rust-tui-flow-attention-v4s TUI: implement Flow-Matrix and Attention views
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-04 12:00 |
+| **Closed** | 2026-09-04 12:00 |
+| **Labels** | tui |
+
+### Description
+
+Port Go pkg/ui/flow_matrix.go + attention.go. Backing data now exists in bv_analysis::label_health (cross_label_flow, attention_scores) — just needs TUI rendering.
+
+---
+
+<a id="beads-viewer-rust-tui-graph-view-w3e-tui-implement-graph-view-dependency-graph-visualization"></a>
+
+## 📋 beads_viewer_rust-tui-graph-view-w3e TUI: implement Graph view (dependency graph visualization)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-04 12:00 |
+| **Closed** | 2026-09-04 12:00 |
+| **Labels** | tui |
+
+### Description
+
+Port Go pkg/ui/graph.go (1023 lines) to a real TUI render. Currently ViewMode::Graph enum variant renders nothing (falls through to List). Depends on bv_graph_core data.
+
+---
+
+<a id="beads-viewer-rust-tui-history-view-p8n-tui-implement-history-time-travel-view"></a>
+
+## 📋 beads_viewer_rust-tui-history-view-p8n TUI: implement History/time-travel view
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-25 19:01 |
+| **Closed** | 2026-09-25 19:01 |
+| **Labels** | tui |
+
+### Description
+
+Port Go pkg/ui/history.go (3671 lines) — bead timeline with commit correlation overlay. Currently ViewMode::TimeTravel enum variant renders nothing.
+
+---
+
+<a id="beads-viewer-rust-tui-m1-core-z9q-tui-m1-core-journey-open-load-list-detail-filter-quit-weeks-1-2"></a>
+
+## 📋 beads_viewer_rust-tui-m1-core-z9q TUI-M1: core journey — open/load/list/detail/filter/quit (weeks 1-2)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:16 |
+| **Updated** | 2026-08-22 20:51 |
+| **Closed** | 2026-08-22 20:51 |
+
+### Description
+
+Plan §6 Phase 6 TUI-M1 (weeks 1-2). Port by USER JOURNEY not component. Goal: usable viewer after 2 weeks — the anti-death-spiral design.
+
+JOURNEY: open app -> load repo -> list issues -> detail pane -> filter -> sort -> quit.
+
+IMPLEMENTATION:
+- App shell: ratatui event loop mirroring Elm architecture (update(msg)->Model, view()->frame); crossterm backend.
+- Theme: Dracula palette adaptive light/dark; semantic colors Theme.Open #50FA7B etc.; precedence --theme > BV_THEME > ~/.config/bv/config.yaml theme key > terminal-colorsaurus autodetect (default dark on probe failure).
+- KeyRegistry: focus-keyed binding map HashMap<Focus, Vec<KeyBinding{key,desc,category,handler}>> + category metadata for help generation.
+- List view: virtualized windowing (render only visible slice), 5 sort modes cycled with s (Default priority-asc/created-desc, CreatedAsc, CreatedDesc, Priority, Updated) with stable secondary sort by ID; status-bar sort badge.
+- Filter modes: o open, c closed, r ready(unblocked), a all; / fuzzy search over flattened vector (id+title+status+type+priority+assignee+labels) via nucleo-matcher; n/N next/prev match.
+- Detail viewport: markdown renderer (tui-markdown or pulldown-cmark custom spans); lazy instantiated reused renderer.
+- Split layout: SplitViewThreshold=100 (>100 splits list 40%/detail 60%, else single column mobile); applyContentSizing single sizing path (body=h-1; split availWidth=contentWidth-8 borders+padding; ratio adjustable </> +-0.05 clamp [0.2,0.8]); WideViewThreshold=140 ultra-wide extra columns (sparklines/labels).
+- Quit flows: q/Esc semantics incl quit-confirm when unfiltered at list.
+- Focus enum foundation: full 22-value focus enum defined up front even if only list/detail active.
+
+ACCEPTANCE (interim TUI-M1 gate): UX golden checklist items 1-15 pass on this repo (open->same default screen; j/k movement; /search flow; enter detail info; o/c/r/a filters; s sort cycle; q quit confirm).
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-p3-dispatch-3lv`
+
+---
+
+<a id="beads-viewer-rust-tui-m2-structural-gp6-tui-m2-structural-views-board-tree-graph-actionable-label-dashboard-weeks-3-4"></a>
+
+## 📋 beads_viewer_rust-tui-m2-structural-gp6 TUI-M2: structural views — board/tree/graph/actionable/label-dashboard (weeks 3-4)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:16 |
+| **Updated** | 2026-08-22 21:10 |
+| **Closed** | 2026-08-22 21:10 |
+
+### Description
+
+Plan §6 Phase 6 TUI-M2 (weeks 3-4).
+
+BOARD (b toggle): swimlanes 3 modes cycled s — Status(Open|In Progress|Blocked|Closed)/Priority(P0-P4 groups)/Type(Bug|Feature|Task|Epic); empty columns auto-collapse (e toggles); 4-line cards (type icon+priority+id+age-color / title / assignee+blocked-count+blocks-count+label-count / label names); border colors red=blocked yellow=high-impact(green-ready default); column headers with total+critical+blocked counts; h/l column nav, j/k within column, gg/G top/bottom, 0/$ first/last item, H/L first/last column, 1-4 jump column, ctrl+d/u page, d inline card expansion (full description+blockers+dependents+labels+comments preview), Tab side detail panel; search matches purple current/blue others.
+
+TREE (E toggle): parent-child ONLY hierarchy (DepParentChild edges; blocking ignored); root detection (no parent or parent absent from dataset -> root); cycle-safe DFS (cyclic nodes rendered without recursion); children sorted priority asc -> type order epic>feature>bug>task -> created desc; orphan references become roots not dropped; unlimited depth. Keys: j/k move, g/G jump, ctrl+d/u half-page, Enter/Space toggle expand, l/-> expand-or-first-child, h/<- collapse-or-parent, o expand all, O collapse all.
+
+GRAPH VIEW (g toggle; single-press in board/tree only after 200ms combo timeout since gg=jump-top): 2D rune-grid canvas ported directly (ratatui Canvas too low-level for this) on ratatui Buffer; manhattan orthogonal routing with Unicode corners; topological layering by impact depth so deps flow downward; viewport clipping + smooth pan h/j/k/l, H/L scroll, ctrl+d/u page; <80 cols visual-only mode.
+
+ACTIONABLE PLAN (a toggle): items = open/in_progress with zero open blockers grouped into union-find tracks; each shows unblocks count; highest-impact summary (max unblocks then priority then ID determinism); enter focuses bead in detail.
+
+LABEL DASHBOARD ([ or F3): per-label health table health 0-100 = 1-(w_blocked .4*blocked/open + w_stale .3*stale/open + w_velocity .3*(1-velocity)); levels critical<=0.4 warning<=0.7 healthy; velocity issues/week; drilldown to filtered issue list.
+
+ACCEPTANCE: UX checklist items 16-28; debug-render goldens for board at 180x50 structurally equal.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-tui-m1-core-z9q`
+
+---
+
+<a id="beads-viewer-rust-tui-m3-analytics-h0i-tui-m3-analytics-insights-flow-matrix-attention-alerts-history-time-travel-pickers-weeks-5-6"></a>
+
+## 📋 beads_viewer_rust-tui-m3-analytics-h0i TUI-M3: analytics — insights/flow-matrix/attention/alerts/history/time-travel/pickers (weeks 5-6)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:16 |
+| **Updated** | 2026-08-22 21:33 |
+| **Closed** | 2026-08-22 21:33 |
+
+### Description
+
+Plan §6 Phase 6 TUI-M3 (weeks 5-6).
+
+INSIGHTS (i): 6 panels — Bottlenecks(betweenness)/Keystones(critical path)/Influencers(eigenvector)/Hubs(HITS hub)/Authorities(HITS auth)/Cycles(Tarjan); Tab/Shift+Tab panel cycle, j/k within, Enter focus bead in main view, e explanations toggle, x calculation-proof toggle (shows contributing beads + values), m heatmap overlay; heatmap ramp 0-.2 gray .2-.5 blue .5-.8 purple .8-1 pink.
+
+FLOW MATRIX (f): cross-label dependency analysis; left labels list with bottleneck score bars (outgoing/(total cross)*criticality; red>=0.7 yellow>=0.4 green), right detail pane (outgoing/incoming per-label issue counts, critical-path flag); Tab focus switch, Enter drilldown into specific cross-label issues.
+
+ATTENTION VIEW (] or F4): attention = pagerank_avg*staleness*block_impact/(velocity+eps) ranked table with reason strings.
+
+ALERTS PANEL (! only when active non-dismissed alerts): types stale_issue warning / blocking_cascade critical / priority_mismatch warning / cycle_introduced critical / scope_creep info; j/k navigate enter jump-to-issue d dismiss esc close.
+
+HISTORY (h) 3-pane responsive: <100 single list+inline details; 100-160 two panes list+detail; >160 three panes beads|timeline|commit-detail. Bead Mode default (beads grouped with correlated commits) v toggles Git Mode (chronological commits w/ beads). f file-centric drill-down tree grouped by directory showing change counts + bead ids. t timeline density panel (commits/day magnitude glyphs, selected-bead highlights). c confidence threshold cycle 0->0.3->0.5->0.7. J/K secondary pane movement, y copy SHA, o open commit browser, V cass sessions (if present).
+
+TIME-TRAVEL: t custom revision prompt (textinput; examples HEAD~5/main/v1.0.0/date/sha), T quick HEAD~5; diff badges [NEW][CLOSED][MODIFIED][REOPENED]; footer summary +3 new 2 closed ~1 modified health arrow; n/N jump changed issues; t again exits. Uses bv-core GitLoader snapshot diff (SnapshotDiff port from pkg/analysis/diff.go).
+
+PICKERS: ' recipe picker (11 builtins + project/user recipes), w repo picker (workspace mode), l label picker fuzzy input -> label:<x> filter.
+
+ACCEPTANCE: UX checklist items 29-40; history pane layout breakpoints verified at widths 80/120/180.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-p3d-drift-u4l`
+- ⛔ **blocks**: `beads_viewer_rust-p4-surfaces-hul`
+- ⛔ **blocks**: `beads_viewer_rust-tui-m2-structural-gp6`
+
+---
+
+<a id="beads-viewer-rust-tui-m4-worker-xgu-tui-m4-background-worker-live-reload-infrastructure-week-7"></a>
+
+## 📋 beads_viewer_rust-tui-m4-worker-xgu TUI-M4: background worker + live reload infrastructure (week 7)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:16 |
+| **Updated** | 2026-08-22 21:47 |
+| **Closed** | 2026-08-22 21:47 |
+
+### Description
+
+Plan §6 Phase 6 TUI-M4 (week 7). Infrastructure week — behavioral parity with Go background mode.
+
+WORKER THREAD DESIGN (std::thread + crossbeam-channel replacing goroutine+chan):
+- Constants (env-overridable): debounce 200ms BV_DEBOUNCE_MS; message buffer 8 BV_CHANNEL_BUFFER; heartbeat 5s BV_HEARTBEAT_INTERVAL_S; watchdog 10s BV_WATCHDOG_INTERVAL_S; heartbeat-timeout 30s; freshness warn 30s BV_FRESHNESS_WARN_S / stale 120s BV_FRESHNESS_STALE_S; worker poll tick 120ms driving spinner; idle GC enabled.
+- Pipeline: file event -> debounce -> load+validate -> Phase1 metrics sync in worker -> Phase2 async per-metric -> immutable DataSnapshot assembled -> ArcSwap pointer-swap to UI.
+- Messages: SnapshotReadyMsg{snapshot,file_change_at,sent_at,version,queue_depth,coalesce_count} | SnapshotErrorMsg{err,recoverable} | Phase2UpdateMsg{data_hash}.
+- Stale-drop: Phase2UpdateMsg with data_hash != current snapshot dropped.
+- Snapshot swap protocol: capture selected IDs (list+board), clear attention overlay, exit time-travel, O(1) swap, return old pooled allocations, reset caches (label health/attention/drilldown/priority hints), recompute alerts + reset dismissals, semantic cache reset + optional hybrid rebuild, update sub-views preserving selection/recipe (applyRecipe vs direct ListItems when RecipeName+Hash match).
+- Self-heal watchdog: repeated error phases shown as 'bg <phase> (Nx)'; watchdog recovery counter 'recovered xN'; unresponsive detection 'worker unresponsive'.
+- Status indicators: fresh-age warning at 30s '⚠ 45s ago'; STALE at 120s; spinner frames while busy.
+- Live reload: notify watcher watching FILE'S DIRECTORY with basename filter (atomic-rename reliability); remote-FS detect -> PollWatcher fallback (BV_FORCE_POLLING/BV_FORCE_POLL force); poll interval 2s comparing mtime+size+existence.
+- ctrl+r/F5 force refresh 1s-throttled.
+
+ACCEPTANCE: edit .beads/issues.jsonl externally -> list updates without restart <1s; kill -STOP worker -> watchdog indicators appear then recover on SIGCONT.
+
+### Dependencies
+
+- ⛔ **blocks**: `beads_viewer_rust-tui-m3-analytics-h0i`
+
+---
+
+<a id="beads-viewer-rust-tui-m5-chrome-93o-tui-m5-chrome-polish-buffer-tutorial-help-sidebar-modals-sprint-mouse-week-8"></a>
+
+## 📋 beads_viewer_rust-tui-m5-chrome-93o TUI-M5: chrome + polish buffer — tutorial/help/sidebar/modals/sprint/mouse (week 8)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:16 |
+| **Updated** | 2026-08-22 22:04 |
+| **Closed** | 2026-08-22 22:04 |
+
+### Description
+
+Plan §6 Phase 6 TUI-M5 (week 8). Chrome + polish buffer — the ONLY polish window; hard cap.
+
+- TUTORIAL (` backtick): 30 pages content moved to include_str! markdown files (Introduction 4/Core Concepts 5/Views 8/Workflows 5/Advanced 7/Reference 1); progress tracking persisted across sessions (~/.config/bv); component renderer (Section/Paragraph/KeyTable/Tip/Warning/Code/Bullet/Tree/StatusFlow/InfoBox); h/l or arrows page nav, t TOC, g/G first/last, q/Esc close; context-sensitive filtering by current view.
+- HELP OVERLAY (? or F1): compact shortcuts for CURRENT view from KeyRegistry categories; Space jumps into tutorial; focusBeforeHelp restore on close.
+- SHORTCUTS SIDEBAR (; or F2): persistent right panel width 34 (+2 gap), registry-driven context-filtered sections (Navigation/Filters/Views per focus); ctrl+j/k scrolls sidebar.
+- MODALS: cass session preview (V key; health detection unknown/not-installed/needs-index/healthy cached 5min TTL 2s timeout; graceful absence — feature hidden not erroring); self-update modal (U key; progress/completion messages); agent-prompt modal (AGENTS.md blurb injection accept/decline/never-ask; marker v3 recognition of Go-written blurbs; prefs ~/.config/bv/agent-prompts/<sha256(path)[:8]>.json).
+- SPRINT DASHBOARD (P): Go half-wired it via footer only — we port FULLY: burndown chart (scope-aware ideal line recalc on mid-sprint additions), scope changes log, at-risk items (blocked >2d / no activity >4d / P0P1 blocked).
+- MOUSE: wheel scroll per-focus; left-click panel focus + row select via shared geometry fn listChromeLines() inversion (drags and out-of-range ignored).
+- COMBO KEYS: gg/G with 200ms pendingComboKey state (pendingComboFocus prevents cross-view dispatch).
+- POLISH BUFFER: resize edge cases all breakpoints; debug-render goldens regenerated; keyboard-map parity audit vs README §Keyboard Control Map EVERY key; perf pass render 10k issues smooth scroll.
+- Instance lock integration: .beads/.bv.lock O_EXCL LockInfo{pid,started_at,hostname,owner_id} stale takeover signal-0 liveness check release-only-if-owner.
+
+ACCEPTANCE (=CP-E): full UX golden checklist 40 items pass on this repo; live reload works; debug-render snapshots structurally equal; every README-documented key functions.
+
+### Dependencies
+
+- 🔗 **parent-child**: `beads_viewer_rust-fort-epic-u31`
+- ⛔ **blocks**: `beads_viewer_rust-tui-m4-worker-xgu`
+
+---
+
+<a id="beads-viewer-rust-tui-pickers-modals-j5t-tui-implement-remaining-pickers-modals-label-recipe-repo-picker-search-velocity-update-modal"></a>
+
+## 📋 beads_viewer_rust-tui-pickers-modals-j5t TUI: implement remaining pickers/modals (label/recipe/repo picker, search, velocity, update modal)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-28 09:16 |
+| **Closed** | 2026-09-28 09:16 |
+| **Labels** | tui |
+
+### Description
+
+Long tail of smaller Go pkg/ui files: label_picker.go, recipe_picker.go, repo_picker.go, semantic_search.go, velocity_comparison.go, update_modal.go, agent_prompt_modal.go.
+
+### Comments
+
+> **tranquangdang21** (2026-09-25)
+>
+> PARTIAL — pickers and modals landed; velocity_comparison is a different view, not a partial port. Closed: label picker fuzzyScore + count-desc sort and chrome; repo picker promoted from single-select to Go's checkbox multi-select; recipe picker now reads the loader instead of a hardcoded built-in list; update modal rewritten from a 66-line static notice into a 7-state machine with confirm/cancel, progress and an install thread (std::thread + channel, no tokio); agent prompt modal wrap-around nav. Caught a real bug in the process: git_remote_to_web_url's strip_suffix().unwrap_or(path) returned the PRE-trim value, so a trailing-slash remote produced a 404 link on every 'o' press. NOT CLOSED — velocity_comparison: Go shows a per-LABEL 4-week closed-count table with trend classification and a Unicode sparkline; Rust shows a per-SPRINT planned/done/velocity-percentage table. These are different questions, not a partial port. It is also blocked upstream: Go's analysis.ComputeAllHistoricalVelocity / HistoricalVelocity / GetVelocityTrend (pkg/analysis/label_health.go) have NO Rust counterpart, and label_health.rs is a bv-analysis concern. Left alone rather than half-ported into a wrong shape. Also open: bv-tui/src/lib.rs call sites for the new pickers, since lib.rs was owned by a concurrent agent.
+
+---
+
+<a id="beads-viewer-rust-tui-sprint-tutorial-k6r-tui-implement-sprint-view-real-tutorial"></a>
+
+## 📋 beads_viewer_rust-tui-sprint-tutorial-k6r TUI: implement Sprint view + real Tutorial
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ☕ Low (P3) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-09-04 11:00 |
+| **Updated** | 2026-09-04 12:00 |
+| **Closed** | 2026-09-04 12:00 |
+| **Labels** | tui |
+
+### Description
+
+Sprint view needs sprint data now available in bv_core::sprint. Tutorial currently fakes as help overlay — needs real multi-step guided flow (Go pkg/ui/tutorial.go 2562 lines).
+
+---
+
+<a id="beads-viewer-rust-xcut-testing-4a7-cross-cutting-differential-harness-ux-golden-checklist-maintenance"></a>
+
+## 📋 beads_viewer_rust-xcut-testing-4a7 Cross-cutting: differential harness + UX golden checklist maintenance
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | ⚡ High (P1) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-08-22 08:21 |
+| **Updated** | 2026-08-22 20:37 |
+| **Closed** | 2026-08-22 20:37 |
+
+### Description
+
+Plan §5 — lives across ALL phases; owned by integration owner (Main session).
+
+DIFFERENTIAL HARNESS:
+- Runs Go bv (frozen 9ace029 build) and Rust bvr side-by-side per command x fixture-class x format.
+- jq-normalize: generated_at, elapsed/ms timings, cache-hit booleans, freshness fields.
+- Byte-equal assertion otherwise; exit codes compared; stderr suppressed in robot mode both sides.
+- Machine-readable report -> gates checkpoint tags.
+
+UX GOLDEN CHECKLIST (TUI cannot be JSON-diffed): ~40 manual items maintained in tests/ux_checklist.md; executed at each TUI milestone (M1 items 1-15, M2 16-28, M3-M5 29-40). Examples: open->same default screen; j/k movement; / search flow; enter detail info; view switches b/g/E/i navigation model; reload behavior; quit confirmations.
+
+DEBUG-RENDER GOLDENS: insights/board rendered to string at fixed 180x50; structurally-diffed (color-insensitive).
+
+GOLDEN HYGIENE: golden/ is read-only shared; only owner capture script writes. Upstream sync policy §3.2 governs regeneration after CP-F.
+
+FUZZ + PROPTEST cadence: loader fuzz targets nightly from Phase 1; graph proptest burn each hardening phase.
+
+---
+
+<a id="beads-viewer-rust-api-freeze-2fx-dependency-tree-rendering-for-left-pane-d-toggle"></a>
+
+## 📋 beads_viewer_rust-api-freeze-2fx Dependency-tree rendering for left pane (D toggle)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-10-14 03:10 |
+| **Updated** | 2026-10-14 03:11 |
+| **Closed** | 2026-10-14 03:11 |
+
+### Description
+
+Render left list pane as dependency tree (parent-child + blocking deps, depth cap 3) with D toggle; flat stays default for Go parity
+
+---
+
+<a id="beads-viewer-rust-api-freeze-9tv-tree-mode-navigation-fixes-cursor-dedup"></a>
+
+## 📋 beads_viewer_rust-api-freeze-9tv Tree-mode navigation fixes (cursor + dedup)
+
+| Property | Value |
+|----------|-------|
+| **Type** | 📋 task |
+| **Priority** | 🔹 Medium (P2) |
+| **Status** | ⚫ closed |
+| **Created** | 2026-10-14 04:12 |
+| **Updated** | 2026-10-14 04:13 |
+| **Closed** | 2026-10-14 04:13 |
+
+### Description
+
+Fixed j/k jumping in D mode by walking the tree not flat order (32f548f); dedup diamonds to one row per issue with also-under suffix (0535742). Verified: 261 lib + 14 list-window tests green.
+
+---
+
