@@ -115,6 +115,86 @@ pub fn load_issues_from_bd_export(
         .map_err(|e| BdExportError::Parse(e.to_string()))
 }
 
+/// Go `loader.exportBDIssuesJSONL` (loader.go:512-560): run
+/// `bd export -o <issuesPath>` inside the workspace so the compatibility
+/// JSONL materialises on disk, exactly like Go's
+/// `PrepareBeadsDirForRead` refresh. `bd` resolves the workspace from
+/// `BEADS_DIR`, which is set to the absolute beads dir; `BEADS_DB` is
+/// stripped like Go's `withoutBeadsAuthorityEnv`.
+///
+/// Unlike [`load_issues_from_bd_export`] this WRITES the export file — it is
+/// only called on the bd/Dolt datasource path where Go does the same.
+pub fn export_bd_issues_jsonl(beads_dir: &Path, issues_path: &Path) -> Result<(), String> {
+    let exe = bd_executable().ok_or_else(|| "bd binary not found in PATH".to_string())?;
+    let abs_beads = std::fs::canonicalize(beads_dir).unwrap_or_else(|_| beads_dir.to_path_buf());
+    let abs_issues =
+        std::fs::canonicalize(issues_path).unwrap_or_else(|_| issues_path.to_path_buf());
+    let repo_root = abs_beads
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| abs_beads.clone());
+
+    let mut cmd = bd_command(&exe);
+    cmd.arg("export")
+        .arg("-o")
+        .arg(&abs_issues)
+        .current_dir(&repo_root)
+        .env("BEADS_DIR", &abs_beads);
+    // Go strips BEADS_DIR and BEADS_DB from the child env
+    // (`withoutBeadsAuthorityEnv`), then re-adds BEADS_DIR=absBeadsDir.
+    cmd.env_remove("BEADS_DB");
+    let out = cmd
+        .output()
+        .map_err(|e| format!("bd binary not found in PATH: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let msg = if msg.is_empty() {
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    } else {
+        msg
+    };
+    Err(if msg.is_empty() {
+        format!("bd export exited with {}", out.status)
+    } else {
+        msg
+    })
+}
+
+/// Build the base `bd` command, applying the Windows script-shim wrapping
+/// shared with [`spawn_bd_export`].
+#[cfg(windows)]
+fn bd_command(exe: &Path) -> std::process::Command {
+    let ext = exe
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "cmd" | "bat" => {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/c").arg(exe);
+            c
+        }
+        "ps1" => {
+            let mut c = std::process::Command::new("powershell");
+            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(exe);
+            c
+        }
+        _ => {
+            let mut c = std::process::Command::new(exe);
+            c
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn bd_command(exe: &Path) -> std::process::Command {
+    std::process::Command::new(exe)
+}
+
 /// Spawn `bd export --all`, returning raw stdout bytes.
 ///
 /// Polls rather than blocking on `wait`, so a `bd` that never exits is killed

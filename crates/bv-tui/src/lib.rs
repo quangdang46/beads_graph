@@ -1142,19 +1142,19 @@ impl App {
     /// or `BEADS_DIR`, so one pass per `App` is enough; `reload_from_disk`
     /// replaces the whole `App` and redoes it.
     ///
-    /// Best-effort: if discovery fails (e.g. no `.beads` dir, or the active
-    /// datasource is SQLite — out of scope here, matching Go's own
-    /// `.beads/issues.jsonl`-specific watch target), watching is silently
-    /// disabled rather than surfaced as a startup error.
+    /// Best-effort: if discovery fails (e.g. no `.beads` dir), watching is
+    /// silently disabled rather than surfaced as a startup error. The watch
+    /// target is the datasource layer's freshness winner — `beads.db` when it
+    /// is newer than `issues.jsonl`, matching Go's `beadsPath =
+    /// singleSourceLoad.Source.Path` (cmd/bv/main.go:2744).
     fn refresh_watch_target(&mut self) {
         let cwd = std::env::current_dir().unwrap_or_default();
         self.watched_path = None;
         self.semantic_project_dir = None;
         if let Ok(dir) = bv_core::discovery::get_beads_dir(&cwd) {
             self.semantic_project_dir = Some(dir.parent().unwrap_or(&cwd).to_path_buf());
-            self.watched_path = bv_core::discovery::find_jsonl_path_with_warnings(&dir, |_| {})
-                .ok()
-                .flatten();
+            let repo = dir.parent().unwrap_or(&cwd);
+            self.watched_path = bv_core::datasource::freshest_source_path(&dir, repo);
         }
         self.watched_mtime = self
             .watched_path
@@ -4002,31 +4002,34 @@ impl App {
     /// Reload issues from disk (Go Ctrl+R refresh).
     pub fn reload_from_disk(&mut self) {
         let cwd = std::env::current_dir().unwrap_or_default();
-        match bv_core::discovery::load_issues_from_repo(&cwd) {
-            Ok((issues, _)) => {
-                // `App::new` resets session-scoped state; carry over what a
-                // reload must not clobber: terminal geometry (the next
-                // `handle_resize` may be seconds away), the resolved theme,
-                // the update notice, and the instance-lock PID.
-                let (width, height, split_view) = (self.width, self.height, self.split_view);
-                let theme = self.theme.clone();
-                let (update_tag, update_url) = (self.update_tag.clone(), self.update_url.clone());
-                let instance_pid = self.instance_pid;
-                let mut fresh = App::new(issues);
-                fresh.width = width;
-                fresh.height = height;
-                fresh.split_view = split_view;
-                fresh.theme = theme;
-                fresh.update_tag = update_tag;
-                fresh.update_url = update_url;
-                fresh.instance_pid = instance_pid;
-                *self = fresh;
-                self.status_msg = "Refreshed".to_string();
-            }
-            Err(e) => {
+        // Go's Ctrl+R reload goes through `datasource.LoadIssues` — the same
+        // freshness-selected source as startup (beads.db may beat issues.jsonl).
+        let (loaded, err) = bv_core::datasource::load_issues(&cwd);
+        let issues = match err {
+            Some(e) => {
                 self.status_msg = format!("Refresh failed: {e}");
+                return;
             }
-        }
+            None => loaded.issues,
+        };
+        // `App::new` resets session-scoped state; carry over what a
+        // reload must not clobber: terminal geometry (the next
+        // `handle_resize` may be seconds away), the resolved theme,
+        // the update notice, and the instance-lock PID.
+        let (width, height, split_view) = (self.width, self.height, self.split_view);
+        let theme = self.theme.clone();
+        let (update_tag, update_url) = (self.update_tag.clone(), self.update_url.clone());
+        let instance_pid = self.instance_pid;
+        let mut fresh = App::new(issues);
+        fresh.width = width;
+        fresh.height = height;
+        fresh.split_view = split_view;
+        fresh.theme = theme;
+        fresh.update_tag = update_tag;
+        fresh.update_url = update_url;
+        fresh.instance_pid = instance_pid;
+        *self = fresh;
+        self.status_msg = "Refreshed".to_string();
     }
 }
 

@@ -1543,19 +1543,37 @@ fn attach_report_origins(
     cwd: &std::path::Path,
     stats: bv_core::loader::ParseStats,
 ) {
-    let source_path = match bv_core::discovery::find_jsonl_path_with_warnings(
-        &bv_core::discovery::get_beads_dir(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
-        |_| {},
-    )
-    .ok()
-    .flatten()
+    // The datasource layer already resolved the source — it may be beads.db,
+    // not a JSONL — so re-running JSONL discovery here would name the wrong
+    // file. Fall back to discovery only when no tracked load ran.
+    let source_path = match SELECTED_SOURCE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|m| m.path.clone()))
+        .filter(|p| !p.is_empty())
     {
-        Some(path) => path.to_string_lossy().into_owned(),
-        None => return,
+        Some(p) => p,
+        None => match bv_core::discovery::find_jsonl_path_with_warnings(
+            &bv_core::discovery::get_beads_dir(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
+            |_| {},
+        )
+        .ok()
+        .flatten()
+        {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => return,
+        },
     };
     // Go marks the whole source read-only when the load was not clean, so no
     // issue in it may present a mutation command.
-    let complete = stats.errors == 0;
+    let selected = SELECTED_SOURCE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().cloned());
+    let complete = selected
+        .as_ref()
+        .map(|m| m.errors == 0 && m.read_errors == 0 && !m.stale && m.authority_warnings.is_empty())
+        .unwrap_or(stats.errors == 0);
     for issue in issues {
         let mut origin = bv_core::tracker::resolve_issue_origin(&source_path, &issue.id);
         if !complete && origin.read_only_reason.is_empty() {
@@ -2680,7 +2698,8 @@ fn main() -> ExitCode {
                             .collect()
                     })
                     .collect();
-            let export_views = triage_views(&export_triage, &visible, export_graph.edge_count());
+            let mut export_views =
+                triage_views(&export_triage, &visible, export_graph.edge_count());
 
             // Go main.go:3110-3113: `analyzer.AnalyzeAsync(ctx)` +
             // `WaitForPhase2()`. `NewAnalyzer` leaves `a.config` nil, so the
@@ -2787,13 +2806,16 @@ fn main() -> ExitCode {
             // plus the envelope. `Alerts` is `omitempty` and `ComputeTriageWithOptions`
             // never populates it, and both grouping fields are absent without
             // `--robot-triage-by-track` / `--by-label`.
-            let export_top_id = export_triage
-                .recommendations
-                .first()
-                .map(|r| r.id.as_str())
+            // Same `topPicks[0].ID` rule as `--robot-triage` (triage.go:685-688,
+            // 738): the first claimable pick, empty when none is claimable.
+            let export_top_id = export_views["top_picks"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
                 .unwrap_or("");
             let export_top_actions = actions_for_source(&loaded_source, export_top_id, true);
-            let export_commands = serde_json::json!({
+            let mut export_commands = serde_json::json!({
                 "claim_top": export_top_actions.claim.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
                 "show_top": export_top_actions.show.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
                 "list_ready": "",
@@ -2864,6 +2886,37 @@ fn main() -> ExitCode {
             // carries under `project_health`. It has no `version` field of its
             // own: the observed "v0.25.0" is purely the envelope overlay.
             write_data("project_health.json", &export_project_health);
+
+            // Go main.go:3123-3125 / :5868-5870 — `suppressUnprovenTriageClaims`
+            // on the export's triage when the source authority is not
+            // claim-safe: recommendations unclaimable with the inspect
+            // action, picks/wins emptied, blocker actionable flags cleared,
+            // and ONLY `claim_top` blanked (`show_top` keeps its route, as
+            // with --robot-triage).
+            if !source_claim_safe(&loaded_source) {
+                for rec in export_triage.recommendations.iter_mut() {
+                    suppress_recommendation_claims(rec);
+                }
+                if let Some(v) = export_views.get_mut("top_picks") {
+                    *v = serde_json::json!([]);
+                }
+                if let Some(v) = export_views.get_mut("quick_wins") {
+                    *v = serde_json::json!([]);
+                }
+                if let Some(blockers) = export_views
+                    .get_mut("blockers_to_clear")
+                    .and_then(|b| b.as_array_mut())
+                {
+                    for item in blockers.iter_mut() {
+                        if let Some(o) = item.as_object_mut() {
+                            o.insert("actionable".into(), serde_json::json!(false));
+                        }
+                    }
+                }
+                if let Some(o) = export_commands.as_object_mut() {
+                    o.insert("claim_top".into(), serde_json::json!(""));
+                }
+            }
 
             let export_triage_payload = serde_json::json!({
                 // Go's `TriageMeta.GeneratedAt` is a `time.Time` filled from
@@ -3535,6 +3588,19 @@ struct SourceMeta {
     /// the workspace path and the `--as-of` snapshot — where the caller's
     /// digest stands in.
     file_hash: String,
+    /// Go `LoadReport.ReadErrors` — failed related-record reads (SQLite
+    /// labels/dependencies/comments, unparsable timestamps).
+    read_errors: usize,
+    /// Go `LoadReport.Stale` — set when a preferred/rejected source preceded
+    /// the one that actually loaded.
+    stale: bool,
+    /// Go `LoadReport.WarningCount + len(AuthorityWarnings)`.
+    warning_count: usize,
+    /// Go `LoadReport.Warnings` — capped per-line skip reasons.
+    warnings: Vec<String>,
+    /// Go `LoadReport.AuthorityWarnings` — rejected-candidate and
+    /// preferred-source failure reasons, serialized ahead of `warnings`.
+    authority_warnings: Vec<String>,
 }
 
 impl SourceMeta {
@@ -3562,44 +3628,94 @@ impl SourceMeta {
 
 /// Build the Go `RobotSourceAuthority` for a single-source load
 /// (Go `newRobotSourceAuthority` over one `RobotSourceReport`).
-fn source_authority(meta: &SourceMeta, data_hash: &str) -> bv_robot::RobotSourceAuthority {
-    use bv_robot::{RobotSourceAuthority, RobotSourceReport};
-    let report = RobotSourceReport {
+/// Go `robotSourceFromLoad` + `newRobotSourceAuthority` for a single-source
+/// load. `status`/`error` mark a failed read; `data_hash` is the file digest
+/// Go publishes inside the report.
+fn source_report(
+    meta: &SourceMeta,
+    data_hash: &str,
+    status: &str,
+    error: &str,
+) -> bv_robot::RobotSourceReport {
+    use bv_robot::RobotSourceReport;
+    // Go: Warnings = AuthorityWarnings ++ Warnings, capped at 10, each
+    // rune-bounded (main.go:7290-7296).
+    let mut warnings: Vec<String> = meta
+        .authority_warnings
+        .iter()
+        .chain(meta.warnings.iter())
+        .take(10)
+        .map(|w| bv_robot::envelope::bounded_source_message(w))
+        .collect();
+    if warnings.is_empty() {
+        warnings = Vec::new();
+    }
+    RobotSourceReport {
         name: String::new(),
         repo_path: String::new(),
         source_path: meta.path.clone(),
-        source_kind: meta.kind.clone(),
-        status: "loaded".to_string(),
+        // Go maps an empty kind to "unknown" inside the authority reducer
+        // (main.go:7288-7290).
+        source_kind: if meta.kind.is_empty() {
+            "unknown".to_string()
+        } else {
+            meta.kind.clone()
+        },
+        status: status.to_string(),
         data_hash: data_hash.to_string(),
         valid: meta.valid,
         errors: meta.errors,
         skipped: meta.skipped,
-        read_errors: 0,
+        read_errors: meta.read_errors,
         visible: meta.visible(),
         tombstones: meta.tombstones,
-        stale: false,
-        warning_count: 0,
-        warnings: Vec::new(),
-        error: String::new(),
+        stale: meta.stale,
+        warning_count: meta.warning_count,
+        warnings,
+        // Go bounds every report's Error inside the authority reducer
+        // (main.go:7304).
+        error: bv_robot::envelope::bounded_source_message(error),
+    }
+}
+
+/// Go `newRobotSourceAuthority` over a single report (main.go:7282-7326):
+/// claim_safe requires zero errors/read_errors/stale on every loaded source,
+/// state degrades complete -> partial -> unknown.
+fn authority_from_report(report: bv_robot::RobotSourceReport) -> bv_robot::RobotSourceAuthority {
+    use bv_robot::RobotSourceAuthority;
+    let failed = report.status != "loaded" && report.status != "disabled";
+    let unsafe_source = report.errors > 0 || report.read_errors > 0 || report.stale || failed;
+    let loaded = usize::from(report.status == "loaded");
+    let claim_safe = loaded > 0 && !unsafe_source;
+    let state = if loaded == 0 {
+        "unknown"
+    } else if claim_safe {
+        "complete"
+    } else {
+        "partial"
     };
-    let loaded = usize::from(!meta.path.is_empty());
     RobotSourceAuthority {
-        state: "complete".to_string(),
-        claim_safe: meta.errors == 0,
-        readiness: "proven".to_string(),
+        state: state.to_string(),
+        claim_safe,
+        readiness: if claim_safe { "proven" } else { "provisional" }.to_string(),
         loaded,
-        failed: 0,
-        disabled: 0,
-        valid: meta.valid,
-        errors: meta.errors,
-        skipped: meta.skipped,
-        read_errors: 0,
-        visible: meta.visible(),
-        tombstones: meta.tombstones,
-        warning_count: 0,
+        failed: usize::from(failed),
+        disabled: usize::from(report.status == "disabled"),
+        valid: report.valid,
+        errors: report.errors,
+        skipped: report.skipped,
+        read_errors: report.read_errors,
+        visible: report.visible,
+        tombstones: report.tombstones,
+        warning_count: report.warning_count,
         sources: vec![report],
         error: String::new(),
     }
+}
+
+fn source_authority(meta: &SourceMeta, data_hash: &str) -> bv_robot::RobotSourceAuthority {
+    let report = source_report(meta, data_hash, "loaded", "");
+    authority_from_report(report)
 }
 
 /// Go `robotWorkspaceAuthority` (main.go:7374-7391) over a single *failed*
@@ -3678,8 +3794,20 @@ fn expected_jsonl_path() -> String {
 /// stderr after it (cmd/bv/main.go:2686-2688). The order matters to anything
 /// capturing both streams together, and stdout stays pure JSON either way.
 fn emit_unresolved_source(error: &str) -> ExitCode {
-    let path = expected_jsonl_path();
-    let authority = failed_source_authority(&path, error);
+    // Go's `robotSourceFromLoad(loaded, err)` (main.go:2687,3345): when the
+    // datasource layer recorded a failed `LoadResult`, the envelope names the
+    // last attempted source — its real path/kind, counts and warnings — rather
+    // than a guessed `.beads/issues.jsonl`.
+    let authority = match FAILED_SOURCE.lock().ok().and_then(|g| g.clone()) {
+        Some((meta, _)) => {
+            // Go leaves `SourceAuthority.Error` empty on the single-source
+            // path — the reason lives in `sources[0].error` (main.go:7282-7338
+            // never assigns it; only the workspace branch at :2688 does).
+            let report = source_report(&meta, meta.file_hash_or("empty"), "failed", error);
+            authority_from_report(report)
+        }
+        None => failed_source_authority(&expected_jsonl_path(), error),
+    };
     let ahash = bv_robot::authority_hash(&authority);
     let mut payload = serde_json::json!({
         "generated_at": jiff_now(),
@@ -3743,9 +3871,24 @@ fn as_of_load_failure(revision: &str, error: &str) -> String {
 /// True when `e` is the load failure Go answers with the degraded envelope
 /// rather than a bare error line.
 fn is_unresolved_source_error(e: &str) -> bool {
+    // In Go every `datasource.LoadIssues` error reaches
+    // `writeRobotLoadFailure` (cmd/bv/main.go:2732,3355) — the degraded
+    // envelope, not a bare error line. `record_failed_source` fires for every
+    // datasource failure, so a recorded failure is the precise signal; the
+    // substring list remains for errors raised before/around the load.
+    if FAILED_SOURCE.lock().map(|g| g.is_some()).unwrap_or(false) {
+        return true;
+    }
     e.contains("no beads JSONL or SQLite database found")
         || e.contains("failed to read beads directory")
         || e.contains("no beads JSONL found")
+        || e.contains("no beads JSONL file found")
+        || e.contains("no valid sources discovered")
+        || e.contains("bd/Dolt workspace detected")
+        || e.contains("no compatibility JSONL found")
+        || e.contains("no beads issues found at")
+        || e.contains("failed to open source")
+        || e.contains("unsupported source type")
 }
 
 /// Whether the beads source at `cwd` cannot be resolved.
@@ -3823,9 +3966,30 @@ fn load_issues_tracked(
     (Vec<bv_core::model::Issue>, bv_core::loader::ParseStats),
     bv_core::discovery::DiscoveryError,
 > {
-    let loaded = bv_core::discovery::load_issues_from_repo(cwd)?;
-    set_source_parse_facts(loaded.1.valid, loaded.1.tombstone_ids.clone());
-    Ok(loaded)
+    // Go routes every consumer through `datasource.LoadIssues` — the same
+    // freshness-selected SQLite/JSONL path the robot loader uses. Tracking the
+    // outcome here keeps `source_meta_for` honest for handlers that never saw
+    // a `LoadResult`.
+    let (loaded, err) = bv_core::datasource::load_issues(cwd);
+    let report = loaded.report.clone();
+    let source = source_meta_from_load(&loaded);
+    match err {
+        Some(e) => {
+            record_failed_source(&loaded, &e);
+            Err(bv_core::discovery::DiscoveryError::BeadsDirectory(e))
+        }
+        None => {
+            record_selected_source(source);
+            let stats = bv_core::loader::ParseStats {
+                valid: report.valid,
+                errors: report.errors,
+                skipped: report.skipped,
+                tombstone_ids: report.tombstone_ids.clone(),
+            };
+            set_source_parse_facts(stats.valid, stats.tombstone_ids.clone());
+            Ok((loaded.issues, stats))
+        }
+    }
 }
 
 fn set_source_parse_facts(valid: usize, tombstone_ids: Vec<String>) {
@@ -4208,6 +4372,14 @@ fn full_envelope_for(data_hash: &str, issues: &[bv_core::model::Issue]) -> serde
 /// Derive `SourceMeta` for the current working directory. Used by command
 /// handlers that build their envelope without an explicit cwd in scope.
 fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
+    // The datasource layer already resolved — and may have picked beads.db
+    // over issues.jsonl. Trust that record; only rediscover when no tracked
+    // load ran (pure-helper callers).
+    if let Ok(guard) = SELECTED_SOURCE.lock() {
+        if let Some(meta) = guard.as_ref() {
+            return meta.clone();
+        }
+    }
     // Go's `os.Getwd` semantics, so `source_path` reads the way the user typed
     // the path rather than its resolved form.
     let cwd = go_working_dir();
@@ -4237,6 +4409,7 @@ fn source_meta_for(issues: &[bv_core::model::Issue]) -> SourceMeta {
                 } else {
                     bv_core::data_hash::source_issues_hash(issues, &tombstone_ids)
                 },
+                ..Default::default()
             };
         }
     }
@@ -5216,6 +5389,7 @@ fn load_issues_auto_meta_raw(
             skipped: stats.skipped,
             tombstones: stats.tombstones(),
             file_hash: bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids),
+            ..Default::default()
         };
         return Ok((issues, hash, Some(resolved), source));
     }
@@ -5258,6 +5432,7 @@ fn load_issues_auto_meta_raw(
                         skipped: 0,
                         tombstones: 0,
                         file_hash: String::new(),
+                        ..Default::default()
                     },
                 ));
             }
@@ -5272,78 +5447,79 @@ fn load_issues_auto_meta_raw(
             Err(e) => eprintln!("workspace load failed, falling back: {e}"),
         }
     }
-    let beads_dir = bv_core::discovery::get_beads_dir(cwd).map_err(|e| e.to_string())?;
-    let jsonl = bv_core::discovery::find_jsonl_path_with_warnings(&beads_dir, |_| {})
-        .map_err(|e| e.to_string())?;
-
-    // A Dolt-backed `bd` workspace only materialises the JSONL on an explicit
-    // export (`export.auto` is off by default), so finding none is the normal
-    // state of a fresh `bd init`, not a failure. Ask `bd` for the same records
-    // rather than erroring. Reachable only when there is no JSONL at all, so no
-    // workspace that resolves today changes which source it reads.
-    if jsonl.is_none() && bv_core::tracker::is_bd_workspace(&beads_dir) {
-        if let Ok((issues, stats)) = bv_core::bdcli::load_issues_from_bd_export(cwd) {
-            if !issues.is_empty() {
-                let hash = bv_core::data_hash::compute_data_hash(&issues);
-                let file_hash =
-                    bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids);
-                set_source_parse_facts(stats.valid, stats.tombstone_ids.clone());
-                return Ok((
-                    issues,
-                    hash,
-                    None,
-                    SourceMeta {
-                        path: format!("bd export --all@{}", cwd.display()),
-                        envelope_path: String::new(),
-                        // `bd export` emits the same JSONL record stream the
-                        // local loader parses; the schema's source-kind enum
-                        // has no `bd_export`, and `jsonl_local` is the kind
-                        // whose payload shape this actually is.
-                        kind: "jsonl_local".to_string(),
-                        valid: stats.valid,
-                        errors: stats.errors,
-                        skipped: stats.skipped,
-                        tombstones: stats.tombstones(),
-                        file_hash,
-                    },
-                ));
-            }
-        }
+    // Go main.go:2725 — `datasource.LoadIssues("")`: BEADS_DB explicit file,
+    // bd/Dolt workspace, then smart freshness selection over beads.db +
+    // JSONL candidates with legacy-JSONL fallback. The `LoadResult` (and its
+    // report) is meaningful even on failure — it feeds the degraded
+    // authority envelope.
+    let (loaded, load_err) = bv_core::datasource::load_issues(std::path::Path::new(""));
+    if let Some(e) = &load_err {
+        record_failed_source(&loaded, e);
+        return Err(e.clone());
     }
-
-    let jsonl = jsonl.ok_or_else(|| format!("no beads JSONL found in {}", beads_dir.display()))?;
-    let (issues, stats) = {
-        let raw = std::fs::read_to_string(&jsonl)
-            .map_err(|e| format!("reading {}: {}", jsonl.display(), e))?;
-        let mut rdr = raw.as_bytes();
-        bv_core::loader::parse_issues_with_options(
-            &mut rdr,
-            &bv_core::loader::ParseOptions::default(),
-            |_| {},
-        )
-        .map_err(|e| e.to_string())?
-    };
+    let source = source_meta_from_load(&loaded);
+    record_selected_source(source.clone());
+    let issues = loaded.issues;
     let hash = bv_core::data_hash::compute_data_hash(&issues);
-    let file_hash = bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids);
-    set_source_parse_facts(stats.valid, stats.tombstone_ids.clone());
-    Ok((
-        issues,
-        hash,
-        None,
-        SourceMeta {
-            path: jsonl.to_string_lossy().to_string(),
-            envelope_path: String::new(),
-            kind: "jsonl_local".to_string(),
-            // Go main.go:7379 reports `ParseStats.Valid` (every record that
-            // parsed, tombstones included) beside `Visible: len(Issues)`. The
-            // two only ever coincided while nothing was tombstoned.
-            valid: stats.valid,
-            errors: stats.errors,
-            skipped: stats.skipped,
-            tombstones: stats.tombstones(),
-            file_hash,
-        },
-    ))
+    Ok((issues, hash, None, source))
+}
+
+/// Go `robotSourceFromLoad` (main.go:7358-7372): the `SourceMeta` describing
+/// the `LoadResult` the datasource layer actually produced — path, kind,
+/// counts, staleness, warnings and the file digest with tombstone stubs.
+fn source_meta_from_load(loaded: &bv_core::datasource::LoadResult) -> SourceMeta {
+    let report = &loaded.report;
+    let path = if loaded.source.path.as_os_str().is_empty() {
+        report.path.clone()
+    } else {
+        loaded.source.path.to_string_lossy().into_owned()
+    };
+    SourceMeta {
+        path,
+        envelope_path: String::new(),
+        kind: loaded.source.kind.as_str().to_string(),
+        valid: report.valid,
+        errors: report.errors,
+        skipped: report.skipped,
+        tombstones: report.tombstone_ids.len(),
+        file_hash: bv_core::data_hash::source_issues_hash(&loaded.issues, &report.tombstone_ids),
+        read_errors: report.read_errors,
+        stale: report.stale,
+        warning_count: report.warning_count + report.authority_warnings.len(),
+        warnings: report.warnings.clone(),
+        authority_warnings: report.authority_warnings.clone(),
+    }
+}
+
+/// The `SourceMeta` of the load that produced the current issue set, so
+/// envelope builders that never saw the `LoadResult` (`full_envelope_for`,
+/// `source_meta_for`) still name the file — including `beads.db` when the
+/// freshness selection picked SQLite.
+static SELECTED_SOURCE: std::sync::Mutex<Option<SourceMeta>> = std::sync::Mutex::new(None);
+
+/// The failed `LoadResult` behind the last load error, for
+/// `emit_unresolved_source` — Go's `robotSourceFromLoad(loaded, err)` marks
+/// the report `failed` and keeps whatever source path/kind/counts the last
+/// candidate carried.
+static FAILED_SOURCE: std::sync::Mutex<Option<(SourceMeta, String)>> = std::sync::Mutex::new(None);
+
+fn record_selected_source(meta: SourceMeta) {
+    if let Ok(mut guard) = SELECTED_SOURCE.lock() {
+        *guard = Some(meta);
+    }
+    if let Ok(mut guard) = FAILED_SOURCE.lock() {
+        *guard = None;
+    }
+}
+
+fn record_failed_source(loaded: &bv_core::datasource::LoadResult, error: &str) {
+    let meta = source_meta_from_load(loaded);
+    if let Ok(mut guard) = FAILED_SOURCE.lock() {
+        *guard = Some((meta, error.to_string()));
+    }
+    if let Ok(mut guard) = SELECTED_SOURCE.lock() {
+        *guard = None;
+    }
 }
 
 /// Load issues from discovery chain and emit --robot-triage JSON.
@@ -5559,6 +5735,54 @@ fn run_robot_next() -> ExitCode {
     // `usage_hints` ahead of `degraded` — same keys, same values, different
     // bytes, which a key-sorted comparison cannot see.
     let mut fields: Vec<(&str, serde_json::Value)> = Vec::new();
+    // Go robot_registry.go:2492-2505 — an unproven source short-circuits the
+    // whole pick selection before `robotNextClaimablePick` runs: no claim
+    // command, a fixed diagnostic message, and the first claimable pick
+    // surfaced only under `diagnostic_top_pick` (Go reads
+    // `triage.QuickRef.TopPicks[0]`, the `isClaimableRecommendation`-filtered
+    // list `buildTopPicks` produces — NOT the claimability-reasons scan the
+    // unsafe branch below uses).
+    if !source_claim_safe(&source) {
+        fields.push(("actionable", serde_json::json!(false)));
+        fields.push(("phase2_ready", serde_json::json!(true)));
+        fields.push(("status", cleared_status.clone()));
+        fields.push((
+            "message",
+            serde_json::json!(
+                "No claim command emitted because source authority is incomplete or stale"
+            ),
+        ));
+        if let Some(diag) = out
+            .recommendations
+            .iter()
+            .find(|r| triage_claimable(r, &issue_by_id))
+        {
+            fields.push((
+                "diagnostic_top_pick",
+                serde_json::json!({
+                    "id": diag.id,
+                    "title": diag.title,
+                    "score": diag.score,
+                    "reasons": diag.reasons,
+                    "unblocks": diag.unblocks_ids.len(),
+                }),
+            ));
+        }
+        fields.push((
+            "degraded",
+            serde_json::json!([{
+                "code": "source_authority_incomplete",
+                "severity": "warning",
+                "message": "Readiness is provisional; inspect source_authority for failed sources, dropped records, or stale fallback.",
+                "repair": "Restore or refresh the affected sources and rerun the command before claiming work.",
+            }]),
+        ));
+        for (key, value) in fields {
+            payload[key] = value;
+        }
+        payload["usage_hints"] = usage_hints;
+        return emit_json(&payload);
+    }
     match chosen {
         Some(top) => {
             let id = top["id"].as_str().unwrap_or_default().to_string();
@@ -5758,15 +5982,110 @@ fn format_unblock_list(ids: &[String]) -> String {
     format!("{}, {}, +{} more", ids[0], ids[1], ids.len() - 2)
 }
 
-/// Go `GenerateTriageReasons`'s unblock-cascade reason (triage.go:1554-1562),
-/// the FIRST reason it appends. It is a pure function of `UnblocksIDs`, which
-/// `build_triage` stamps from `unblocksMap[score.IssueID]` (triage.go:947) —
-/// the map that credits a dependent only when this issue is its SOLE open
-/// blocker. `build_triage` instead derived the same line from the raw graph
-/// in-degree, which counts dependents that are still multiply blocked, so the
-/// line is restated here from the authority. Replaces the line in place when
-/// present, inserts at the head when Go would emit one and the scorer emitted
-/// none, and drops it when the authority says this issue unblocks nothing.
+/// Go `ctx.claimsProven()` (robot_registry.go:272-274): the source authority
+/// must be claim-safe. Delegates to the same reducer the envelope uses so the
+/// gate cannot drift from the wire value — Go's `newRobotSourceAuthority`
+/// (main.go:7282-7326) clears `ClaimSafe` on a failed source or any
+/// errors/read_errors/stale report, and warnings alone do NOT clear it.
+fn source_claim_safe(meta: &SourceMeta) -> bool {
+    authority_from_report(source_report(meta, "", "loaded", "")).claim_safe
+}
+
+/// Go `suppressRecommendations`' per-item half (robot_registry.go:280-287)
+/// applied to the typed recommendation before serialization: unclaimable,
+/// the inspect-diagnostics action, and the claim route withdrawn with the
+/// stale-authority reason (the `show` route survives, exactly as Go leaves
+/// `Actions.Show` untouched).
+fn suppress_recommendation_claims(rec: &mut bv_analysis::impact::IssueImpact) {
+    rec.claimable = false;
+    rec.action = "Inspect source diagnostics before claiming work".to_string();
+    match rec.actions.as_mut().and_then(|a| a.as_object_mut()) {
+        Some(actions) => {
+            actions.remove("claim");
+            actions.insert(
+                "unavailable_reason".into(),
+                serde_json::json!("source authority is incomplete or stale"),
+            );
+        }
+        // Go's `Recommendation.Actions` is a value struct
+        // (triage.go:142), so the suppressed reason serializes even when no
+        // route was ever resolved — an absent key would not match.
+        None => {
+            rec.actions = Some(serde_json::json!({
+                "unavailable_reason": "source authority is incomplete or stale"
+            }));
+        }
+    }
+}
+
+/// Go `suppressUnprovenTriageClaims` (robot_registry.go:276-300) applied to
+/// the assembled `triage` JSON: every claim surface is withdrawn when the
+/// source authority cannot prove the data is complete — picks and quick wins
+/// emptied, recommendations marked unclaimable with the stale-source reason,
+/// grouped views stripped of their bound pick/command.
+fn suppress_unproven_triage_claims(triage: &mut serde_json::Value) {
+    let suppress_rec = |rec: &mut serde_json::Value| {
+        let Some(o) = rec.as_object_mut() else {
+            return;
+        };
+        o.insert("claimable".into(), serde_json::json!(false));
+        o.insert(
+            "action".into(),
+            serde_json::json!("Inspect source diagnostics before claiming work"),
+        );
+        if let Some(actions) = o.get_mut("actions").and_then(|a| a.as_object_mut()) {
+            actions.remove("claim");
+            actions.insert(
+                "unavailable_reason".into(),
+                serde_json::json!("source authority is incomplete or stale"),
+            );
+        }
+    };
+    let suppress_recs = |v: Option<&mut serde_json::Value>| {
+        if let Some(arr) = v.and_then(|x| x.as_array_mut()) {
+            for rec in arr.iter_mut() {
+                suppress_rec(rec);
+            }
+        }
+    };
+    let Some(obj) = triage.as_object_mut() else {
+        return;
+    };
+    if let Some(commands) = obj.get_mut("commands").and_then(|c| c.as_object_mut()) {
+        commands.insert("claim_top".into(), serde_json::json!(""));
+    }
+    if let Some(quick_ref) = obj.get_mut("quick_ref").and_then(|q| q.as_object_mut()) {
+        quick_ref.insert("top_picks".into(), serde_json::json!([]));
+    }
+    obj.insert("quick_wins".into(), serde_json::json!([]));
+    suppress_recs(obj.get_mut("recommendations"));
+    if let Some(blockers) = obj
+        .get_mut("blockers_to_clear")
+        .and_then(|b| b.as_array_mut())
+    {
+        for item in blockers.iter_mut() {
+            if let Some(o) = item.as_object_mut() {
+                o.insert("actionable".into(), serde_json::json!(false));
+            }
+        }
+    }
+    for key in ["recommendations_by_track", "recommendations_by_label"] {
+        let Some(groups) = obj.get_mut(key).and_then(|g| g.as_array_mut()) else {
+            continue;
+        };
+        for group in groups.iter_mut() {
+            let Some(go) = group.as_object_mut() else {
+                continue;
+            };
+            // Go nils `TopPick` (omitempty → key absent) and empties
+            // `ClaimCommand` (omitempty → key absent).
+            go.remove("top_pick");
+            go.remove("claim_command");
+            suppress_recs(go.get_mut("recommendations"));
+        }
+    }
+}
+
 /// Go's `Issue.Actions` for an issue the loader gave no tracker Origin
 /// (types.go:165-167). The time-travel loader is the case that reaches it: a
 /// `--as-of` issue carries no Origin, so Go never derives a local id and never
@@ -5777,13 +6096,24 @@ fn actions_for_source(
     id: &str,
     claimable: bool,
 ) -> bv_core::tracker::IssueActions {
-    if source.kind == "git" {
+    if source.kind == "git" || id.is_empty() {
+        // Go `analyzer.issueMap[""]` is the zero Issue — nil Origin — so an
+        // empty top id yields only the unavailable reason, never a route.
         return bv_core::tracker::actions_without_origin();
     }
     let origin = bv_core::tracker::resolve_issue_origin(&source.path, id);
     bv_core::tracker::build_actions(&origin, claimable)
 }
 
+/// Go `GenerateTriageReasons`'s unblock-cascade reason (triage.go:1554-1562),
+/// the FIRST reason it appends. It is a pure function of `UnblocksIDs`, which
+/// `build_triage` stamps from `unblocksMap[score.IssueID]` (triage.go:947) —
+/// the map that credits a dependent only when this issue is its SOLE open
+/// blocker. `build_triage` instead derived the same line from the raw graph
+/// in-degree, which counts dependents that are still multiply blocked, so the
+/// line is restated here from the authority. Replaces the line in place when
+/// present, inserts at the head when Go would emit one and the scorer emitted
+/// none, and drops it when the authority says this issue unblocks nothing.
 fn restate_unblock_reason(reasons: &mut Vec<String>, unblocks_ids: &[String]) {
     const CASCADE: &str = "🎯 Completing this unblocks ";
     const LIST: &str = "🔓 Unblocks ";
@@ -6596,9 +6926,9 @@ fn run_robot_triage() -> ExitCode {
     // Unwrapped back to lists: the payload below inserts them as JSON arrays and
     // emptiness-gates two of them, and `json!(vec)` is not the same value as
     // `json!(array_value)` once it has been through `Value` twice.
-    let top_picks = views["top_picks"].as_array().cloned().unwrap_or_default();
-    let quick_wins = views["quick_wins"].as_array().cloned().unwrap_or_default();
-    let blockers_to_clear = views["blockers_to_clear"]
+    let mut top_picks = views["top_picks"].as_array().cloned().unwrap_or_default();
+    let mut quick_wins = views["quick_wins"].as_array().cloned().unwrap_or_default();
+    let mut blockers_to_clear = views["blockers_to_clear"]
         .as_array()
         .cloned()
         .unwrap_or_default();
@@ -6614,19 +6944,46 @@ fn run_robot_triage() -> ExitCode {
     // tracker's shell strings (empty when no route is established) and
     // `list_ready`/`list_blocked` are always empty — there is no unique route
     // to name. `refresh_triage` is literally "bvr --robot-triage".
-    let top_id = out
-        .recommendations
+    // Go `buildCommands` (triage.go:738) keys off `topPicks[0].ID` — the first
+    // CLAIMABLE pick — not `recommendations[0]`. When every recommendation is
+    // unclaimable `topPicks` is empty, `topID` stays "", `issueMap[""]` is the
+    // zero Issue (nil Origin), and both command strings serialize empty.
+    let top_id = top_picks
         .first()
-        .map(|r| r.id.as_str())
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
         .unwrap_or("");
     let top_actions = actions_for_source(&source, top_id, true);
-    let commands = serde_json::json!({
+    let mut commands = serde_json::json!({
         "claim_top": top_actions.claim.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
         "show_top": top_actions.show.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
         "list_ready": "",
         "list_blocked": "",
         "refresh_triage": "bvr --robot-triage",
     });
+
+    // Go `suppressUnprovenTriageClaims` (robot_registry.go:2224-2226, defined
+    // :276-300) runs on the finished TriageResult BEFORE the `--brief` early
+    // return and before serialization: every claim surface is withdrawn when
+    // the source authority cannot prove the data is complete. `commands` was
+    // built from the unsuppressed picks first because Go clears ONLY
+    // `ClaimTop` — `ShowTop` keeps the real route.
+    let claims_proven = source_claim_safe(&source);
+    if !claims_proven {
+        for rec in out.recommendations.iter_mut() {
+            suppress_recommendation_claims(rec);
+        }
+        top_picks.clear();
+        quick_wins.clear();
+        for blocker in blockers_to_clear.iter_mut() {
+            if let Some(o) = blocker.as_object_mut() {
+                o.insert("actionable".into(), serde_json::json!(false));
+            }
+        }
+        if let Some(o) = commands.as_object_mut() {
+            o.insert("claim_top".into(), serde_json::json!(""));
+        }
+    }
 
     let mut env = bv_robot::RobotEnvelope::new(
         data_hash.clone(),
@@ -6952,6 +7309,14 @@ fn run_robot_triage() -> ExitCode {
                 payload["triage"]["recommendations_by_label"] = serde_json::json!(by_label);
             }
         }
+    }
+    // The group builders re-derive their own top pick and claim command from
+    // the (already suppressed) recommendations — `triage_claimable` reads the
+    // issue, not `rec.claimable`, exactly as Go's `isClaimableRecommendation`
+    // does — so Go's explicit `group.TopPick = nil; group.ClaimCommand = ""`
+    // half of the suppression still has to be applied here.
+    if !claims_proven {
+        suppress_unproven_triage_claims(&mut payload["triage"]);
     }
     // as_of and as_of_commit are deliberately NOT written here. Go declares
     // both on RobotEnvelope (main.go:7222-7223) and its TriageResult has
@@ -10364,6 +10729,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
                             &loaded,
                             &stats.tombstone_ids,
                         ),
+                        ..Default::default()
                     });
                 }
                 issues
@@ -17346,10 +17712,19 @@ fn compute_brief_triage() -> Result<BriefTriage, ExitCode> {
         return Err(ExitCode::from(1));
     }
     let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(&issues));
-    let out =
+    let mut out =
         bv_analysis::triage::build_triage(&issues, &g, robot_now(), !as_of_pair().0.is_empty());
     let authority = source_authority(&loaded_source, &data_hash);
     let claims_proven = authority.claim_safe;
+    // Go main.go:3881-3883 (`--priority-brief`) and :3926-3928
+    // (`--agent-brief`) run `suppressUnprovenTriageClaims` on the triage
+    // before it is marshaled into the brief inputs, so the recommendation
+    // list the markdown/json readers see is already claim-withdrawn.
+    if !claims_proven {
+        for rec in out.recommendations.iter_mut() {
+            suppress_recommendation_claims(rec);
+        }
+    }
 
     // `GeneratePriorityBriefFromTriageJSON` unmarshals Go's anonymous
     // `TriageResult` (pkg/export/markdown.go:747-800) and reads only

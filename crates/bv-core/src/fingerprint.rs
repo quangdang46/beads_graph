@@ -370,6 +370,16 @@ pub fn normalize_time_public(raw: &str) -> String {
     normalize_time(raw)
 }
 
+/// Go `t.UTC().Format(time.RFC3339Nano)` for a `(unix_seconds, nanos)` pair.
+///
+/// The SQLite reader parses timestamp spellings Go's JSON decoder never sees
+/// (space-separated `2006-01-02 15:04:05`, offset-less forms), so it needs the
+/// formatter directly rather than going through [`normalize_time`]'s
+/// RFC3339-only parser.
+pub(crate) fn format_go_instant(secs: i64, nanos: u32) -> String {
+    format_go_utc(secs, nanos)
+}
+
 /// Go `binary.PutUvarint` — LEB128, low 7 bits per byte, high bit = continuation.
 fn put_uvarint(buf: &mut [u8], mut v: u64) -> usize {
     let mut i = 0;

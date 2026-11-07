@@ -183,6 +183,13 @@ fn get_main_repo_root(repo_path: &Path) -> Option<PathBuf> {
     Some(Path::new(&common).parent()?.to_path_buf())
 }
 
+/// Go `loader.ResolveBeadsDir` — public face of `follow_beads_redirect` for
+/// callers that already hold an explicit `.beads` directory (the datasource
+/// `loadIssuesFromBeadsDir` path).
+pub fn resolve_beads_dir_pub(beads_dir: &Path) -> Result<PathBuf, DiscoveryError> {
+    follow_beads_redirect(beads_dir)
+}
+
 /// Go: `GetBeadsDir`. Resolution order:
 /// BEADS_DB > BEADS_DIR > `<repo>/.beads` > main-repo `.beads` (worktrees).
 /// Go's `os.Getwd()`.

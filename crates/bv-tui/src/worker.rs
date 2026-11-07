@@ -119,45 +119,47 @@ impl BackgroundWorker {
         let shutdown_clone = Arc::clone(&shutdown);
 
         let handle = std::thread::spawn(move || {
-            let mut last_mtime: Option<std::time::SystemTime> = None;
+            // The freshness-selected source may be beads.db rather than
+            // issues.jsonl, so the watch signature covers both — plus the
+            // legacy beads.jsonl/beads.base.jsonl names discovery accepts.
+            let mut last_sig: Option<Vec<(std::time::SystemTime, u64)>> = None;
             loop {
                 if shutdown_clone.load(Ordering::Relaxed) {
                     break;
                 }
 
-                // Check beads file mtime (polling fallback). Trigger on any
-                // transition to a *present, different* mtime — including
+                // Check source mtimes (polling fallback). Trigger on any
+                // transition to a *present, different* signature — including
                 // None→Some (file (re)created after being absent) — but not
                 // on Some→None (file briefly missing mid-write; next tick
                 // sees the new mtime anyway).
-                let jsonl = beads_dir.join("issues.jsonl");
-                let current_mtime = std::fs::metadata(&jsonl).and_then(|m| m.modified()).ok();
+                let sig = watched_source_signature(&beads_dir);
 
-                if current_mtime.is_some() && last_mtime != current_mtime {
+                if sig.is_some() && last_sig != sig {
                     // File changed or recreated → debounce then reload.
                     std::thread::sleep(Duration::from_millis(config.debounce_ms));
-                    match bv_core::discovery::load_issues_from_repo(
-                        beads_dir.parent().unwrap_or(&beads_dir),
-                    ) {
-                        Ok((issues, _stats)) => {
-                            let count = issues.len();
-                            let hash = bv_core::data_hash::compute_data_hash(&issues);
-                            let _ = hash;
+                    // Go's reload path is `datasource.LoadIssues` — the same
+                    // freshness-selected SQLite/JSONL source as startup.
+                    let (loaded, err) =
+                        bv_core::datasource::load_issues(beads_dir.parent().unwrap_or(&beads_dir));
+                    match err {
+                        Some(e) => {
+                            let _ = tx.send(WorkerMsg::SnapshotError {
+                                message: e,
+                                recoverable: true,
+                            });
+                        }
+                        None => {
+                            let count = loaded.issues.len();
                             let _ = tx.send(WorkerMsg::SnapshotReady {
                                 issue_count: count,
                                 file_change_at: chrono_now(),
                                 sent_at: Instant::now(),
                             });
                         }
-                        Err(e) => {
-                            let _ = tx.send(WorkerMsg::SnapshotError {
-                                message: e.to_string(),
-                                recoverable: true,
-                            });
-                        }
                     }
                 }
-                last_mtime = current_mtime;
+                last_sig = sig;
 
                 std::thread::sleep(Duration::from_millis(config.poll_tick_ms));
             }
@@ -174,7 +176,6 @@ impl BackgroundWorker {
             config,
         }
     }
-
     /// Signal the worker to stop. Call before dropping.
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
@@ -187,6 +188,32 @@ impl Drop for BackgroundWorker {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+/// `(mtime, size)` for every file the datasource layer can select. `None`
+/// when none of them exist — matching the old `current_mtime.is_some()` gate.
+fn watched_source_signature(
+    beads_dir: &std::path::Path,
+) -> Option<Vec<(std::time::SystemTime, u64)>> {
+    const NAMES: [&str; 4] = [
+        "beads.db",
+        "beads.jsonl",
+        "beads.base.jsonl",
+        "issues.jsonl",
+    ];
+    let mut sig: Vec<(std::time::SystemTime, u64)> = NAMES
+        .iter()
+        .filter_map(|name| {
+            let meta = std::fs::metadata(beads_dir.join(name)).ok()?;
+            Some((meta.modified().ok()?, meta.len()))
+        })
+        .collect();
+    sig.sort();
+    if sig.is_empty() {
+        None
+    } else {
+        Some(sig)
     }
 }
 
