@@ -317,8 +317,9 @@ pub struct App {
     pub tree_collapsed: std::collections::HashSet<String>,
     /// List pane shows issues as a dependency tree instead of a flat list.
     ///
-    /// Toggled with `D`. Go's list is flat, so flat is the default and this
-    /// is an addition to the port rather than a correction of it.
+    /// Toggled with `D`. Go's list is flat, so this is an addition to the
+    /// port rather than a correction of it — but the tree is the default
+    /// here (user preference), with `D` switching back to the flat list.
     ///
     /// The tree is display-only: it never reorders `filtered_indices`, so
     /// `cursor` keeps indexing that vector exactly as it does in flat mode.
@@ -955,7 +956,7 @@ impl App {
             alerts_total,
             alerts,
             tree_collapsed: std::collections::HashSet::new(),
-            left_tree_mode: false,
+            left_tree_mode: true,
             dep_tree_nodes: Vec::new(),
             dep_tree_window: 0..0,
             alerts_cursor: 0,
@@ -2368,7 +2369,8 @@ impl App {
             // Dependency-tree left pane (`left_tree_mode`). A List-scoped
             // addition to the port, not a Go binding: Go's list is flat, so
             // the toggle stays out of the way of the mode-cycle keys (`s`,
-            // `b`, `E`, `G`) and defaults to flat.
+            // `b`, `E`, `G`) and defaults to the dependency tree (`D`
+            // switches back to the flat list).
             KeyCode::Char('D') if self.current_view == ViewMode::List => {
                 self.left_tree_mode = !self.left_tree_mode;
                 if self.left_tree_mode {

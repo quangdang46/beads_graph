@@ -144,7 +144,7 @@ pub fn build_default_registry() -> KeyRegistry {
         ("E", "Toggle tree view"),
         (
             "D",
-            "Toggle dependency-tree left pane (flat list is the default)",
+            "Toggle dependency-tree left pane (tree is the default)",
         ),
         ("G", "Toggle graph view"),
         ("h", "Toggle history view (bead↔commit correlation)"),
