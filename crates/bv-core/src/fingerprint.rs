@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 const BUF_LEN: usize = 256;
 /// Go `binary.MaxVarintLen64` — the reserve that forces a flush before a varint.
 const MAX_VARINT_LEN_64: usize = 10;
+/// Unix seconds of Go's zero `time.Time` (`0001-01-01T00:00:00Z`).
+const GO_ZERO_UNIX: i64 = -62135596800;
 
 /// Streaming, length-prefixed encoder matching Go's `fingerprintWriter`.
 pub struct FingerprintWriter {
@@ -143,7 +145,16 @@ impl FingerprintWriter {
                 if raw.is_empty() {
                     String::new()
                 } else {
-                    normalize_time(raw)
+                    match parse_go_timestamp(raw) {
+                        // Go checks `t.IsZero()` BEFORE formatting: an explicit
+                        // "0001-01-01T00:00:00Z" decodes to `time.Time{}` and
+                        // hashes as "" exactly like an absent field. The
+                        // dependency hash is the one caller that formats
+                        // unconditionally — it goes through
+                        // `normalize_time_public`, not this path.
+                        Some((secs, nanos)) if secs == GO_ZERO_UNIX && nanos == 0 => String::new(),
+                        _ => normalize_time(raw),
+                    }
                 }
             }
         };
@@ -484,5 +495,25 @@ mod tests {
         bad("2026-01-01T00:00:60Z"); // second out of range
                                      // jiff accepts these but Go does not — the strict port must not.
         bad("2026-01-01T00:00Z");
+    }
+
+    /// Go `writeTimeHash` checks `t.IsZero()` before formatting, so an
+    /// explicit zero timestamp hashes identically to an absent one — while
+    /// the dependency hash (`normalize_time_public`) formats unconditionally
+    /// and keeps the `0001-01-01T00:00:00Z` spelling.
+    #[test]
+    fn zero_time_collapses_only_on_the_write_time_path() {
+        let mut explicit = FingerprintWriter::new();
+        explicit.write_time_hash(Some("0001-01-01T00:00:00Z"));
+        let mut absent = FingerprintWriter::new();
+        absent.write_time_hash(None);
+        assert_eq!(explicit.sum_hex(), absent.sum_hex());
+
+        // A non-zero instant one second later must NOT collapse.
+        assert_ne!(normalize_time("0001-01-01T00:00:01Z"), String::new());
+        assert_eq!(
+            normalize_time_public("0001-01-01T00:00:00Z"),
+            "0001-01-01T00:00:00Z"
+        );
     }
 }
