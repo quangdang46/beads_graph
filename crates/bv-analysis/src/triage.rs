@@ -160,11 +160,15 @@ pub fn compute_row_triage(issues: &[Issue]) -> std::collections::HashMap<String,
     }
 
     let by_id: HashMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    // One readiness index for the whole pass — `open_blockers` delegates to
+    // `ReadinessIndex.Blockers`, so building it per issue would be O(n²).
+    let readiness = Readiness::new(issues);
 
-    // Open blockers per issue (direct blocking edges + parent propagation),
-    // via the shared blocker_chain helper (Go `getOpenBlockersInternal`).
+    // Open blockers per issue (direct blocking edges + parent propagation +
+    // missing targets), via the shared readiness authority — the same
+    // `ReadinessIndex.Blockers` Go's `getOpenBlockersInternal` calls.
     let open_blockers_of =
-        |id: &str| -> Vec<String> { crate::blocker_chain::open_blockers(&by_id, id) };
+        |id: &str| -> Vec<String> { crate::blocker_chain::open_blockers_in(&readiness, id) };
 
     // Go `buildUnblocksMap`: B counts toward A iff A is B's ONLY open blocker
     // and B is actionable-after-completing-A (approximated here as:
@@ -382,6 +386,12 @@ pub struct Readiness<'a> {
 impl<'a> Readiness<'a> {
     /// Go `NewReadinessIndex` (readiness.go:46-77) followed by `compute()`.
     pub fn new(issues: &'a [Issue]) -> Self {
+        Self::new_borrowed(issues.iter())
+    }
+
+    /// Same index built from borrowed issue references — for callers holding
+    /// `&Issue` values out of a map rather than a contiguous slice.
+    pub(crate) fn new_borrowed(issues: impl IntoIterator<Item = &'a Issue>) -> Self {
         let mut r = Readiness {
             issues: std::collections::HashMap::new(),
             states: std::collections::HashMap::new(),
@@ -552,12 +562,23 @@ impl<'a> Readiness<'a> {
         self.states.get(id).copied().unwrap_or(DepState::Unknown)
     }
 
+    /// Go `a.Readiness().DependencyState(id) != DependenciesSatisfied`
+    /// (priority.go:965-970) — the exact predicate `blockedReduction`
+    /// counts. Unlike `ready`/`ready_after` this is the raw dependency
+    /// frontier: it ignores the issue's own status and defer state, and an
+    /// id the index never saw reads `Unknown`, which Go counts.
+    pub fn dependency_not_satisfied(&self, id: &str) -> bool {
+        self.dependency_state(id) != DepState::Satisfied
+    }
+
     /// Go `ReadinessIndex.Blockers` (readiness.go:199-216) — the IDs that
     /// explain why an item was withheld, including blocker IDs that are absent
     /// from the source entirely. A `parent-child` edge counts only when the
     /// parent's state is not `Satisfied`, so an open unblocked parent does not
-    /// gate its child.
-    fn blockers(&self, id: &str) -> Vec<String> {
+    /// gate its child. `pub(crate)` so `blocker_chain::open_blockers` — Go
+    /// `TriageContext.OpenBlockers`, which delegates to this exact method —
+    /// shares one authority.
+    pub(crate) fn blockers(&self, id: &str) -> Vec<String> {
         let Some(issue) = self.issues.get(id) else {
             return Vec::new();
         };

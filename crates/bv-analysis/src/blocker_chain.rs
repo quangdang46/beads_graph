@@ -2,7 +2,7 @@
 //! `Analyzer.GetBlockerChain` + `pkg/analysis/triage_context.go`
 //! `OpenBlockers`/`IsActionable` (backing `robot-blocker-chain`).
 
-use bv_core::model::{DependencyType, Issue, Status};
+use bv_core::model::{Issue, Status};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -17,93 +17,23 @@ fn closed_for_readiness(status: Status) -> bool {
 
 /// Direct-predecessor open blockers for `id`, plus transitive parent-child
 /// propagation: an open parent-child parent counts as a blocker of its
-/// child when the parent is itself (transitively) blocked. Matches Go's
-/// `getOpenBlockersInternal` + `isTransitivelyBlockedInternal`.
+/// child when the parent is itself (transitively) blocked.
+///
+/// Go parity: `TriageContext.OpenBlockers`/`getOpenBlockersInternal`
+/// (triage_context.go:194-228) delegates to `ReadinessIndex.Blockers`
+/// (readiness.go:199-216), so this function does too. That authority lists a
+/// blocking dependency whose target is ABSENT from the source (state
+/// `Unknown` withholds readiness) and a parent-child parent whose state is
+/// not `Satisfied` — including missing parents and parent cycles — where the
+/// previous hand-rolled walk silently dropped both.
 pub fn open_blockers(by_id: &HashMap<&str, &Issue>, id: &str) -> Vec<String> {
-    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let Some(issue) = by_id.get(id) else {
-        return Vec::new();
-    };
-
-    // 1. Direct predecessor edges: other issues this one depends on via a
-    // blocking dependency type, that are still open (not closed-like).
-    for dep in &issue.dependencies {
-        if !dep.r#type.is_blocking() {
-            continue;
-        }
-        let target = dep.effective_depends_on();
-        if let Some(blocker) = by_id.get(target) {
-            if !closed_for_readiness(blocker.status) {
-                set.insert(blocker.id.clone());
-            }
-        }
-    }
-
-    // 2. Transitive parent-blocked propagation.
-    for dep in &issue.dependencies {
-        if dep.r#type != DependencyType::ParentChild {
-            continue;
-        }
-        let Some(parent) = by_id.get(dep.depends_on_id.as_str()) else {
-            continue;
-        };
-        if closed_for_readiness(parent.status) {
-            continue;
-        }
-        let mut visiting = HashSet::new();
-        visiting.insert(id.to_string());
-        if is_transitively_blocked(by_id, &parent.id, &mut visiting) {
-            set.insert(parent.id.clone());
-        }
-    }
-
-    set.into_iter().collect()
+    crate::triage::Readiness::new_borrowed(by_id.values().copied()).blockers(id)
 }
 
-fn is_transitively_blocked(
-    by_id: &HashMap<&str, &Issue>,
-    id: &str,
-    visiting: &mut HashSet<String>,
-) -> bool {
-    if visiting.contains(id) {
-        return false;
-    }
-    let Some(issue) = by_id.get(id) else {
-        return false;
-    };
-    if closed_for_readiness(issue.status) {
-        return false;
-    }
-    // Direct predecessor check.
-    for dep in &issue.dependencies {
-        if !dep.r#type.is_blocking() {
-            continue;
-        }
-        if let Some(blocker) = by_id.get(dep.effective_depends_on()) {
-            if !closed_for_readiness(blocker.status) {
-                return true;
-            }
-        }
-    }
-    visiting.insert(id.to_string());
-    let mut result = false;
-    for dep in &issue.dependencies {
-        if dep.r#type != DependencyType::ParentChild {
-            continue;
-        }
-        let Some(parent) = by_id.get(dep.depends_on_id.as_str()) else {
-            continue;
-        };
-        if closed_for_readiness(parent.status) {
-            continue;
-        }
-        if is_transitively_blocked(by_id, &parent.id, visiting) {
-            result = true;
-            break;
-        }
-    }
-    visiting.remove(id);
-    result
+/// Same as [`open_blockers`] but against a prebuilt index — for callers
+/// walking many issues so the O(n) index build happens once, not per call.
+pub(crate) fn open_blockers_in(readiness: &crate::triage::Readiness<'_>, id: &str) -> Vec<String> {
+    readiness.blockers(id)
 }
 
 /// True when the issue is non-closed, non-deferred, and has no open
@@ -111,13 +41,24 @@ fn is_transitively_blocked(
 /// (Go additionally checks scheduler deferral, which has no Rust model
 /// equivalent beyond `Status::Deferred`).
 pub fn is_actionable(by_id: &HashMap<&str, &Issue>, id: &str) -> bool {
+    let readiness = crate::triage::Readiness::new_borrowed(by_id.values().copied());
+    is_actionable_in(&readiness, by_id, id)
+}
+
+/// Same as [`is_actionable`] against a prebuilt index — see
+/// [`open_blockers_in`].
+pub(crate) fn is_actionable_in(
+    readiness: &crate::triage::Readiness<'_>,
+    by_id: &HashMap<&str, &Issue>,
+    id: &str,
+) -> bool {
     let Some(issue) = by_id.get(id) else {
         return false;
     };
     if closed_for_readiness(issue.status) || issue.status == Status::Deferred {
         return false;
     }
-    open_blockers(by_id, id).is_empty()
+    readiness.blockers(id).is_empty()
 }
 
 fn count_blocked_by(by_id: &HashMap<&str, &Issue>, issue_id: &str) -> i64 {
@@ -169,6 +110,9 @@ pub struct BlockerChainResult {
 pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChainResult> {
     let by_id: HashMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
     let issue = *by_id.get(issue_id)?;
+    // One readiness index for the whole walk — Go's TriageContext caches
+    // OpenBlockers/IsActionable the same way (triage_context.go:37-53).
+    let readiness = crate::triage::Readiness::new(issues);
 
     let mut result = BlockerChainResult {
         target_id: issue_id.to_string(),
@@ -181,7 +125,7 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
         cycle_ids: Vec::new(),
     };
 
-    let target_open_blockers = open_blockers(&by_id, issue_id);
+    let target_open_blockers = open_blockers_in(&readiness, issue_id);
     let mut target_entry = BlockerChainEntry {
         id: issue_id.to_string(),
         title: issue.title.clone(),
@@ -189,7 +133,7 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
         priority: issue.priority,
         depth: 0,
         is_root: false,
-        actionable: is_actionable(&by_id, issue_id),
+        actionable: is_actionable_in(&readiness, &by_id, issue_id),
         blocks_count: count_blocked_by(&by_id, issue_id),
     };
 
@@ -201,8 +145,12 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
     result.is_blocked = true;
     result.chain.push(target_entry);
 
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut visiting: HashSet<String> = HashSet::new();
+    /// Mutable walk state bundled so `dfs` stays under the argument limit.
+    struct Walk<'a> {
+        visited: HashSet<String>,
+        visiting: HashSet<String>,
+        result: &'a mut BlockerChainResult,
+    }
 
     /// Bound on `dfs` recursion. Go's goroutine stacks grow dynamically so the
     /// upstream walk has no explicit cap; Rust runs on fixed-size thread
@@ -212,35 +160,34 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
     /// wrong about the nodes it did visit).
     const DFS_MAX_DEPTH: i64 = 4096;
 
-    fn dfs(
+    fn dfs<'r>(
+        readiness: &crate::triage::Readiness<'r>,
         by_id: &HashMap<&str, &Issue>,
         id: &str,
         depth: i64,
         target_id: &str,
-        visited: &mut HashSet<String>,
-        visiting: &mut HashSet<String>,
-        result: &mut BlockerChainResult,
+        walk: &mut Walk<'_>,
     ) {
         if depth > DFS_MAX_DEPTH {
             return;
         }
-        if visiting.contains(id) {
-            result.has_cycle = true;
-            result.cycle_ids.push(id.to_string());
+        if walk.visiting.contains(id) {
+            walk.result.has_cycle = true;
+            walk.result.cycle_ids.push(id.to_string());
             return;
         }
-        if visited.contains(id) {
+        if walk.visited.contains(id) {
             return;
         }
-        visiting.insert(id.to_string());
+        walk.visiting.insert(id.to_string());
 
         let Some(blocker) = by_id.get(id) else {
-            visiting.remove(id);
-            visited.insert(id.to_string());
+            walk.visiting.remove(id);
+            walk.visited.insert(id.to_string());
             return;
         };
 
-        let blocker_open = open_blockers(by_id, id);
+        let blocker_open = open_blockers_in(readiness, id);
         let is_root = blocker_open.is_empty();
 
         if id != target_id {
@@ -251,39 +198,34 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
                 priority: blocker.priority,
                 depth,
                 is_root,
-                actionable: is_actionable(by_id, id),
+                actionable: is_actionable_in(readiness, by_id, id),
                 blocks_count: count_blocked_by(by_id, id),
             };
-            result.chain.push(entry.clone());
+            walk.result.chain.push(entry.clone());
             if is_root {
-                result.root_blockers.push(entry);
+                walk.result.root_blockers.push(entry);
             }
         }
 
         for next_id in &blocker_open {
-            dfs(
-                by_id,
-                next_id,
-                depth + 1,
-                target_id,
-                visited,
-                visiting,
-                result,
-            );
+            dfs(readiness, by_id, next_id, depth + 1, target_id, walk);
         }
 
-        visiting.remove(id);
-        visited.insert(id.to_string());
+        walk.visiting.remove(id);
+        walk.visited.insert(id.to_string());
     }
 
     dfs(
+        &readiness,
         &by_id,
         issue_id,
         0,
         issue_id,
-        &mut visited,
-        &mut visiting,
-        &mut result,
+        &mut Walk {
+            visited: HashSet::new(),
+            visiting: HashSet::new(),
+            result: &mut result,
+        },
     );
 
     result.chain_length = result.chain.len() as i64 - 1;
@@ -297,7 +239,7 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bv_core::model::Dependency;
+    use bv_core::model::{Dependency, DependencyType};
 
     fn issue(id: &str, status: Status, title: &str) -> Issue {
         Issue {
@@ -481,5 +423,41 @@ mod tests {
         let issues = vec![a, b];
         let result = get_blocker_chain(&issues, "A-1").unwrap();
         assert!(result.has_cycle);
+    }
+
+    /// Go `ReadinessIndex.Blockers` (readiness.go:199-216) lists a blocking
+    /// dependency whose target is absent from the source — `Unknown` withholds
+    /// readiness — and `TriageContext.OpenBlockers` surfaces it verbatim. The
+    /// previous hand-rolled walk dropped the edge entirely, reporting the
+    /// issue unblocked.
+    #[test]
+    fn missing_blocker_target_still_blocks() {
+        let mut task = issue("TASK-1", Status::Open, "task");
+        task.dependencies.push(blocks("TASK-1", "GHOST-9"));
+        let issues = vec![task];
+        let by_id = by_id_map(&issues);
+        assert_eq!(open_blockers(&by_id, "TASK-1"), vec!["GHOST-9".to_string()]);
+        assert!(!is_actionable(&by_id, "TASK-1"));
+        // The chain walk visits the absent ID and skips it, exactly like Go's
+        // `blocker, exists := a.issueMap[id]; if !exists { ... return }`.
+        let result = get_blocker_chain(&issues, "TASK-1").unwrap();
+        assert!(result.is_blocked);
+        // The absent ID contributes no chain entry (Go appends entries only
+        // for IDs present in issueMap), so ChainLength stays 0 — but the
+        // target is still reported blocked.
+        assert_eq!(result.chain_length, 0);
+        assert!(result.root_blockers.is_empty());
+    }
+
+    /// Same authority for parent-child: a parent ID the index never saw has
+    /// state `Unknown` (!= Satisfied), so Go lists it as a blocker.
+    #[test]
+    fn missing_parent_target_still_blocks() {
+        let mut task = issue("TASK-2", Status::Open, "task");
+        task.dependencies.push(parent_child("TASK-2", "GHOST-P"));
+        let issues = vec![task];
+        let by_id = by_id_map(&issues);
+        assert_eq!(open_blockers(&by_id, "TASK-2"), vec!["GHOST-P".to_string()]);
+        assert!(!is_actionable(&by_id, "TASK-2"));
     }
 }

@@ -538,8 +538,19 @@ fn profile_human_report_has_go_headings_and_phase_blocks() {
     );
     assert!(lines[21].is_empty(), "blank line after the total");
     assert_eq!(lines[22], "Configuration:");
-    assert!(
-        lines[23].starts_with("  Size tier: Small (<100 issues)"),
+    // The tier is keyed on this repo's live issue count (Go `getSizeTier`,
+    // main.go:5126-5138), so derive the expectation instead of hardcoding it —
+    // .beads/issues.jsonl grows over time.
+    let issue_count: usize = issues_part.parse().expect("issue count");
+    let expected_tier = match issue_count {
+        n if n < 100 => "Small (<100 issues)",
+        n if n < 500 => "Medium (100-500 issues)",
+        n if n < 2000 => "Large (500-2000 issues)",
+        _ => "XL (>2000 issues)",
+    };
+    assert_eq!(
+        lines[23],
+        format!("  Size tier: {expected_tier}"),
         "{:?}",
         lines[23]
     );

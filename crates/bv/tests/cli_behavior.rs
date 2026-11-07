@@ -848,7 +848,8 @@ fn export_md_writes_go_section_order() {
 #[test]
 fn export_rejects_conflicting_output_paths() {
     let (code, _, stderr) = run(&["--export", "/tmp/a.md", "--export-md", "/tmp/b.md"]);
-    assert_eq!(code, 2, "stderr: {stderr}");
+    // Go `main.go` conflict check: bare message on stderr, exit 1.
+    assert_eq!(code, 1, "stderr: {stderr}");
     assert!(stderr.contains("conflicting output paths"), "{stderr}");
 }
 

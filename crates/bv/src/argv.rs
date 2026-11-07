@@ -25,7 +25,7 @@ const SHORT_ALIASES: &[(&str, &str)] = &[("-f", "--format"), ("-l", "--label"), 
 
 /// Rewrite raw args (argv *without* the program name) into canonical form.
 pub fn rewrite_args(args: &[String]) -> Vec<String> {
-    let normalized: Vec<String> = args.iter().map(|a| normalize_flag_spelling(a)).collect();
+    let normalized = normalize_flag_args(args);
 
     // Go: a recognized first positional is a subcommand and fully determines
     // the output shape, so it returns before the auto-promote is considered.
@@ -57,6 +57,57 @@ pub fn rewrite_args(args: &[String]) -> Vec<String> {
     rewritten
 }
 
+/// Normalize every token with [`normalize_flag_spelling`], but skip the
+/// token a value-taking flag consumes: pflag hands the next argv element to
+/// the flag UNCONDITIONALLY, so `--export-md -f` writes a file literally
+/// named `-f` — expanding `-f` into `--format` there rewrote the user's
+/// path. `--` ends normalization too: everything after it is positional.
+fn normalize_flag_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    let mut positional_only = false;
+    while i < args.len() {
+        let arg = &args[i];
+        if positional_only {
+            out.push(arg.clone());
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            positional_only = true;
+            out.push(arg.clone());
+            i += 1;
+            continue;
+        }
+        let normalized = normalize_flag_spelling(arg);
+        let takes_value = normalized_flag_takes_value(&normalized);
+        out.push(normalized);
+        i += 1;
+        if takes_value && i < args.len() {
+            // The value is copied VERBATIM — never normalized.
+            out.push(args[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Whether a normalized `--name` token (no `=`) still expects the next argv
+/// element as its value. Bool and unknown names never consume; pflag gives
+/// bools `NoOptDefVal` and rejects unknown names before values matter.
+fn normalized_flag_takes_value(tok: &str) -> bool {
+    if tok.contains('=') {
+        return false;
+    }
+    let Some(name) = tok.strip_prefix("--") else {
+        return false;
+    };
+    !matches!(
+        crate::flags::flag_kind(name),
+        Some(crate::flags::FlagKind::Bool) | None
+    )
+}
+
 /// Go `rewriteSingleDashLongFlags` (cmd/bv/main.go:533-553), plus the
 /// `-f/-l/-r` shorthand expansion Go's pflag performs when it parses the
 /// result.
@@ -83,6 +134,12 @@ fn normalize_flag_spelling(arg: &str) -> String {
 
     let name_len = rest.find('=').unwrap_or(rest.len());
     let (name, tail) = rest.split_at(name_len);
+    // A registered LONG name wins over the shorthand reading: `-label` is
+    // `--label`, never `-l` + "abel" — Go's rewriteSingleDashLongFlags runs
+    // before pflag's shorthand parse for exactly this reason.
+    if name.len() > 1 && crate::flags::flag_lookup(name) {
+        return format!("--{rest}");
+    }
     if name.len() == 1 {
         if let Some((_, long)) = SHORT_ALIASES
             .iter()
@@ -90,9 +147,20 @@ fn normalize_flag_spelling(arg: &str) -> String {
         {
             return format!("{long}{tail}");
         }
+        return arg.to_string();
     }
-    if name.len() > 1 && crate::flags::flag_lookup(name) {
-        return format!("-{arg}");
+    // Attached shorthand value: pflag reads `-fjson` as `-f json`, so the
+    // first character naming a shorthand claims the rest of the token as
+    // its value (`-lbackend` -> `--label=backend`). Only reached when the
+    // whole name is NOT a registered long flag.
+    if let Some(c) = name.chars().next() {
+        let shorthand = c.to_string();
+        if let Some((_, long)) = SHORT_ALIASES
+            .iter()
+            .find(|(short, _)| short.trim_start_matches('-') == shorthand)
+        {
+            return format!("{long}={}{tail}", &name[c.len_utf8()..]);
+        }
     }
     arg.to_string()
 }
@@ -733,17 +801,21 @@ pub fn unconsumed_positional(rewritten: &[String]) -> Option<String> {
     let mut skip_next = false;
     // Input is argv-minus-program (see `rewrite_args`), so index 0 is
     // the first real argument — do not skip it.
-    for tok in rewritten.iter() {
+    for (idx, tok) in rewritten.iter().enumerate() {
         if skip_next {
             skip_next = false;
             continue;
         }
+        if tok == "--" {
+            // Go's pflag stops parsing at `--`: the terminator itself is
+            // not an argument, and EVERY token after it is positional —
+            // the first one is the unknown command Go would name. Merely
+            // skipping the `--` and resuming flag interpretation reported
+            // nothing for `bv -- --robot-triage` and fell through to the
+            // TUI.
+            return rewritten.get(idx + 1).cloned();
+        }
         if tok.starts_with('-') && tok != "-" {
-            if tok == "--" {
-                // Go's pflag stops parsing at `--`; everything after it is
-                // positional.
-                continue;
-            }
             skip_next = flag_takes_value(tok);
             continue;
         }
@@ -773,14 +845,33 @@ pub fn unknown_long_flag(args: &[String]) -> Option<String> {
             Some((n, _)) => (n, true),
             None => (arg.as_str(), false),
         };
-        let bare = name.trim_start_matches('-');
-        // `-` prefixes of any length name the same flag in Go (`-label` and
-        // `--label` are equivalent), and Go does not define a bare `--`.
-        let known = !bare.is_empty() && crate::flags::flag_kind(bare).is_some();
+        // Cobra's help bool flag is registered on the flag set even though
+        // it is absent from the robot registry: `--help`, `--help=<bool>`,
+        // `-h` and `-h=<bool>` all parse. Only the exact `--help`/`-h`
+        // spellings qualify — `-help` is shorthand-cluster syntax
+        // (`unknown shorthand flag: 'e' in -help`), reported by
+        // [`unknown_shorthand_flag`], not a help request.
+        let is_help = name == "--help" || name == "-h";
+        // pflag strips exactly two dashes for long flags, so `---x` names
+        // the flag `-x` and Go reports `unknown flag: ---x`. Stripping ALL
+        // leading dashes collapsed it into the registered `x`… er, into a
+        // bare name that could alias a real flag (`---version` used to
+        // read as `version`).
+        let bare = name
+            .strip_prefix("--")
+            .or_else(|| name.strip_prefix('-'))
+            .unwrap_or(name);
+        // An empty name (`--`, `--=x`) or a dash-prefixed one (`---x`) is
+        // never a registered flag.
+        let known = is_help
+            || (!bare.is_empty()
+                && !bare.starts_with('-')
+                && crate::flags::flag_kind(bare).is_some());
         if !known {
             return Some(bare.to_string());
         }
         let takes_value = !has_inline_value
+            && !is_help
             && !matches!(
                 crate::flags::flag_kind(bare),
                 Some(crate::flags::FlagKind::Bool) | None
@@ -898,8 +989,39 @@ pub fn go_parse_bool(raw: &str) -> Option<bool> {
 /// wrapping Go's own `strconv.NumError`).
 pub fn go_bool_parse_error(flag: &str, raw: &str) -> String {
     format!(
-        "invalid argument {raw:?} for \"--{flag}\" flag: strconv.ParseBool: parsing {raw:?}: invalid syntax"
+        "invalid argument {} for \"--{flag}\" flag: strconv.ParseBool: parsing {}: invalid syntax",
+        go_strconv_quote(raw),
+        go_strconv_quote(raw)
     )
+}
+
+/// Go `strconv.Quote` — the `%q` verb pflag embeds in its parse errors.
+/// Rust's `{raw:?}` differs on exactly the bytes this exists for: Go emits
+/// `\x01`/`\x7f` as `\xNN` escapes where `Debug` prints the raw control
+/// character, and Go uses the C escapes `\a \b \f \v` that `Debug` spells
+/// differently or not at all.
+fn go_strconv_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{b}' => out.push_str("\\v"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Go `isFlagActive` (cmd/bv/main.go:471-486) for a **bool** flag, read
@@ -921,25 +1043,19 @@ pub fn go_bool_parse_error(flag: &str, raw: &str) -> String {
 /// `Err` carries Go's rejection text for a malformed value, so the caller can
 /// print it and exit 1 the way pflag does.
 pub fn go_bool_flag(args: &[String], name: &str, default: bool) -> Result<bool, String> {
-    let long = format!("--{name}");
-    let with_eq = format!("--{name}=");
-    // pflag applies flags left to right and each `Set` overwrites, so the
-    // LAST occurrence is the effective one.
-    let mut raw: Option<&str> = None;
-    for a in args.iter() {
-        if let Some(v) = a.strip_prefix(&with_eq) {
-            raw = Some(v);
-        } else if a == &long {
-            // A bare bool switch never consumes the next token (pflag gives
-            // bools `NoOptDefVal = "true"`), so it is genuinely valueless and
-            // parses as the truthy default.
-            raw = Some("true");
+    // pflag applies flags left to right, each `Set` overwriting the last —
+    // but it also ABORTS on the first malformed value, so an earlier
+    // `--flag=bogus` is an error even when a later `--flag=true` parses.
+    // Storing only the final raw value and parsing once at the end masked
+    // exactly that case.
+    let mut value: Option<bool> = None;
+    for v in flag_set_values(args, name) {
+        match go_parse_bool(v) {
+            Some(b) => value = Some(b),
+            None => return Err(go_bool_parse_error(name, v)),
         }
     }
-    match raw {
-        None => Ok(default),
-        Some(v) => go_parse_bool(v).ok_or_else(|| go_bool_parse_error(name, v)),
-    }
+    Ok(value.unwrap_or(default))
 }
 
 /// Go `isFlagActive`'s **string** arm (cmd/bv/main.go:479-481): a string flag
@@ -968,27 +1084,204 @@ pub fn go_string_flag_active(args: &[String], name: &str) -> bool {
 /// `--search "" --search real` read as the empty string, which
 /// `go_string_flag_active` then reported inactive where Go sees `real`.
 pub fn go_string_flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-    let long = format!("--{name}");
-    let with_eq = format!("--{name}=");
-    let mut raw: Option<&'a str> = None;
-    for (i, a) in args.iter().enumerate() {
-        if let Some(v) = a.strip_prefix(&with_eq) {
+    // pflag applies each occurrence in order and every `Set` overwrites the
+    // previous value, so the LAST occurrence wins.
+    flag_set_values(args, name).last().copied()
+}
+
+/// Cobra's help bool flag — `--help`, `-h`, and their `=value` forms — read
+/// off argv the way pflag's `boolValue.Set` leaves it.
+///
+/// `help` is NOT in the robot flag registry, but cobra registers it (and the
+/// `h` shorthand) on the flag set, so `--help=false` is a real parse — the
+/// effective value is the last one written. Returns `None` when neither
+/// spelling appears, and `None` for a malformed `=value` too: pflag rejects
+/// that during parsing before help is ever consulted, so the caller's parse
+/// pass owns reporting it.
+///
+/// Nothing in `main` calls this yet: the help check there still matches the
+/// exact `--help`/`-h` tokens, so `--help=<bool>` forms need the call-site
+/// update that consumes this helper.
+#[allow(dead_code)]
+pub fn go_help_flag(args: &[String]) -> Option<bool> {
+    let mut raw: Option<&str> = None;
+    each_flag_set(args, |n, v| {
+        if n == "help" || n == "-h" {
             raw = Some(v);
-        } else if a == &long {
-            raw = args.get(i + 1).map(|s| s.as_str());
         }
+    });
+    raw.and_then(go_parse_bool)
+}
+
+/// Every raw value `name` was `Set` to, in argv order — the effective value
+/// is the last element. `name` is a long flag name (`--name`); the `-h`
+/// shorthand reports under `"-h"` so it cannot be confused with a long `--h`.
+fn flag_set_values<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    each_flag_set(args, |n, v| {
+        if n == name {
+            out.push(v);
+        }
+    });
+    out
+}
+
+/// A pflag-faithful walk over argv: invokes `f(name, set_value)` once per
+/// flag `Set`, in order, where `name` is the long name (`--name`, reported
+/// bare) or the `-h` shorthand (reported WITH its dash, `"-h"`).
+///
+/// The boundaries this models — all of them load-bearing for the readers
+/// above:
+///
+/// * `--name=value` sets `value`; `--name value` makes a non-bool flag
+///   consume the NEXT argv element UNCONDITIONALLY, even when it begins
+///   with `-` (`--export-md --robot-triage` writes a file named
+///   `--robot-triage` and sets no robot flag).
+/// * Bool flags never consume: a bare `--flag` sets `"true"` (pflag's
+///   `NoOptDefVal`), `--flag=v` sets `v`.
+/// * `--` ends flag parsing; nothing after it produces an event.
+/// * A consumed value is skipped — it can never itself look like a flag.
+/// * `---x` is a malformed spelling (name `-x`), not the flag `x`: it
+///   produces no event, matching pflag which rejects it at parse time.
+/// * A trailing value-flag with no operand produces no event (pflag errors
+///   `flag needs an argument` before `Set` runs).
+pub(crate) fn each_flag_set<'a>(args: &'a [String], mut f: impl FnMut(&'a str, &'a str)) {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        if let Some(rest) = a.strip_prefix("--") {
+            let (tok, inline) = match rest.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (rest, None),
+            };
+            // `---x` parses as long name "-x"; `--=v` as empty name — both
+            // malformed, never a Set.
+            if tok.is_empty() || tok.starts_with('-') {
+                i += 1;
+                continue;
+            }
+            let takes_next = inline.is_none()
+                && !matches!(
+                    crate::flags::flag_kind(tok),
+                    Some(crate::flags::FlagKind::Bool) | None
+                );
+            if let Some(v) = inline {
+                f(tok, v);
+            } else if takes_next {
+                if let Some(v) = args.get(i + 1) {
+                    f(tok, v.as_str());
+                    i += 1;
+                }
+            } else {
+                // Bare bool switch — or an unregistered name, which pflag
+                // rejects before any value could matter.
+                f(tok, "true");
+            }
+        } else if a == "-h" {
+            f("-h", "true");
+        } else if let Some(v) = a.strip_prefix("-h=") {
+            f("-h", v);
+        }
+        i += 1;
     }
-    raw
+}
+
+/// The first single-dash cluster pflag would reject with
+/// `unknown shorthand flag: 'x' in -xyz` — Go's shorthand syntax, which is
+/// NOT the `unknown flag: --long` path [`unknown_long_flag`] reports.
+///
+/// Shorthand inventory (cmd/bv/main.go): `h` is cobra's bool help flag;
+/// `f`, `l`, `r` are the string shorthands for `--format`, `--label`,
+/// `--recipe`. A value shorthand claims the rest of its cluster as the
+/// attached value (`-lbackend` → label `backend`) or, when it is the last
+/// character, consumes the next argv element. Anything else is unknown.
+///
+/// Returns the full pflag-style message; `main.rs` should print it and exit
+/// 1. Call [`unknown_long_flag`] FIRST: pflag aborts on the leftmost error,
+///    so an earlier unknown `--long` wins over a later bad cluster.
+///
+/// Nothing in `main` calls this yet — single-dash clusters currently fall
+/// through [`unknown_long_flag`]'s `--`-oriented message. The call site that
+/// prints this message and exits 1 belongs to the `main.rs` owner.
+#[allow(dead_code)]
+pub fn unknown_shorthand_flag(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            return None;
+        }
+        if let Some(rest) = a.strip_prefix("--") {
+            let (tok, inline) = match rest.split_once('=') {
+                Some((n, _)) => (n, true),
+                None => (rest, false),
+            };
+            if tok.is_empty() || tok.starts_with('-') {
+                // Malformed long spelling; the long-flag guard reports it.
+                return None;
+            }
+            let is_help = tok == "help";
+            let known = is_help || crate::flags::flag_kind(tok).is_some();
+            if !known {
+                // pflag aborts here; the long-flag guard owns this error.
+                return None;
+            }
+            if !inline
+                && !is_help
+                && !matches!(
+                    crate::flags::flag_kind(tok),
+                    Some(crate::flags::FlagKind::Bool)
+                )
+            {
+                i += 1; // the value token, even if it looks like a flag
+            }
+            i += 1;
+            continue;
+        }
+        if !a.starts_with('-') || a == "-" {
+            return None;
+        }
+        // Single-dash token: pflag shorthand syntax. `-h`/`-h=v` is help.
+        let body = &a[1..];
+        let shorts = body.split('=').next().unwrap_or(body);
+        let mut chars = shorts.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                'h' => continue,
+                'f' | 'l' | 'r' => {
+                    // Attached value when more cluster chars follow; the
+                    // next argv element when this is the last char and no
+                    // `=value` was written.
+                    if chars.peek().is_none() && !body.contains('=') {
+                        i += 1;
+                    }
+                    break;
+                }
+                _ => {
+                    return Some(format!("unknown shorthand flag: '{c}' in -{shorts}"));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Whether a `--flag` consumes the following token as its value.
 fn flag_takes_value(tok: &str) -> bool {
-    let name = tok.split('=').next().unwrap_or(tok);
-    let name = name.trim_start_matches('-');
-    // A `-`/`--` token written as `name=value` never takes a following value.
     if tok.contains('=') {
         return false;
     }
+    // Strip the flag prefix the way pflag does: `--` for long flags, one
+    // `-` for shorthand. `---x` leaves a dash-prefixed name that can never
+    // be a registered flag — it must not collapse into `x`.
+    let name = tok
+        .strip_prefix("--")
+        .or_else(|| tok.strip_prefix('-'))
+        .unwrap_or(tok);
     // A BOOLEAN flag never consumes the next token; every other registered
     // flag does.
     //
@@ -1800,5 +2093,182 @@ mod tests {
             &s(&["--search", "real", "--search", ""]),
             "search"
         ));
+    }
+
+    /// pflag hands the token after a value-taking flag to that flag
+    /// UNCONDITIONALLY — even one that looks like a flag. So in
+    /// `--export-pages out --label --pages-include-history=false`, the
+    /// `--pages-include-history=false` token is `--label`'s VALUE and the
+    /// history flag keeps its default `true`.
+    #[test]
+    fn value_flag_consumes_next_token_even_when_it_looks_like_a_flag() {
+        let args = s(&[
+            "--export-pages",
+            "out",
+            "--label",
+            "--pages-include-history=false",
+        ]);
+        assert_eq!(
+            go_string_flag_value(&args, "label"),
+            Some("--pages-include-history=false")
+        );
+        // The consumed token never became a Set, so the bool keeps default.
+        assert!(go_bool_flag(&args, "pages-include-history", true).unwrap());
+        // And the mirror image: a bool does NOT consume, so the next token
+        // is scanned normally.
+        let args = s(&["--robot-drift", "--check-drift"]);
+        assert!(go_bool_flag(&args, "check-drift", false).unwrap());
+    }
+
+    /// `--name value` and `--name=value` are the same Set for the readers;
+    /// a value flag's operand is skipped entirely, so it cannot activate a
+    /// second flag.
+    #[test]
+    fn consumed_value_cannot_activate_another_flag() {
+        let args = s(&["--export-md", "--robot-triage"]);
+        assert_eq!(
+            go_string_flag_value(&args, "export-md"),
+            Some("--robot-triage")
+        );
+        assert!(!go_bool_flag(&args, "robot-triage", false).unwrap());
+    }
+
+    /// `--` terminates flag parsing: nothing after it is a Set, and
+    /// `unconsumed_positional` names the first token after it — the unknown
+    /// command Go's cobra reports.
+    #[test]
+    fn double_dash_terminates_flag_parsing() {
+        let args = s(&["--robot-triage", "--", "--pages-include-history=false"]);
+        assert!(go_bool_flag(&args, "pages-include-history", true).unwrap());
+        assert_eq!(
+            unconsumed_positional(&rewrite_args(&args)).as_deref(),
+            Some("--pages-include-history=false")
+        );
+        // A bare `--` with nothing after it leaves no positional.
+        assert_eq!(unconsumed_positional(&s(&["--robot-triage", "--"])), None);
+    }
+
+    /// `---flag` is a malformed spelling, not `flag`: pflag strips exactly
+    /// two dashes and looks up `-flag`, which is unregistered. The scanner
+    /// must not collapse it into the real flag.
+    #[test]
+    fn triple_dash_is_not_a_registered_flag() {
+        let args = s(&["---pages-include-history=false"]);
+        assert!(go_bool_flag(&args, "pages-include-history", true).unwrap());
+        assert_eq!(
+            unknown_long_flag(&args).as_deref(),
+            Some("-pages-include-history")
+        );
+        let args = s(&["---version"]);
+        assert_eq!(unknown_long_flag(&args).as_deref(), Some("-version"));
+    }
+
+    /// Cobra's help bool accepts `=value` forms: `--help`, `--help=true`,
+    /// `-h`, `-h=false`. A malformed value is a ParseBool error upstream,
+    /// which the helper reports as `None` (absent) rather than guessing.
+    #[test]
+    fn help_flag_eq_forms() {
+        assert_eq!(go_help_flag(&s(&["--help"])), Some(true));
+        assert_eq!(go_help_flag(&s(&["--help=true"])), Some(true));
+        assert_eq!(go_help_flag(&s(&["--help=false"])), Some(false));
+        assert_eq!(go_help_flag(&s(&["-h"])), Some(true));
+        assert_eq!(go_help_flag(&s(&["-h=true"])), Some(true));
+        assert_eq!(go_help_flag(&s(&["-h=false"])), Some(false));
+        assert_eq!(go_help_flag(&s(&["--help=bogus"])), None);
+        assert_eq!(go_help_flag(&s(&[])), None);
+        // Last occurrence wins across spellings.
+        assert_eq!(go_help_flag(&s(&["--help", "--help=false"])), Some(false));
+        assert_eq!(go_help_flag(&s(&["-h=false", "--help"])), Some(true));
+        // `--h` is NOT the help flag — only `-h` is the shorthand.
+        assert_eq!(go_help_flag(&s(&["--h"])), None);
+        // A value flag swallows `-h`: `--export-md -h` writes a file named
+        // `-h` and asks for no help.
+        assert_eq!(go_help_flag(&s(&["--export-md", "-h"])), None);
+    }
+
+    /// pflag parses each bool occurrence as it is Set and aborts on the
+    /// first malformed value — a later valid `--flag=true` cannot mask an
+    /// earlier `--flag=bogus`.
+    #[test]
+    fn bool_flag_first_invalid_occurrence_wins() {
+        let args = s(&[
+            "--pages-include-history=bogus",
+            "--pages-include-history=true",
+        ]);
+        let err = go_bool_flag(&args, "pages-include-history", true).unwrap_err();
+        assert!(err.contains("invalid argument \"bogus\""), "{err}");
+        // The reverse order parses cleanly: last valid value is effective.
+        let args = s(&[
+            "--pages-include-history=true",
+            "--pages-include-history=bogus",
+        ]);
+        assert!(go_bool_flag(&args, "pages-include-history", true).is_err());
+        let args = s(&[
+            "--pages-include-history=false",
+            "--pages-include-history=true",
+        ]);
+        assert!(go_bool_flag(&args, "pages-include-history", true).unwrap());
+    }
+
+    /// `-fjson`, `-lbackend`, `-rrecipe` are pflag's attached shorthand
+    /// values — but ONLY in flag position. A token consumed as another
+    /// flag's value is copied verbatim.
+    #[test]
+    fn attached_shorthand_values_expand() {
+        assert_eq!(rewrite_args(&s(&["-fjson"])), s(&["--format=json"]));
+        assert_eq!(rewrite_args(&s(&["-lbackend"])), s(&["--label=backend"]));
+        assert_eq!(rewrite_args(&s(&["-rrecipe"])), s(&["--recipe=recipe"]));
+        assert_eq!(rewrite_args(&s(&["-f", "json"])), s(&["--format", "json"]));
+        // `-f` as `--export-md`'s value stays `-f` — it is a filename.
+        assert_eq!(
+            rewrite_args(&s(&["--export-md", "-f"])),
+            s(&["--export-md", "-f"])
+        );
+        // After `--`, nothing is normalized either.
+        assert_eq!(rewrite_args(&s(&["--", "-fjson"])), s(&["--", "-fjson"]));
+    }
+
+    /// Go's `%q` escaping, not Rust's `Debug`: control bytes become `\xNN`
+    /// and the C escapes `\a \b \v \f` appear where `Debug` prints raw or
+    /// differently-spelled characters.
+    #[test]
+    fn bool_parse_error_uses_go_percent_q_escaping() {
+        assert_eq!(
+            go_bool_parse_error("flag", "yes"),
+            "invalid argument \"yes\" for \"--flag\" flag: strconv.ParseBool: parsing \"yes\": invalid syntax"
+        );
+        assert!(go_bool_parse_error("flag", "\u{1}").contains("\\x01"));
+        assert!(go_bool_parse_error("flag", "\u{7f}").contains("\\x7f"));
+        assert!(go_bool_parse_error("flag", "\u{7}").contains("\\a"));
+        assert!(go_bool_parse_error("flag", "\n").contains("\\n"));
+        assert!(go_bool_parse_error("flag", "a\"b").contains("\\\""));
+    }
+
+    /// Single-dash clusters are shorthand syntax, not unknown long flags:
+    /// `-help` fails on `e`, `-xyz` on `x`. Value shorthands and `-h` parse.
+    #[test]
+    fn shorthand_clusters_report_go_unknown_shorthand() {
+        assert_eq!(
+            unknown_shorthand_flag(&s(&["-help"])).as_deref(),
+            Some("unknown shorthand flag: 'e' in -help")
+        );
+        assert_eq!(
+            unknown_shorthand_flag(&s(&["-xyz"])).as_deref(),
+            Some("unknown shorthand flag: 'x' in -xyz")
+        );
+        assert_eq!(unknown_shorthand_flag(&s(&["-h"])), None);
+        assert_eq!(unknown_shorthand_flag(&s(&["-h=false"])), None);
+        assert_eq!(unknown_shorthand_flag(&s(&["-fjson"])), None);
+        assert_eq!(unknown_shorthand_flag(&s(&["-lbackend"])), None);
+        // `-hf json`: h is bool, f is last so it consumes the next token —
+        // no shorthand error, and the value is not scanned as a cluster.
+        assert_eq!(unknown_shorthand_flag(&s(&["-hf", "-x"])), None);
+        // A value flag's operand is skipped: `-x` here is `--export-md`'s
+        // value, not a cluster.
+        assert_eq!(unknown_shorthand_flag(&s(&["--export-md", "-x"])), None);
+        // `--` ends the walk.
+        assert_eq!(unknown_shorthand_flag(&s(&["--", "-xyz"])), None);
+        // An unknown long flag aborts pflag first; the long guard owns it.
+        assert_eq!(unknown_shorthand_flag(&s(&["--bogus", "-xyz"])), None);
     }
 }

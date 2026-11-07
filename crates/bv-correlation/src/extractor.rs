@@ -121,7 +121,8 @@ impl CommitHeader {
         let text = String::from_utf8_lossy(line);
         let mut parts = text.split('\0');
         let sha = parts.next()?.to_string();
-        if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // 40 hex chars for SHA-1 repos, 64 for SHA-256 repos.
+        if !(sha.len() == 40 || sha.len() == 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
         let timestamp = parts.next()?.to_string();
@@ -252,15 +253,20 @@ pub fn parse_log_output(output: &str, filter_bead_id: Option<&str>) -> Vec<BeadE
     let mut all_events = Vec::new();
 
     // Split into commit sections by the header line pattern:
-    // <40-hex>\x00<rfc3339>\x00<name>\x00<email>\x00<subject>
+    // <sha>\x00<rfc3339>\x00<name>\x00<email>\x00<subject>
+    // where <sha> is 40 hex chars on SHA-1 repos and 64 on SHA-256 repos.
     let mut current: Option<(CommitHeader, String)> = None;
 
     for line in output.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        // Header detection: 40 hex chars followed by NUL
+        // Header detection: the first NUL-separated field is a 40- or
+        // 64-hex SHA followed by more fields.
         let bytes = line.as_bytes();
-        let is_header =
-            bytes.len() > 41 && bytes[..40].iter().all(|b| b.is_ascii_hexdigit()) && bytes[40] == 0;
+        let is_header = bytes.iter().position(|b| *b == 0).is_some_and(|nul| {
+            (nul == 40 || nul == 64)
+                && bytes[..nul].iter().all(|b| b.is_ascii_hexdigit())
+                && bytes.len() > nul + 1
+        });
 
         if is_header {
             if let Some((info, diff)) = current.take() {
@@ -497,6 +503,39 @@ mod tests {
         "dev@example.com\x00",
         "beads: close phase1a\n"
     );
+
+    /// `CommitHeader::parse` accepts both SHA widths: 40 hex (SHA-1) and
+    /// 64 hex (SHA-256).
+    #[test]
+    fn commit_header_accepts_sha1_and_sha256() {
+        let sha1 = "a".repeat(40);
+        let sha256 = "b".repeat(64);
+        for sha in [&sha1, &sha256] {
+            let line = format!("{sha}\x002026-01-01T00:00:00Z\x00A\x00a@x\x00msg");
+            let header = CommitHeader::parse(line.as_bytes()).expect("header");
+            assert_eq!(header.sha, *sha);
+        }
+        // Wrong widths and non-hex are still rejected.
+        assert!(CommitHeader::parse(b"abc\x00t\x00a\x00e\x00m").is_none());
+        assert!(CommitHeader::parse(
+            b"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\x00t\x00a\x00e\x00m"
+        )
+        .is_none());
+    }
+
+    /// The patch path's header-line detection must also recognize a 64-hex
+    /// SHA-256 header, otherwise every line lands in the previous diff.
+    #[test]
+    fn parse_log_output_recognizes_sha256_headers() {
+        let sha256 = "b".repeat(64);
+        let log = format!(
+            "{sha256}\x002026-08-22T10:00:00Z\x00A\x00a@x\x00beads: close x\n+{{\"id\":\"X-1\",\"title\":\"T\",\"status\":\"open\"}}\n"
+        );
+        let events = parse_log_output(&log, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].bead_id, "X-1");
+        assert_eq!(events[0].commit_sha, sha256);
+    }
 
     #[test]
     fn history_filters_are_appended_in_git_order() {

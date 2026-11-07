@@ -254,8 +254,10 @@ pub struct FreshnessMetrics {
 /// issues, so `oldest_open_issue` is not null.
 const GO_ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 
-/// Render a timestamp the way Go marshals a `time.Time`: UTC, RFC3339Nano,
-/// trailing zeros in the fractional part removed.
+/// Render a timestamp the way Go marshals a `time.Time`: RFC3339Nano. Note
+/// Go's `Time.MarshalJSON` does NOT convert to UTC — it re-emits the zone
+/// offset the value was parsed with, so callers that need offset fidelity
+/// must use [`go_time_string_source`] instead.
 fn go_time_string(ts: Option<jiff::Timestamp>) -> String {
     match ts {
         None => GO_ZERO_TIME.to_string(),
@@ -278,6 +280,62 @@ fn go_time_string(ts: Option<jiff::Timestamp>) -> String {
     }
 }
 
+/// Render the SOURCE string of the winning timestamp the way Go marshals the
+/// `time.Time` it parsed from it: same wall-clock fields, same numeric zone
+/// offset, RFC3339Nano fraction (trailing zeros trimmed, dot dropped when the
+/// fraction is zero). Go's JSON loader keeps the offset a timestamp was
+/// written with (`time.Parse` preserves the fixed zone and `MarshalJSON`
+/// re-emits it), so normalizing to `Z` like [`go_time_string`] would diverge
+/// on any non-UTC input. Returns [`GO_ZERO_TIME`] when there is no winner.
+fn go_time_string_source(raw: Option<&str>, fallback: Option<jiff::Timestamp>) -> String {
+    let Some(raw) = raw else {
+        return go_time_string(fallback);
+    };
+    // The zone designator is the first 'Z'/'z' or '+'/'-' at or after the
+    // date-time separator — earlier '-' bytes are the date's own dashes.
+    let t_pos = raw.find(['T', 't']).unwrap_or(raw.len());
+    let mut split = raw.len();
+    for (i, b) in raw.bytes().enumerate().skip(t_pos) {
+        if matches!(b, b'Z' | b'z' | b'+') || (b == b'-' && i > t_pos) {
+            split = i;
+            break;
+        }
+    }
+    let (body, offset) = raw.split_at(split);
+    // RFC3339Nano: trim trailing zeros in the fraction; drop the dot when
+    // nothing remains. The fraction is the only '.' in the body.
+    let body = match body.rfind('.') {
+        Some(dot) => {
+            let frac = body[dot + 1..].trim_end_matches('0');
+            if frac.is_empty() {
+                &body[..dot]
+            } else {
+                // Rebuild without allocating twice: keep through the dot.
+                return format!(
+                    "{}{}{}",
+                    &body[..=dot],
+                    frac,
+                    if offset.eq_ignore_ascii_case("z") {
+                        "Z"
+                    } else {
+                        offset
+                    }
+                );
+            }
+        }
+        None => body,
+    };
+    format!(
+        "{}{}",
+        body,
+        if offset.eq_ignore_ascii_case("z") {
+            "Z"
+        } else {
+            offset
+        }
+    )
+}
+
 pub fn compute_freshness_metrics(
     issues: &[Issue],
     now: jiff::Timestamp,
@@ -289,7 +347,12 @@ pub fn compute_freshness_metrics(
         stale_days
     };
     let mut most_recent: Option<jiff::Timestamp> = None;
+    // The SOURCE strings of the winning timestamps — Go re-emits the zone
+    // offset they were parsed with, which `jiff::Timestamp` (an absolute
+    // instant) cannot represent.
+    let mut most_recent_raw: Option<&str> = None;
     let mut oldest_open: Option<jiff::Timestamp> = None;
+    let mut oldest_open_raw: Option<&str> = None;
     let mut total_staleness = 0.0;
     let mut count = 0i64;
     let mut stale_count = 0i64;
@@ -299,6 +362,7 @@ pub fn compute_freshness_metrics(
         if let Some(updated) = parse_ts(&iss.updated_at) {
             if most_recent.is_none_or(|m| updated > m) {
                 most_recent = Some(updated);
+                most_recent_raw = iss.updated_at.as_deref();
             }
             // Go's `now.Sub(iss.UpdatedAt).Hours() / 24.0`
             // (label_health.go:440) — `Duration.Hours()` is the integer
@@ -322,6 +386,7 @@ pub fn compute_freshness_metrics(
             if let Some(created) = parse_ts(&iss.created_at) {
                 if oldest_open.is_none_or(|o| created < o) {
                     oldest_open = Some(created);
+                    oldest_open_raw = iss.created_at.as_deref();
                 }
             }
         }
@@ -335,11 +400,11 @@ pub fn compute_freshness_metrics(
     let freshness_score = (100.0 - (avg_staleness / (threshold * 2.0)) * 100.0).max(0.0) as i64;
 
     FreshnessMetrics {
-        // Go marshals these as time.Time, so they are re-rendered in UTC
-        // RFC3339Nano rather than passed through verbatim from the source
-        // record — the raw text can carry a different offset or precision.
-        most_recent_update: go_time_string(most_recent),
-        oldest_open_issue: go_time_string(oldest_open),
+        // Go marshals these as time.Time, preserving the zone offset each
+        // value was parsed with — emit the winning source string, not a
+        // UTC-normalized rendering.
+        most_recent_update: go_time_string_source(most_recent_raw, most_recent),
+        oldest_open_issue: go_time_string_source(oldest_open_raw, oldest_open),
         avg_days_since_update: avg_staleness,
         stale_count,
         stale_threshold_days: stale_days,
@@ -2244,5 +2309,39 @@ mod tests {
         assert_eq!(all["api"].weekly_velocity[0].closed, 2);
         assert_eq!(all["ui"].weekly_velocity[0].closed, 2);
         assert_eq!(all["api"].weeks_analyzed, 4);
+    }
+
+    /// Go `time.Time.MarshalJSON` re-emits the zone offset the value was
+    /// parsed with — it does NOT normalize to UTC. A `+07:00` source must
+    /// come back as `+07:00`, and the RFC3339Nano fraction must shed trailing
+    /// zeros, not the offset.
+    #[test]
+    fn freshness_preserves_source_zone_offset() {
+        let mut a = issue("A-1", Status::Open, &["api"]);
+        a.updated_at = Some("2026-03-01T12:00:00.500+07:00".into());
+        a.created_at = Some("2025-12-31T23:59:59+07:00".into());
+        let mut b = issue("A-2", Status::Open, &["api"]);
+        b.updated_at = Some("2026-03-01T04:00:00Z".into()); // same instant as A-1
+        b.created_at = Some("2026-01-05T00:00:00Z".into());
+        let issues = vec![a, b];
+        let now = "2026-03-02T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let m = compute_freshness_metrics(&issues, now, 14);
+        // Most recent: A-1 and A-2 are the same instant; Go's strict `After`
+        // keeps the FIRST seen, so A-1's +07:00 spelling wins.
+        assert_eq!(m.most_recent_update, "2026-03-01T12:00:00.5+07:00");
+        // Oldest open: A-1's created_at is earlier, offset preserved.
+        assert_eq!(m.oldest_open_issue, "2025-12-31T23:59:59+07:00");
+    }
+
+    #[test]
+    fn freshness_zero_offset_still_renders_z() {
+        let mut a = issue("A-1", Status::Open, &["api"]);
+        a.updated_at = Some("2026-03-01T12:00:00.000Z".into());
+        a.created_at = Some("2026-01-01T00:00:00Z".into());
+        let issues = vec![a];
+        let now = "2026-03-02T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let m = compute_freshness_metrics(&issues, now, 14);
+        assert_eq!(m.most_recent_update, "2026-03-01T12:00:00Z");
+        assert_eq!(m.oldest_open_issue, "2026-01-01T00:00:00Z");
     }
 }

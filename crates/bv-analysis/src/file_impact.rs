@@ -1,8 +1,21 @@
 //! robot-impact — file-based impact analysis.
-//! Port of Go `cmd/bv/robot_registry.go` handleRobotImpact.
+//!
+//! **DEAD CODE — DO NOT WIRE.** `compute_file_impact` below is an invented
+//! heuristic (substring file matching over the sha-only correlation map, a
+//! ">10 affected beads => high" risk ladder, and a summary format that appears
+//! nowhere in Go). It has no callers and must not gain any: production
+//! `--robot-impact` in `crates/bv/src/main.rs` (~line 19771) calls
+//! `bv_correlation::file_index::FileLookup::impact_analysis_at(&files,
+//! robot_now())`, the faithful port of Go `ImpactAnalysisAt`
+//! (file_index.go:595). This module is retained only because file deletion is
+//! prohibited; treat everything in it as reference scaffolding, not an
+//! implementation to align or extend.
 
 use bv_correlation::correlator::CorrelatedCommit;
 
+/// **DEAD / NON-PARITY.** Invented heuristic retained for reference only —
+/// see the module docs. The Go-faithful implementation is
+/// `bv_correlation::file_index::FileLookup::impact_analysis_at`.
 pub fn compute_file_impact(
     files: &[String],
     report: &std::collections::BTreeMap<String, Vec<CorrelatedCommit>>,

@@ -1449,7 +1449,10 @@ impl App {
     /// are identical either way: the index is a pure cache.
     fn apply_semantic(&mut self) {
         if self.semantic_query.is_empty() {
-            self.filtered_indices = (0..self.rows.len()).collect();
+            // Empty query restores the filtered+sorted order — same
+            // contract as `apply_search` (clearing the query returns the
+            // list to its filtered items, not the raw row set).
+            self.apply_filter();
             self.cursor = 0;
             return;
         }
@@ -1503,6 +1506,12 @@ impl App {
 
         let mut scored: Vec<(i64, usize)> = Vec::new();
         for (i, text_score) in text_scores {
+            // Search runs *within* the active label/repo/status filters —
+            // same intersection `apply_search` applies (Go's search
+            // narrows the already-filtered item set, it does not widen it).
+            if !self.row_passes_filters(i) {
+                continue;
+            }
             let row = &self.rows[i];
             let pr = self
                 .graph_metrics

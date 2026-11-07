@@ -124,13 +124,27 @@ fn parse_snapshot_log(out: &[u8]) -> Vec<SnapshotCommit> {
 }
 
 /// Go's `commitPattern.FindAllIndex` + `forEachCommitChunk` boundary detection:
-/// a commit header starts at a 40-hex-char run immediately followed by NUL.
+/// a commit header starts at a hex run — 40 chars for SHA-1 repos, 64 for
+/// SHA-256 repos — immediately followed by NUL. The run must be *exactly* the
+/// SHA width; a longer hex run is message/author text, not a header. This is
+/// the same scan `history::for_each_commit_chunk` performs.
 fn commit_chunks(out: &[u8]) -> Vec<&[u8]> {
     let mut starts = Vec::new();
-    for i in 0..out.len().saturating_sub(40) {
-        if out[i..i + 40].iter().all(u8::is_ascii_hexdigit) && out[i + 40] == 0 {
+    let mut i = 0usize;
+    while i < out.len() {
+        if !out[i].is_ascii_hexdigit() {
+            i += 1;
+            continue;
+        }
+        let mut run_end = i;
+        while run_end < out.len() && out[run_end].is_ascii_hexdigit() {
+            run_end += 1;
+        }
+        let run_len = run_end - i;
+        if (run_len == 40 || run_len == 64) && out.get(run_end) == Some(&0) {
             starts.push(i);
         }
+        i = run_end.max(i + 1);
     }
     starts
         .iter()
@@ -865,8 +879,38 @@ mod tests {
 
     #[test]
     fn commit_chunks_split_on_header_pattern() {
-        let out = b"aaaaaaaaaabbbbbbbbbbccccccccccccdddddddddd\x00rest\npayload\nsecond-header";
-        let chunks = commit_chunks(out);
+        let sha1 = "a".repeat(40);
+        let out = format!("{sha1}\x00rest\npayload\nsecond-header");
+        let chunks = commit_chunks(out.as_bytes());
         assert_eq!(chunks.len(), 1, "only the 40-hex + NUL run is a header");
+        assert!(chunks[0].starts_with(sha1.as_bytes()));
+    }
+
+    /// The hex run must be *exactly* the SHA width: a 42-hex run followed by
+    /// NUL is message text, not a header (same rule as
+    /// `history::for_each_commit_chunk`).
+    #[test]
+    fn commit_chunks_reject_overlong_hex_runs() {
+        let mut out = "c".repeat(42).into_bytes();
+        out.push(0);
+        out.extend_from_slice(b"not a header\n");
+        assert!(commit_chunks(&out).is_empty());
+    }
+
+    /// SHA-256 repos emit 64-hex commit headers; both widths must split.
+    #[test]
+    fn commit_chunks_accept_sha256_width() {
+        let sha256 = "b".repeat(64);
+        let mut out = Vec::new();
+        out.extend_from_slice(&b"a".repeat(40));
+        out.push(0);
+        out.extend_from_slice(b"header-one\npayload\n");
+        out.extend_from_slice(sha256.as_bytes());
+        out.push(0);
+        out.extend_from_slice(b"header-two\npayload\n");
+        let chunks = commit_chunks(&out);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].starts_with(&b"a".repeat(40)));
+        assert!(chunks[1].starts_with(sha256.as_bytes()));
     }
 }

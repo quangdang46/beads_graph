@@ -1094,24 +1094,23 @@ fn render_report_template(
     ))
 }
 
-/// Go's `encoding/csv` field rule (writer.go `fieldNeedsQuotes`): a field is
-/// quoted when it is empty-but-one, is a bare quote, has leading or trailing
-/// whitespace, or contains a comma, quote, CR or LF. Quotes inside are doubled.
-///
-/// The previous hand-rolled writer replaced commas in titles with spaces and
-/// dropped two columns, so a title containing a comma silently lost data and
-/// `description` and `labels` were missing entirely.
+/// Go's `encoding/csv` field rule (writer.go `fieldNeedsQuotes`, go1.26):
+/// empty is NOT quoted; the Postgres terminator `\.` always is; a comma,
+/// quote, CR or LF anywhere forces quotes; and the FIRST rune being
+/// `unicode.IsSpace` does — a leading tab or non-ASCII space counts, while a
+/// TRAILING ASCII space does not (the earlier port quoted on `ends_with(' ')`
+/// and missed every non-space leading whitespace Go catches).
 fn csv_field_needs_quotes(field: &str) -> bool {
     if field.is_empty() {
         return false;
     }
-    if field == "\"" {
+    if field == "\\." {
         return true;
     }
-    if field.starts_with(' ') || field.ends_with(' ') {
+    if field.chars().any(|c| matches!(c, ',' | '"' | '\r' | '\n')) {
         return true;
     }
-    field.chars().any(|c| matches!(c, ',' | '"' | '\r' | '\n'))
+    field.chars().next().is_some_and(|c| c.is_whitespace())
 }
 
 fn csv_write_field(out: &mut String, field: &str) {
@@ -1330,19 +1329,18 @@ fn export_graph_result(issues: &[bv_core::model::Issue], data_hash: &str) -> ser
 }
 
 fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
-    let flag_value = |name: &str| -> Option<String> {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-    };
-    let format = match flag_value("--export-format") {
-        Some(value) => value,
+    // `--export-format`/`--export-template` are pflag strings, so the `=`
+    // spelling and last-occurrence-wins both apply — the shared `flag_value`
+    // scan, not a bare `--flag value` position lookup.
+    let format = match flag_value(args, "export-format") {
+        Some(value) => value.to_string(),
         // Go `ResolveReportOptions` seeds Format with "markdown" and only a
         // recipe or an explicit override replaces it.
         None => "markdown".to_string(),
     };
-    let template = flag_value("--export-template").unwrap_or_default();
+    let template = flag_value(args, "export-template")
+        .unwrap_or_default()
+        .to_string();
     // Go `ReportOptions.validate` (pkg/export/markdown.go:80-90) rejects these
     // combinations before rendering anything. Rust had no equivalent, so a
     // `--export-template` alongside a non-markdown format was accepted and the
@@ -1354,10 +1352,19 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     // argv element, swallowing it and then validating combinations Go never
     // rejected. With no override, `ResolveReportOptions` derives the default
     // from the format, so markdown keeps its graph and csv never gets one.
-    let include_graph_flag = match args
-        .iter()
-        .find_map(|a| a.strip_prefix("--export-include-graph="))
-    {
+    // pflag-faithful last-wins bool read: a BARE `--export-include-graph` is
+    // `true` (NoOptDefVal), `--flag=v` parses through `strconv.ParseBool`,
+    // and a value consumed by an earlier flag never counts. The previous
+    // `=`-prefix-only scan dropped the bare form, so
+    // `--export-format csv --export-include-graph` skipped Go's
+    // "CSV cannot include a graph" rejection below.
+    let mut include_graph_raw: Option<&str> = None;
+    crate::argv::each_flag_set(args, |name, value| {
+        if name == "export-include-graph" {
+            include_graph_raw = Some(value);
+        }
+    });
+    let include_graph_flag = match include_graph_raw {
         None => format != "csv",
         Some(raw) => match parse_go_bool(raw) {
             Some(parsed) => parsed,
@@ -1553,12 +1560,27 @@ fn main() -> ExitCode {
         eprintln!("{msg}");
         return ExitCode::from(1);
     }
+    // Single-dash clusters are shorthand syntax and fail at the same parse
+    // stage: `-x` is pflag's `unknown shorthand flag: 'x' in -x`, a different
+    // message than the long-flag guard below. `go_flag_parse_error`
+    // deliberately skips these tokens so this is the only place they are
+    // reported — and it must run before `--help`, because pflag aborts on
+    // the parse error before cobra ever consults the help flag.
+    if let Some(msg) = argv::unknown_shorthand_flag(&args) {
+        eprintln!("{msg}");
+        return ExitCode::from(1);
+    }
 
     // --help/-h short-circuits everything else (Go parity): cobra's help flag
     // is consulted before the root command runs, so `--help` wins over
     // `--version`, over modifier-requires violations, over exclusive-primary
     // violations, and over any `--robot-*` dispatch. Exit code 0 either way.
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    //
+    // `argv::go_help_flag` reads it the way pflag leaves it: `--help=false`
+    // and `-h=false` are parsed bools, so they do NOT trigger help, a bare
+    // `--help` sets true, and the LAST occurrence wins. A value consumed by
+    // an earlier flag (`--export-md --help`) never counts.
+    if argv::go_help_flag(&args) == Some(true) {
         print!("{}", flags::render_help(flags::HELP_PROGRAM));
         return ExitCode::from(0);
     }
@@ -1728,7 +1750,12 @@ fn main() -> ExitCode {
     // here: after the stages Go runs first, before the first command Go
     // dispatches.
     if presence.has("format") {
-        let fmt_val = flag_value(&args, "format").unwrap_or("json").to_string();
+        // Go `resolveRobotOutputFormat` (main.go:7567-7579): TrimSpace the
+        // flag, fall back through BV_OUTPUT_FORMAT → TOON_DEFAULT_FORMAT →
+        // "json" on empty, then ToLower — so `--format=TOON ` is valid and
+        // `--format=` is not an error. `flag_value` supplies the `=` spelling
+        // and last-occurrence-wins.
+        let fmt_val = resolve_robot_output_format(flag_value(&args, "format").unwrap_or_default());
         if fmt_val != "json" && fmt_val != "toon" {
             eprintln!("Invalid --format \"{fmt_val}\" (expected json|toon)");
             return ExitCode::from(2);
@@ -2043,20 +2070,31 @@ fn main() -> ExitCode {
     // --export (Go main.go:4372) writes a report using recipe defaults, with
     // --export-format / --export-include-graph / --export-template as overrides.
     // Also must not fall through to the TUI.
-    if flag_present(&args, "export") {
-        let output_path = flag_value(&args, "export").unwrap_or_default().to_string();
-        if flag_present(&args, "export-md") && !output_path.is_empty() {
-            eprintln!("Error: --export and --export-md specify conflicting output paths");
-            return ExitCode::from(2);
+    //
+    // Go gates BOTH spellings on the parsed value being non-empty
+    // (main.go:4372 `*exportFile != "" || *exportReport != ""`), so
+    // `--export=` and `--export-md=` are absent flags, not empty-path
+    // exports, and the conflict fires only when both carry a path.
+    let export_path = flag_value(&args, "export")
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let export_md_path = flag_value(&args, "export-md")
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    if export_path.is_some() || export_md_path.is_some() {
+        if export_path.is_some() && export_md_path.is_some() {
+            // Go returns this as a RunE error which main prints bare
+            // (no "Error:" prefix, no usage) at exit 1.
+            eprintln!("--export and --export-md specify conflicting output paths");
+            return ExitCode::from(1);
         }
-        return run_export_report(&args, &output_path);
+        if let Some(path) = export_path {
+            return run_export_report(&args, &path);
+        }
     }
 
     // Export markdown (Phase 5a).
-    if flag_present(&args, "export-md") {
-        let output_path = flag_value(&args, "export-md")
-            .map(str::to_string)
-            .unwrap_or_else(|| "report.md".to_string());
+    if let Some(output_path) = export_md_path {
         let cwd = go_working_dir();
         let (issues, stats) = match load_issues_tracked(&cwd) {
             Ok(x) => x,
@@ -2098,10 +2136,12 @@ fn main() -> ExitCode {
     }
 
     // Export graph (Go --export-graph: .html interactive / json|dot|mermaid).
-    if flag_present(&args, "export-graph") {
-        let output_path = flag_value(&args, "export-graph")
-            .unwrap_or_default()
-            .to_string();
+    // Go gates on `*exportGraph != ""` (main.go:3467), so the empty equals
+    // form is an absent flag.
+    if let Some(output_path) = flag_value(&args, "export-graph")
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+    {
         let cwd = go_working_dir();
         let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
             Ok(x) => x,
@@ -2301,7 +2341,13 @@ fn main() -> ExitCode {
     if presence.has("check-drift") {
         return run_check_drift();
     }
-    if let Some(desc) = flag_value(&args, "save-baseline").map(str::to_string) {
+    // Go main.go:3573 gates on `*saveBaseline != ""`, so `--save-baseline=`
+    // (empty equals form) does NOT dispatch — it falls through like an absent
+    // flag. `flag_value` returns Some("") there, so filter it.
+    if let Some(desc) = flag_value(&args, "save-baseline")
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+    {
         return run_save_baseline(&desc);
     }
 
@@ -2387,7 +2433,7 @@ fn main() -> ExitCode {
         return run_robot_label_flow();
     }
     if presence.has("robot-label-attention") {
-        return run_robot_label_attention();
+        return run_robot_label_attention(&args);
     }
     if presence.has("robot-blocker-chain") {
         return run_robot_blocker_chain(&args);
@@ -2473,11 +2519,12 @@ fn main() -> ExitCode {
     if presence.has("pages") {
         return run_pages_wizard(&args);
     }
-    // Export pages (static site bundle, Go --export-pages).
-    if flag_present(&args, "export-pages") {
-        let out_dir = flag_value(&args, "export-pages")
-            .map(str::to_string)
-            .unwrap_or_else(|| "./bv-pages".to_string());
+    // Export pages (static site bundle, Go --export-pages). Go gates on
+    // `*exportPages != ""` (main.go:3059), so `--export-pages=` is absent.
+    if let Some(out_dir) = flag_value(&args, "export-pages")
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+    {
         // Go main.go:1622 registers `--pages-title` with an empty default, and
         // the emptiness is load-bearing twice over: `replaceTitle` is skipped
         // entirely (viewer_embed.go:69), leaving index.html's own
@@ -3079,10 +3126,11 @@ fn main() -> ExitCode {
     }
 
     // Preview pages (Go --preview-pages): export then serve with livereload.
-    if flag_present(&args, "preview-pages") {
-        let dir = flag_value(&args, "preview-pages")
-            .map(str::to_string)
-            .unwrap_or_else(|| "./bv-pages".to_string());
+    // Go gates on `*previewPages != ""` (main.go:3050).
+    if let Some(dir) = flag_value(&args, "preview-pages")
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+    {
         // Go has no pre-flight check: it hands the path straight to
         // `runPreviewServer` (main.go:3050-3051), whose own stat is what
         // fails. This branch reproduced the symptom with different wording and
@@ -3404,17 +3452,15 @@ fn launch_tui(app: &mut bv_tui::App, issues: &[bv_core::model::Issue]) -> ExitCo
 }
 
 /// Extract --as-of value from process args (Go parity: global flag).
+///
+/// Go's `flag` package assigns through `Set` on every occurrence, so a
+/// repeated `--as-of` keeps the LAST value; the single-dash long spelling
+/// (`-as-of`) parses too, which is why the raw argv goes through
+/// `argv::rewrite_args` first — same as `resolve_not_ready_labels`.
 fn extract_as_of() -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    for i in 1..args.len() {
-        if args[i] == "--as-of" {
-            return args.get(i + 1).cloned();
-        }
-        if let Some(val) = args[i].strip_prefix("--as-of=") {
-            return Some(val.to_string());
-        }
-    }
-    None
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let args = argv::rewrite_args(&raw);
+    flag_value(&args, "as-of").map(str::to_string)
 }
 
 /// Load issues from cwd, honoring workspace config if present (multi-repo).
@@ -3749,6 +3795,18 @@ fn source_parse_facts() -> Option<&'static (usize, Vec<String>)> {
     SOURCE_PARSE_FACTS.get()
 }
 
+/// The digest Go's loader reports for the file it read — `sourceIssuesHash`
+/// (cmd/bv/main.go:7354-7356): the visible issues plus a bare tombstone stub
+/// per deleted record. Handlers that feed `full_envelope_for` need THIS hash
+/// for the envelope's file identity; `compute_data_hash` alone names only
+/// the analysed set and diverges on any repository that has deleted a bead.
+fn loaded_file_hash(issues: &[bv_core::model::Issue]) -> String {
+    let tombstones = source_parse_facts()
+        .map(|(_, ids)| ids.as_slice())
+        .unwrap_or(&[]);
+    bv_core::data_hash::source_issues_hash(issues, tombstones)
+}
+
 /// The `--as-of` ref and its resolved SHA, published for the envelope builder.
 ///
 /// Go declares both as `RobotEnvelope` fields (main.go:7222-7223) and fills them
@@ -3979,6 +4037,10 @@ fn recipe_scope_active() -> bool {
         || named("--robot-schema")
         || named("--robot-recipes")
         || args.iter().any(|a| a.starts_with("--robot-"))
+        // Go's `envRobot` (main.go:1973, set from BV_ROBOT at :2023-2026)
+        // counts too: `BV_ROBOT=1 bv --search … --recipe r` scopes the
+        // search even with no `--robot-*` flag on the command line.
+        || env_robot()
         || valued("--export")
         || valued("--export-md")
         || valued("--export-pages")
@@ -5377,14 +5439,16 @@ fn run_robot_next() -> ExitCode {
         reasons
     };
 
-    // Build top picks exactly as run_robot_triage does — the top five
-    // recommendations, and `unblocks` counts `UnblocksIDs`, the readiness
-    // authority `build_triage` stamps (sole open blocker), not the raw
-    // blocking in-degree which credits dependents still multiply blocked.
+    // Build top picks exactly as run_robot_triage does — the scored
+    // recommendations in order, and `unblocks` counts `UnblocksIDs`, the
+    // readiness authority `build_triage` stamps (sole open blocker), not the
+    // raw blocking in-degree which credits dependents still multiply
+    // blocked. The claimability scan below walks the whole list: capping it
+    // at five made `small_chain` skip claimable FIX-1 (rank 6) for blocked
+    // FIX-6 where the oracle still reaches it.
     let picks: Vec<serde_json::Value> = out
         .recommendations
         .iter()
-        .take(5)
         .map(|r| {
             serde_json::json!({
                 "id": r.id,
@@ -5949,30 +6013,67 @@ fn has_any_label(issue_labels: &[String], wanted: &[String]) -> bool {
     })
 }
 
-fn triage_claimable(
+/// Go `isClaimableRecommendation` (pkg/analysis/triage.go:1190-1203) — the
+/// conjunct set every claimable-gated view shares: `parentsWithOpenChildren`,
+/// a shell-safe id (`quoteBeadsCommandID`, suggestions.go:11-17), status
+/// exactly `"open"`, type not `"epic"`, empty assignee, zero open blockers,
+/// not deferred, and no not-ready label. `quick_wins`/by-track/by-label AND
+/// `Readiness().Claimable` on top (triage.go:657); every conjunct that adds
+/// — open status, empty assignee, non-epic, no open children, not deferred,
+/// satisfied deps — is already implied by the list above, so one predicate
+/// serves both call shapes.
+fn is_claimable_recommendation(
     r: &bv_analysis::impact::IssueImpact,
     issue_by_id: &std::collections::HashMap<&str, &bv_core::model::Issue>,
 ) -> bool {
+    // `parentsWithOpenChildren[rec.ID]` — the issue parents an open child
+    // through a parent-child edge (graph.go:2865).
+    let parents_with_open_children = issue_by_id.values().any(|child| {
+        child.id != r.id
+            && child.status.is_open()
+            && child.dependencies.iter().any(|d| {
+                d.r#type == bv_core::model::DependencyType::ParentChild
+                    && d.effective_depends_on() == r.id
+            })
+    });
+    if parents_with_open_children {
+        return false;
+    }
+    // `quoteBeadsCommandID`: empty, leading `-`, or any control character
+    // makes the id unquotable and therefore unclaimable.
+    if r.id.is_empty() || r.id.starts_with('-') || r.id.chars().any(|c| c.is_control()) {
+        return false;
+    }
     if r.status != "open" || r.issue_type == "epic" {
         return false;
     }
     if let Some(issue) = issue_by_id.get(r.id.as_str()) {
-        if !issue.assignee.trim().is_empty() {
+        // Go compares `rec.Assignee == ""` exactly — no trimming.
+        if !issue.assignee.is_empty() {
             return false;
         }
-        // Ancestor-epic parity (#2): shared blocker_chain helper.
-        if !bv_analysis::open_blockers(issue_by_id, &issue.id).is_empty() {
-            return false;
-        }
-        // Go triage.go:1200 — `!hasAnyLabel(rec.Labels, notReadyLabels)` is
-        // the final conjunct of `isClaimableRecommendation`, so a
-        // graph-ready-but-not-work-ready bead is excluded from top picks,
-        // triage-by-track and triage-by-label alike.
-        if has_any_label(&issue.labels, &resolve_not_ready_labels()) {
+        // `!rec.isDeferredAt(now)` — the issue's own defer instant.
+        if bv_core::model::parse_ts(&issue.defer_until).is_some_and(|d| d > robot_now()) {
             return false;
         }
     }
+    // `len(rec.BlockedBy) == 0` — the open-blocker list the triage build
+    // stamped on the recommendation.
+    if !r.blocked_by.is_empty() {
+        return false;
+    }
+    // `!hasAnyLabel(rec.Labels, notReadyLabels)` — case-insensitive.
+    if has_any_label(&r.labels, &resolve_not_ready_labels()) {
+        return false;
+    }
     true
+}
+
+fn triage_claimable(
+    r: &bv_analysis::impact::IssueImpact,
+    issue_by_id: &std::collections::HashMap<&str, &bv_core::model::Issue>,
+) -> bool {
+    is_claimable_recommendation(r, issue_by_id)
 }
 
 /// Go `defaultRobotHistoryTimeout` (robot_registry.go:2021) — the budget for
@@ -6160,21 +6261,7 @@ fn triage_views(
     let top_picks: Vec<serde_json::Value> = out
         .recommendations
         .iter()
-        .filter(|r| {
-            if r.status != "open" || r.issue_type == "epic" {
-                return false;
-            }
-            if let Some(issue) = issue_by_id.get(r.id.as_str()) {
-                if !issue.assignee.trim().is_empty() {
-                    return false;
-                }
-                // Ancestor-epic parity (#2): shared blocker_chain helper.
-                if !bv_analysis::open_blockers(&issue_by_id, &issue.id).is_empty() {
-                    return false;
-                }
-            }
-            true
-        })
+        .filter(|r| is_claimable_recommendation(r, &issue_by_id))
         .take(3)
         .map(|r| {
             // Go buildTopPicks (triage.go:1165) reads `len(rec.UnblocksIDs)` —
@@ -7176,6 +7263,30 @@ fn output_format() -> &'static str {
     } else {
         "json"
     }
+}
+
+/// Go `resolveRobotOutputFormat` (cmd/bv/main.go:7567-7579): TrimSpace the
+/// CLI value, then BV_OUTPUT_FORMAT, then TOON_DEFAULT_FORMAT, then "json";
+/// the survivor is lowercased. An empty `--format=` therefore resolves to
+/// the env default rather than erroring, and `--format= TOON ` is accepted.
+fn resolve_robot_output_format(cli: &str) -> String {
+    let mut format = cli.trim().to_string();
+    if format.is_empty() {
+        format = std::env::var("BV_OUTPUT_FORMAT")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+    }
+    if format.is_empty() {
+        format = std::env::var("TOON_DEFAULT_FORMAT")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+    }
+    if format.is_empty() {
+        format = "json".to_string();
+    }
+    format.to_lowercase()
 }
 
 /// Go `robotShowToonStats` (main.go:2031): `--stats` or `TOON_STATS=1`. The
@@ -8731,6 +8842,36 @@ fn baseline_top_metrics(doc: &serde_json::Value) -> bv_analysis::drift::TopMetri
         .unwrap_or_default()
 }
 
+/// Go `cycleKey` (pkg/drift/drift.go:718-747): the cycle rotated so its
+/// lexicographically smallest node leads, direction preserved, joined on
+/// NUL. A repeated closing element (`[A,B,C,A]`) is dropped first; two
+/// spellings of the same directed cycle key equal, a reversed one does not.
+fn go_cycle_key(cycle: &[String]) -> String {
+    if cycle.is_empty() {
+        return String::new();
+    }
+    let unique: &[String] = if cycle.len() > 1 && cycle.first() == cycle.last() {
+        &cycle[..cycle.len() - 1]
+    } else {
+        cycle
+    };
+    if unique.is_empty() {
+        return String::new();
+    }
+    // Go keeps the FIRST index attaining the minimum (`val < minVal` never
+    // replaces an equal), and `min_by` returns the first minimum too.
+    let min_idx = unique
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.cmp(b))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let mut rotated: Vec<&str> = Vec::with_capacity(unique.len());
+    rotated.extend(unique[min_idx..].iter().map(String::as_str));
+    rotated.extend(unique[..min_idx].iter().map(String::as_str));
+    rotated.join("\0")
+}
+
 /// Go `Result.Summary` (pkg/drift/drift.go:752-786) — the human-readable
 /// rendering `--check-drift` prints when `--robot-drift` is absent. Go picks
 /// between this and the JSON envelope with a single `if *robotDriftCheck`
@@ -8854,21 +8995,13 @@ fn run_check_drift() -> ExitCode {
     // empty here — not an oversight to be tidied away.
     const NO_ISSUES: &[bv_core::model::Issue] = &[];
 
-    let norm: std::collections::HashSet<String> = old_cycles
-        .iter()
-        .map(|c| {
-            let mut v = c.clone();
-            v.sort();
-            v.join("|")
-        })
-        .collect();
+    // Go's `cycleKey` (drift.go:718) — rotation-normalized, direction kept.
+    // The sort+join this replaces treated a reversed cycle as the same one.
+    let norm: std::collections::HashSet<String> =
+        old_cycles.iter().map(|c| go_cycle_key(c)).collect();
     let fresh_cycles: Vec<Vec<String>> = new_cycles
         .into_iter()
-        .filter(|c| {
-            let mut v = c.clone();
-            v.sort();
-            !norm.contains(&v.join("|"))
-        })
+        .filter(|c| !norm.contains(&go_cycle_key(c)))
         .collect();
 
     let result = bv_analysis::drift::calculate(
@@ -9004,21 +9137,12 @@ fn run_robot_drift() -> ExitCode {
     // empty here — not an oversight to be tidied away.
     const NO_ISSUES: &[bv_core::model::Issue] = &[];
 
-    let norm: std::collections::HashSet<String> = old_cycles
-        .iter()
-        .map(|c| {
-            let mut v = c.clone();
-            v.sort();
-            v.join("|")
-        })
-        .collect();
+    // Go's `cycleKey` (drift.go:718) — rotation-normalized, direction kept.
+    let norm: std::collections::HashSet<String> =
+        old_cycles.iter().map(|c| go_cycle_key(c)).collect();
     let fresh_cycles: Vec<Vec<String>> = new_cycles
         .into_iter()
-        .filter(|c| {
-            let mut v = c.clone();
-            v.sort();
-            !norm.contains(&v.join("|"))
-        })
+        .filter(|c| !norm.contains(&go_cycle_key(c)))
         .collect();
 
     let result = bv_analysis::drift::calculate(
@@ -9296,7 +9420,7 @@ fn run_robot_history() -> ExitCode {
     // top-level data_hash with the report's own bead fingerprint — so
     // authority_hash is computed over the file hash while scope_hash is
     // computed over the report hash. Build with the file hash, then substitute.
-    let file_hash = bv_core::data_hash::compute_data_hash(&issues);
+    let file_hash = loaded_file_hash(&issues);
     let mut payload = full_envelope_for(&file_hash, &issues);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("data_hash".into(), serde_json::json!(report.data_hash));
@@ -9410,7 +9534,7 @@ fn run_robot_orphans() -> ExitCode {
     // Go copies the report's fields onto a struct that embeds the envelope
     // rather than the report, so the envelope's generated_at/data_hash lead and
     // the report's own copies of those keys are dropped.
-    let file_hash = bv_core::data_hash::compute_data_hash(&issues);
+    let file_hash = loaded_file_hash(&issues);
     let mut payload = full_envelope_for(&file_hash, &issues);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
@@ -10740,25 +10864,17 @@ fn compute_top_what_if_deltas(
         if direct == 0 && transitive == 0 {
             continue;
         }
-        // Go counts unblocked issues whose dependency state is not satisfied
-        // (priority.go:963-970). Checking `status == blocked` counted only
-        // issues parked in that status; an open issue still held up by an open
-        // blocker also counts, which is the common case on a chain.
+        // Go counts the unblocked issues whose DEPENDENCY STATE is not
+        // satisfied (priority.go:965-970
+        // `DependencyState(unblockID) != DependenciesSatisfied`) — the raw
+        // dep frontier over the readiness index, which already folds in
+        // parent-child propagation, cycles, missing targets and closed
+        // blockers. The hand-rolled dep scan this replaces only saw direct
+        // `blocks` edges onto still-open issues, so it undercounted
+        // parent-gated and unknown-state candidates.
         let blocked_reduction = direct_list
             .iter()
-            .filter(|id| {
-                issues.iter().any(|i| {
-                    i.id == **id
-                        && i.dependencies.iter().any(|d| {
-                            d.r#type.is_blocking()
-                                && !d.effective_depends_on().is_empty()
-                                && issues.iter().any(|o| {
-                                    o.id == d.effective_depends_on()
-                                        && !matches!(o.status, Status::Closed | Status::Tombstone)
-                                })
-                        })
-                })
-            })
+            .filter(|id| whatif_readiness.dependency_not_satisfied(id.as_str()))
             .count() as i64;
         let cp_node = g.node_idx(issue.id.as_str()).unwrap_or(usize::MAX);
         let current_depth = cp_heights.get(cp_node).copied().unwrap_or(0.0);
@@ -11298,38 +11414,6 @@ fn generate_advanced_insights(
     );
 
     // ---- Parallel Cut (limit 5) — Go generateParallelCut ----
-    let open_set: std::collections::HashSet<&str> = issues
-        .iter()
-        .filter(|i| is_open(i))
-        .map(|i| i.id.as_str())
-        .collect();
-    // Every id the corpus knows about, as distinct from the open ones. Go's
-    // `ReadinessIndex.Blockers` counts a dependency as blocking when its
-    // target is *absent* as well as when it is present and open
-    // (`!exists || !closedForReadiness(other.Status)`), so a dangling
-    // reference still withholds readiness. Requiring the target to be a
-    // known-open issue — which this did — reads "blocked by something we
-    // cannot see" as "not blocked", inverting the meaning of a missing edge.
-    let known_set: std::collections::HashSet<&str> = issues.iter().map(|i| i.id.as_str()).collect();
-    let mut blocker_of: std::collections::BTreeMap<&str, Vec<&str>> =
-        std::collections::BTreeMap::new();
-    let mut blocked_by: std::collections::BTreeMap<&str, Vec<&str>> =
-        std::collections::BTreeMap::new();
-    for issue in issues {
-        if !is_open(issue) {
-            continue;
-        }
-        for dep in &issue.dependencies {
-            if !dep.r#type.is_blocking() {
-                continue;
-            }
-            let b = dep.effective_depends_on();
-            if !known_set.contains(b) || open_set.contains(b) {
-                blocker_of.entry(b).or_default().push(issue.id.as_str());
-                blocked_by.entry(issue.id.as_str()).or_default().push(b);
-            }
-        }
-    }
     // (The actionable count itself is no longer needed here: the suggestion
     // loop below re-derives per-candidate readiness, and max_parallel is now
     // projected from the completed set rather than from this base count.)
@@ -11351,33 +11435,27 @@ fn generate_advanced_insights(
         .filter(|i| insights_readiness.ready_after(i.id.as_str(), now_for_readiness, None))
         .map(|i| i.id.as_str())
         .collect();
+    // Go `computeMarginalUnblocksFromBefore` (advanced_insights.go:573-590)
+    // scans EVERY issue — not just graph dependents — and keeps the ones
+    // `ReadyAfter(id, now, {candidate})` while they were not in the
+    // pre-completion actionable set. `defer_until`, parent chains, missing
+    // targets and candidate scope all live inside `ready_after`; the old
+    // `blocked_by` adjacency re-derivation admitted deferred and
+    // parent-gated work Go withholds.
+    let before: std::collections::BTreeSet<&str> = actionable_ids.iter().copied().collect();
     for id in &actionable_ids {
-        let mut newly: Vec<String> = Vec::new();
-        if let Some(dependents) = blocker_of.get(id) {
-            for &dep_id in dependents {
-                let all_others_resolved = blocked_by
-                    .get(dep_id)
-                    .map(|blockers| {
-                        blockers
-                            .iter()
-                            .all(|b| **b == **id || !open_set.contains(b))
-                    })
-                    .unwrap_or(true);
-                // Go requires `!before[id]` (advanced_insights.go:582): an issue
-                // that is already actionable is not a *new* unlock, so it must
-                // not raise the gain.
-                let already_actionable = blocked_by
-                    .get(dep_id)
-                    .map(|blockers| blockers.is_empty())
-                    .unwrap_or(true);
-                if all_others_resolved && !already_actionable {
-                    newly.push(dep_id.to_string());
-                }
-            }
-        }
+        let completed: std::collections::BTreeSet<String> =
+            std::iter::once((*id).to_string()).collect();
+        let mut newly: Vec<String> = issues
+            .iter()
+            .map(|i| i.id.as_str())
+            .filter(|dep| !before.contains(dep))
+            .filter(|dep| insights_readiness.ready_after(dep, now_for_readiness, Some(&completed)))
+            .map(str::to_string)
+            .collect();
+        newly.sort();
         let gain = newly.len() as i64 - 1;
         if gain > 0 {
-            newly.sort();
             pc_candidates.push((id.to_string(), gain, newly.len() as i64, newly));
         }
     }
@@ -12052,30 +12130,14 @@ fn build_priority_recommendation(
     // slice — also fixes the order `estimateDaysSaved` sums in (order is
     // irrelevant to the sum, but the cap would otherwise slice unsorted ids).
     let unblocks_count = unblocks_ids.len();
-    // Go counts unblocked issues whose dependency state is not satisfied
-    // (priority.go:963-970) — an open issue still held up by an open blocker,
-    // not just ones parked in `blocked` status. Same check the what-if path
-    // applies at :10561-10576; `unblocks_count` alone counted every direct
-    // dependent regardless of its remaining blockers.
+    // Go counts the unblocked issues whose DEPENDENCY STATE is not satisfied
+    // (priority.go:965-970 `DependencyState(unblockID) !=
+    // DependenciesSatisfied`) — the raw dep frontier, which ignores the
+    // issue's own status and defer state. `ready_after` would also count a
+    // deferred issue whose deps are met, which Go does not.
     let blocked_reduction = unblocks_ids
         .iter()
-        .filter(|id| {
-            issues.iter().any(|i| {
-                i.id == **id
-                    && i.dependencies.iter().any(|d| {
-                        d.r#type.is_blocking()
-                            && !d.effective_depends_on().is_empty()
-                            && issues.iter().any(|o| {
-                                o.id == d.effective_depends_on()
-                                    && !matches!(
-                                        o.status,
-                                        bv_core::model::Status::Closed
-                                            | bv_core::model::Status::Tombstone
-                                    )
-                            })
-                    })
-            })
-        })
+        .filter(|id| readiness.dependency_not_satisfied(id.as_str()))
         .count();
     // Go scales the issue's critical-path height (priority.go:974-980), which
     // is not the pagerank norm.
@@ -12793,14 +12855,13 @@ fn compute_parallel_gain(issues: &[bv_core::model::Issue], limit: usize) -> serd
 /// (pkg/drift/drift.go:1062), which needs the same recommendations.
 fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json::Value> {
     let g = bv_analysis::build_graph(issues);
-    // Go only computes critical-path heights and slack when the topological
-    // order covers every issue (graph.go:2271); on a cyclic graph both are
-    // skipped, so the recommendation engine must see empty maps — a bogus
-    // longest-path number would fire depth/slack signals Go never emits.
-    let order_available = bv_analysis::analyzer::topological_order_available(&g);
+    // The recommendation engine reads critical-path heights and slack for
+    // EVERY graph — the `large_cyclic_600` golden carries "Critical path
+    // bottleneck" reasoning and confidence 1 on a cyclic corpus, so gating
+    // these maps on topological availability diverged from the oracle.
     let pr = bv_graph_core::pagerank_default(&g);
     let bw = bv_analysis::analyzer::go_betweenness(&g);
-    let cp = order_available.then(|| bv_graph_core::critical_path_heights(&g));
+    let cp = bv_graph_core::critical_path_heights(&g);
     let pr_map: std::collections::BTreeMap<String, f64> = pr
         .iter()
         .enumerate()
@@ -12812,8 +12873,6 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
         .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), *v))
         .collect();
     let cp_map: std::collections::BTreeMap<String, f64> = cp
-        .as_deref()
-        .unwrap_or(&[])
         .iter()
         .enumerate()
         .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), *v))
@@ -12824,7 +12883,7 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
         issues,
         pagerank: &pr_map,
         betweenness: &bw_map,
-        critical_path: order_available.then_some(&cp_map),
+        critical_path: Some(&cp_map),
         g: &g,
         now,
     };
@@ -12844,15 +12903,11 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
             .into_iter()
             .map(|i| g.node_id(i).unwrap_or_default().to_string())
             .collect();
-    let slack_map: std::collections::BTreeMap<String, f64> = (if order_available {
-        bv_graph_core::slack(&g)
-    } else {
-        Vec::new()
-    })
-    .into_iter()
-    .enumerate()
-    .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
-    .collect();
+    let slack_map: std::collections::BTreeMap<String, f64> = bv_graph_core::slack(&g)
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
+        .collect();
     let max_core = core_map.values().copied().max().unwrap_or(0);
 
     // Use the full impact scoring engine
@@ -13599,11 +13654,27 @@ fn run_robot_alerts() -> ExitCode {
             })
             .unwrap_or_default();
     }
+    // Go's calculator diffs `cur.Cycles` against `bl.Cycles` internally
+    // (pkg/drift/drift.go:319-358 `checkCycles`); `bv_analysis::drift::
+    // calculate` takes the already-diffed list, so the baseline's recorded
+    // cycles are subtracted here with Go's own `cycleKey` normalization.
+    // Passing every current cycle reported unchanged cycles as `new_cycle`
+    // criticals, turning a clean run into exit 1.
+    let old_cycles: Vec<Vec<String>> = baseline_doc
+        .get("cycles")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default();
+    let baseline_cycle_keys: std::collections::HashSet<String> =
+        old_cycles.iter().map(|c| go_cycle_key(c)).collect();
+    let fresh_cycles: Vec<Vec<String>> = cycles
+        .into_iter()
+        .filter(|c| !baseline_cycle_keys.contains(&go_cycle_key(c)))
+        .collect();
     let result = bv_analysis::drift::calculate(
         &baseline_stats,
         &current_stats,
         &bv_analysis::drift::DriftConfig::default(),
-        &cycles,
+        &fresh_cycles,
         &issues,
         robot_now(),
     );
@@ -13865,13 +13936,21 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
     };
     let g = bv_analysis::build_graph(&issues);
 
-    let fmt = flag_value(args, "graph-format")
-        .map(|s| s.to_lowercase())
-        .unwrap_or_else(|| "json".to_string());
-    if fmt != "json" && fmt != "dot" && fmt != "mermaid" {
-        eprintln!("Invalid --graph-format \"{fmt}\" (expected json|dot|mermaid)");
-        return ExitCode::from(2);
-    }
+    // Go robot_registry.go:1050-1058 re-reads the flag and
+    // `strings.ToLower(strings.TrimSpace(...))`s it, mapping anything that is
+    // not dot/mermaid to json — the enum rule already rejected every other
+    // spelling, so no error path remains here. The old port lowercased
+    // without trimming, so `--graph-format " json "` (which the enum accepts)
+    // died on this check with exit 2 where the oracle emits json.
+    let fmt = match flag_value(args, "graph-format")
+        .map(|s| s.trim().to_lowercase())
+        .as_deref()
+    {
+        Some("dot") => "dot",
+        Some("mermaid") => "mermaid",
+        _ => "json",
+    };
+    let fmt = fmt.to_string();
 
     // The envelope's `scope_hash` covers the issue set as LOADED, not the
     // graph-root subgraph: Go computes it from `ctx.Issues`
@@ -14012,45 +14091,25 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
 }
 
 fn run_robot_recipes() -> ExitCode {
-    let mut recipes: Vec<(String, &'static str)> = [
-        (
-            "default",
-            "Default view showing all open issues sorted by priority",
-        ),
-        ("actionable", "Issues ready to work on (no open blockers)"),
-        ("recent", "Issues updated in the last 7 days"),
-        ("blocked", "Issues waiting on dependencies"),
-        (
-            "high-impact",
-            "Issues with highest blocking impact (PageRank)",
-        ),
-        ("stale", "Open issues not updated in 30+ days"),
-        (
-            "triage",
-            "Issues sorted by computed triage score (high impact + unblocking potential)",
-        ),
-        ("closed", "Recently closed issues"),
-        (
-            "release-cut",
-            "Recently closed items for changelog generation",
-        ),
-        (
-            "quick-wins",
-            "Easy items with no blockers - good for quick progress",
-        ),
-        (
-            "bottlenecks",
-            "High betweenness nodes - potential project bottlenecks",
-        ),
-    ]
-    .iter()
-    .map(|(name, desc)| (name.to_string(), *desc))
-    .collect();
-    // Go `ListSummaries` sorts recipe summaries alphabetically by name.
-    recipes.sort_by(|a, b| a.0.cmp(&b.0));
-    let recipes: Vec<serde_json::Value> = recipes
-        .into_iter()
-        .map(|(name, desc)| serde_json::json!({"name": name, "description": desc, "source": "builtin"}))
+    // Go robot_registry.go:722-744 — `loader.ListSummaries()` over the SAME
+    // loader `main` built at main.go:2540 (`recipe.NewLoader()` with the
+    // default user path and the working directory as project dir), so user
+    // `~/.config/bv/recipes.yaml`, project `.bv/recipes.yaml` and per-file
+    // `.beads/recipes/*.yaml` recipes all appear with their `source`/`path`.
+    // The old port hardcoded the eleven builtins and never consulted the
+    // loader, so configured recipes were invisible here.
+    let mut loader =
+        bv_recipe::Loader::new().with_project_dir(go_working_dir().to_string_lossy().to_string());
+    // Go degrades a load failure to an empty loader (main.go:2537-2541), so a
+    // broken optional source yields `"recipes":[]`, not an error.
+    if loader.load().is_err() {
+        loader = bv_recipe::Loader::new()
+            .with_project_dir(go_working_dir().to_string_lossy().to_string());
+    }
+    let recipes: Vec<serde_json::Value> = loader
+        .list_summaries()
+        .iter()
+        .map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))
         .collect();
 
     let payload = serde_json::json!({
@@ -14086,15 +14145,6 @@ fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         }
     }
     found
-}
-
-/// Whether `--name` appears in argv in either spelling (`--name` or
-/// `--name=...`). Dispatch sites that used `position(|a| a == "--name")`
-/// missed the `=` form entirely, so `--robot-related=id` read as absent.
-fn flag_present(args: &[String], name: &str) -> bool {
-    let long = format!("--{name}");
-    let with_eq = format!("--{name}=");
-    args.iter().any(|a| a == &long || a.starts_with(&with_eq))
 }
 
 /// Whether a BOOL flag is active in argv, honouring `--flag=false`.
@@ -14199,6 +14249,24 @@ fn go_flag_parse_error(args: &[String]) -> Option<String> {
             i += 1;
             continue;
         }
+        // Single-dash tokens are pflag SHORTHAND syntax, owned by
+        // `argv::unknown_shorthand_flag` — `-x` is `unknown shorthand flag:
+        // 'x' in -x`, not `unknown flag: --x`. Registered single-dash forms
+        // (`-l`, `-r`, `-f`) were already rewritten, so the only single-dash
+        // spellings left here are `-h` and the clusters the shorthand pass
+        // reports. `-h` is cobra's help bool: `-h=v` parses through
+        // `strconv.ParseBool` like every other bool flag.
+        if arg.starts_with('-') && !arg.starts_with("--") {
+            if let Some(v) = arg.strip_prefix("-h=") {
+                if let Err(detail) = go_parse_bool(v) {
+                    return Some(format!(
+                        "invalid argument {v:?} for \"--help\" flag: {detail}"
+                    ));
+                }
+            }
+            i += 1;
+            continue;
+        }
         let (name, inline) = match arg.split_once('=') {
             Some((n, v)) => (n, Some(v.to_string())),
             None => (arg.as_str(), None),
@@ -14223,6 +14291,13 @@ fn go_flag_parse_error(args: &[String]) -> Option<String> {
             // "unknown flag: --help" for `--help --unknown-flag-xyz` named
             // the wrong flag.
             if bare == "help" || bare == "h" {
+                if let Some(v) = &inline {
+                    if let Err(detail) = go_parse_bool(v) {
+                        return Some(format!(
+                            "invalid argument {v:?} for \"--help\" flag: {detail}"
+                        ));
+                    }
+                }
                 i += 1;
                 continue;
             }
@@ -14698,18 +14773,22 @@ fn go_atof_hex(lit: &GoFloatLiteral) -> Result<f64, ()> {
     }
 }
 
+/// Go's `flag` package assigns through `Set` on EVERY occurrence, so a
+/// repeated `--search`/`--search-limit`/… keeps the LAST value — the same
+/// last-wins rule [`flag_value`] applies. The old first-match return let an
+/// earlier occurrence shadow the one pflag would have kept.
 fn search_flag(args: &[String], name: &str) -> Option<String> {
     let long = format!("--{name}");
     let with_eq = format!("--{name}=");
+    let mut found = None;
     for (i, a) in args.iter().enumerate() {
         if let Some(v) = a.strip_prefix(&with_eq) {
-            return Some(v.to_string());
-        }
-        if a == &long {
-            return args.get(i + 1).cloned();
+            found = Some(v.to_string());
+        } else if a == &long {
+            found = args.get(i + 1).cloned();
         }
     }
-    None
+    found
 }
 
 /// Go `search.EmbeddingConfigFromEnv` + `EmbeddingConfig.Normalized`
@@ -14783,7 +14862,12 @@ fn search_parse_min_score(raw: &str) -> Result<Option<f64>, String> {
     if raw.is_empty() {
         return Ok(None);
     }
-    let score: f64 = raw.parse().map_err(|_| search_min_score_error(raw))?;
+    // Go `strconv.ParseFloat` (search_output.go:68) — hex floats
+    // (`0x1p-1`), underscores (`0.5_0`) and the `inf`/`nan` spellings all
+    // parse; the finite/-1..1 check below is what rejects them, exactly as
+    // `err != nil || IsNaN || IsInf || <-1 || >1` does in Go. Rust's `parse`
+    // rejected the first two groups outright.
+    let score: f64 = go_parse_float(raw).map_err(|_| search_min_score_error(raw))?;
     if !score.is_finite() || !(-1.0..=1.0).contains(&score) {
         return Err(search_min_score_error(raw));
     }
@@ -15040,26 +15124,16 @@ fn search_weights_validate(w: &bv_search::hybrid::Weights) -> Result<(), String>
 /// relevance at 0.55 so an unrelated high-impact issue cannot outrank a
 /// literal match, rescaling the graph weights into whatever is left.
 ///
-/// Go ends its rescale path with `adjusted.Normalize()`. `bv-search`'s port
-/// returns the rescaled weights without that final normalize, and the two
-/// differ in the last ULP of every component (the rescaled sum is 1.0 only in
-/// exact arithmetic), which is enough to change both the emitted `weights`
-/// object and the `ranking_hash` that digests it. Re-applying `Normalize`
-/// under exactly Go's own condition — a short query whose text weight was
-/// below the floor — restores parity; every other Go path returns the input,
-/// which is already normalized by the caller.
+/// `bv_search::query::adjust_weights_for_query` already ends its rescale path
+/// with `Weights::normalized()` — Go's own `adjusted.Normalize()` — so this is
+/// a straight delegate. The earlier wrapper re-normalized on top, which is a
+/// SECOND `Normalize` Go never runs and moves the emitted weights (and the
+/// `ranking_hash` digested from them) off the oracle's last ULP.
 fn search_adjust_weights_for_query(
     weights: bv_search::hybrid::Weights,
     query: &str,
 ) -> bv_search::hybrid::Weights {
-    let rescaled = bv_search::query::is_short_query(query)
-        && weights.text_relevance < bv_search::query::SHORT_QUERY_MIN_TEXT_WEIGHT;
-    let adjusted = bv_search::query::adjust_weights_for_query(weights, query);
-    if rescaled {
-        search_weights_normalize(adjusted)
-    } else {
-        adjusted
-    }
+    bv_search::query::adjust_weights_for_query(weights, query)
 }
 
 /// Go `search.ParseWeightsJSON` (config.go:126) — all six keys are required,
@@ -15819,14 +15893,28 @@ fn run_robot_search(args: &[String]) -> ExitCode {
             }
         };
 
-    // Go main.go:2770/2789 — the indexed corpus is the *unscoped* issue set
-    // while the ranked candidates are the scoped set's core issues, so a
-    // `--label` search indexes everything but only ranks the label.
-    let (label, _recipe, _repo) = active_scope_flags();
-    let scoped_issues = apply_label_scope(&apply_repo_scope(&issues_for_search));
-    let (candidate_ids, _all_ids) =
-        bv_analysis::label_health::label_scope_ids(&label, &issues_for_search);
+    // Go main.go:2822-2829 — `issues` here is the set AFTER
+    // `scopeLoadedIssues` (main.go:2786), so `--recipe` narrows the ranked
+    // candidates exactly like `--label`/`--repo` do; only the index corpus
+    // (`issuesForSearch`, captured at :2770) stays unscoped. The label
+    // subgraph is computed over the repo-filtered set, its CORE ids are the
+    // candidate set, and `recipe.Apply` sees only that core subset
+    // (main.go:4903-4913) — neighbours stay analysis context, not candidates.
+    let repo_scoped = apply_repo_scope(&issues_for_search);
+    let (label, recipe, _repo) = active_scope_flags();
+    let (candidate_ids, analysis_ids) =
+        bv_analysis::label_health::label_scope_ids(&label, &repo_scoped);
     let candidates: std::collections::BTreeSet<String> = candidate_ids.iter().cloned().collect();
+    let mut recipe_input: Vec<bv_core::model::Issue> = Vec::new();
+    for id in &analysis_ids {
+        if !candidates.contains(id) {
+            continue;
+        }
+        if let Some(issue) = repo_scoped.iter().find(|i| &i.id == id) {
+            recipe_input.push(issue.clone());
+        }
+    }
+    let scoped_issues = apply_recipe_scope(&recipe_input, &recipe);
     let selected_issues: Vec<bv_core::model::Issue> = scoped_issues
         .iter()
         .filter(|i| candidates.contains(&i.id))
@@ -15976,9 +16064,11 @@ fn run_robot_search(args: &[String]) -> ExitCode {
     // `--search Q` prints one tab-separated row per hit and exits 0. This is
     // the path a human or a shell pipeline uses — before the robot flag
     // existed it was the only thing `--search` did.
-    let robot_mode = args
-        .iter()
-        .any(|a| a == "--robot-search" || a.starts_with("--robot-search="));
+    // `--robot-search=false` parses as a bool false in Go (pflag
+    // `strconv.ParseBool`), so the envelope is NOT emitted — the run takes
+    // the human TSV path like a bare `--search`. Any `=` spelling used to
+    // count as enabled here.
+    let robot_mode = bool_flag_active(args, "robot-search");
     if !robot_mode {
         let title_of = |id: &str| title_by_id.get(id).cloned().unwrap_or_default();
         if hybrid_mode {
@@ -16244,7 +16334,7 @@ fn run_robot_causality(args: &[String]) -> ExitCode {
     // the report's bead fingerprint at the top level, so `authority_hash` is
     // computed over the file hash while `data_hash`/`scope_hash` use the
     // report's. Same shape as --robot-history.
-    let file_hash = bv_core::data_hash::compute_data_hash(&issues);
+    let file_hash = loaded_file_hash(&issues);
     let mut payload = full_envelope_for(&file_hash, &issues);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("data_hash".into(), serde_json::json!(result.data_hash));
@@ -16511,7 +16601,7 @@ fn run_robot_related(args: &[String]) -> ExitCode {
     // derived from it still carry the loader's full-file sha256. Build the
     // envelope with the file hash, then substitute the two report-derived
     // fields — the same order run_robot_history and run_robot_file_hotspots use.
-    let file_hash = bv_core::data_hash::compute_data_hash(&issues);
+    let file_hash = loaded_file_hash(&issues);
     let mut payload = full_envelope_for(&file_hash, &issues);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("data_hash".into(), serde_json::json!(report.data_hash));
@@ -16628,7 +16718,7 @@ fn run_robot_impact_network(args: &[String]) -> ExitCode {
     // `source_authority.sources[0].data_hash` (and therefore `authority_hash`)
     // are the file hash, while the top-level `data_hash` and `scope_hash` are
     // the report's own bead fingerprint (`EnvelopeWithHash(report.DataHash)`).
-    let file_hash = bv_core::data_hash::compute_data_hash(&issues);
+    let file_hash = loaded_file_hash(&issues);
     let mut payload = full_envelope_for(&file_hash, &issues);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("data_hash".into(), serde_json::json!(report.data_hash));
@@ -17864,7 +17954,7 @@ fn file_index_payload(
     issues: &[bv_core::model::Issue],
     report: &bv_correlation::history::HistoryReport,
 ) -> serde_json::Value {
-    let file_hash = bv_core::data_hash::compute_data_hash(issues);
+    let file_hash = loaded_file_hash(issues);
     let mut payload = full_envelope_for(&file_hash, issues);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("data_hash".into(), serde_json::json!(report.data_hash));
@@ -18013,7 +18103,7 @@ fn run_robot_file_hotspots(args: &[String]) -> ExitCode {
     // `authority_hash` derived from it still carry the *loader's* full-file
     // sha256. Build the envelope with the file hash, then substitute the two
     // report-derived fields — the same order run_robot_history uses.
-    let file_hash = bv_core::data_hash::compute_data_hash(&issues);
+    let file_hash = loaded_file_hash(&issues);
     let mut payload = full_envelope_for(&file_hash, &issues);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("data_hash".into(), serde_json::json!(report.data_hash));
@@ -19454,13 +19544,13 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
     } else {
         "confirmed"
     };
+    // `--robot-<confirm|reject>-correlation` is a pflag string: `--flag=value`
+    // parses, and a repeated flag keeps the LAST value — the shared
+    // `flag_value` scan, not a bare `--flag value` position lookup.
     let flag_name = format!("--robot-{flag}");
-    let raw = args
-        .iter()
-        .position(|a| a == &flag_name)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let raw = flag_value(args, &format!("robot-{flag}"))
+        .unwrap_or_default()
+        .to_string();
     let (sha, bead_id) = match parse_correlation_arg(&raw) {
         Ok(x) => x,
         Err(e) => {
@@ -19602,35 +19692,21 @@ fn run_robot_label_flow() -> ExitCode {
         Some(&loaded_source),
         &issues,
     );
-    // Go: nil slices serialize as `null`, not `[]` — `encoding/json` has no
-    // empty-vs-nil distinction for slices, so an empty flow field must be
-    // emitted as JSON null to stay field-compatible.
-    let null_if_empty = |v: serde_json::Value| -> serde_json::Value {
-        match &v {
-            serde_json::Value::Array(a) if a.is_empty() => serde_json::Value::Null,
-            _ => v,
-        }
-    };
+    // Go's CrossLabelFlow fields are initialised slices, so an empty result
+    // serialises as `[]` — the golden corpus confirms it (small_chain emits
+    // `"dependencies":[]`), and emitting `null` here diverged on every
+    // fixture.
     let mut flow_obj = serde_json::Map::new();
-    flow_obj.insert(
-        "labels".into(),
-        null_if_empty(serde_json::json!(flow.labels)),
-    );
-    flow_obj.insert(
-        "flow_matrix".into(),
-        null_if_empty(serde_json::json!(flow.flow_matrix)),
-    );
-    flow_obj.insert(
-        "dependencies".into(),
-        null_if_empty(serde_json::json!(flow.dependencies)),
-    );
+    flow_obj.insert("labels".into(), serde_json::json!(flow.labels));
+    flow_obj.insert("flow_matrix".into(), serde_json::json!(flow.flow_matrix));
+    flow_obj.insert("dependencies".into(), serde_json::json!(flow.dependencies));
     flow_obj.insert(
         "critical_paths".into(),
-        null_if_empty(serde_json::json!(flow.critical_paths)),
+        serde_json::json!(flow.critical_paths),
     );
     flow_obj.insert(
         "bottleneck_labels".into(),
-        null_if_empty(serde_json::json!(flow.bottleneck_labels)),
+        serde_json::json!(flow.bottleneck_labels),
     );
     flow_obj.insert(
         "total_cross_label_deps".into(),
@@ -19667,7 +19743,7 @@ fn build_attention_reason(s: &bv_analysis::label_health::LabelAttentionScore) ->
     parts.join(", ")
 }
 
-fn run_robot_label_attention() -> ExitCode {
+fn run_robot_label_attention(args: &[String]) -> ExitCode {
     // Go runs every robot command through the scoped, provenance-carrying
     // load (`scopeLoadedIssues`, main.go:2786) and honours `--as-of`; the
     // tracked-file shortcut this used answered a different question.
@@ -19691,24 +19767,12 @@ fn run_robot_label_attention() -> ExitCode {
     // signed so `0` and `-3` reach that clamp, and a non-integer is the
     // pflag parse error `main.go:4548` reports at exit 1 rather than a silent
     // fall back to the default.
-    let raw_attention_limit: Option<String> = {
-        let args: Vec<String> = std::env::args().collect();
-        let mut found = None;
-        let mut i = 0;
-        while i < args.len() {
-            let a = &args[i];
-            if a == "--attention-limit" {
-                found = args.get(i + 1).cloned();
-                break;
-            }
-            if let Some(v) = a.strip_prefix("--attention-limit=") {
-                found = Some(v.to_string());
-                break;
-            }
-            i += 1;
-        }
-        found
-    };
+    // `--attention-limit` is a pflag int: `--flag=value` parses and a
+    // repeated flag keeps the LAST value — the shared `flag_value` scan over
+    // the rewritten argv (the old raw-env-args scan was first-match and
+    // missed the single-dash normalisation).
+    let raw_attention_limit: Option<String> =
+        flag_value(args, "attention-limit").map(str::to_string);
     let attention_limit: i64 = match &raw_attention_limit {
         Some(raw) => match go_parse_int_base0(raw) {
             Ok(v) => v,

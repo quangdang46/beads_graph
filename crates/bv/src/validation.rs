@@ -112,51 +112,19 @@ impl Presence {
     ///
     /// `--` ends flag parsing exactly as it does for pflag: everything after
     /// it is positional and can never activate a flag.
+    ///
+    /// The scan itself is [`crate::argv::each_flag_set`], the shared
+    /// pflag-faithful walk: value-taking flags consume the next argv element
+    /// unconditionally, bools never do, `---x` is a malformed spelling rather
+    /// than flag `x`, and `-h`/`-h=` report under `"-h"`. Last `Set` wins.
+    /// Unregistered `--name` tokens are recorded too (Go's parse rejects
+    /// them before validation); they simply never match a registry lookup in
+    /// [`Presence::has`].
     pub fn from_args(args: &[String]) -> Self {
         let mut values: HashMap<String, String> = HashMap::new();
-        let mut i = 0;
-        while i < args.len() {
-            let arg = &args[i];
-            if arg == "--" {
-                break;
-            }
-            let Some(rest) = arg.strip_prefix("--") else {
-                i += 1;
-                continue;
-            };
-            match rest.split_once('=') {
-                Some((name, v)) => {
-                    values.insert(name.to_string(), v.to_string());
-                }
-                None => match crate::flags::flag_kind(rest) {
-                    // A bool never consumes the next token; a bare switch is
-                    // pflag's implicit `=true`.
-                    Some(FlagKind::Bool) => {
-                        values.insert(rest.to_string(), "true".to_string());
-                    }
-                    // Every other registered kind consumes the following
-                    // element unconditionally — even one that looks like a
-                    // flag — which is how `--export-md --format json` ends
-                    // with `json` as a positional "unknown command".
-                    Some(_) => {
-                        if let Some(v) = args.get(i + 1) {
-                            values.insert(rest.to_string(), v.clone());
-                            i += 1;
-                        }
-                        // A trailing value-flag with nothing to consume is a
-                        // parse error `go_flag_parse_error` reports before
-                        // validation; recording nothing keeps it inactive.
-                    }
-                    // Unknown names consume nothing. Go's parse rejects them
-                    // before validation, but keeping the token preserves the
-                    // old presence behaviour for names outside the registry.
-                    None => {
-                        values.insert(rest.to_string(), String::new());
-                    }
-                },
-            }
-            i += 1;
-        }
+        crate::argv::each_flag_set(args, |name, value| {
+            values.insert(name.to_string(), value.to_string());
+        });
         Presence { values }
     }
 
@@ -173,6 +141,24 @@ impl Presence {
             _ if crate::flags::flag_is_string(flag) => !raw.trim().is_empty(),
             _ => true,
         }
+    }
+
+    /// pflag's `Changed`: the flag was `Set` at all, whatever the value —
+    /// `--brief=false` still counts. This is the predicate Go's
+    /// `validateModifierFlags` applies to the MODIFIER side of a rule
+    /// (`flags.Changed(rule.modifier)`, cmd/bv/main.go), which is subtly
+    /// different from [`Presence::has`]: a present-but-false bool modifier
+    /// still fires its requirement.
+    pub fn changed(&self, flag: &str) -> bool {
+        self.values.contains_key(flag)
+    }
+
+    /// The raw value of the last `Set` for `flag`, or `None` when absent.
+    /// For rules that read the DEREFERENCED flag value rather than
+    /// `isFlagActive` — Go's `--watch-export`/`--as-of` guard
+    /// (main.go:1903: `*watchExport && *asOf != ""`).
+    pub fn raw_value(&self, flag: &str) -> Option<&str> {
+        self.values.get(flag).map(String::as_str)
     }
 }
 
@@ -194,12 +180,13 @@ fn format_required(required: &[&str]) -> String {
 
 /// Validate modifier-requires rules. Returns the first violation, if any.
 ///
-/// Go's rule for BOTH sides of a rule is `isFlagActive` (main.go:196-207):
-/// the modifier must be active, and at least one required flag must be
-/// active. [`Presence::has`] now answers that question directly — bool flags
-/// need a truthy last value and string flags need a TrimSpace-surviving value
-/// — so `--brief=false` no longer triggers the `brief` row and `--diff-since
-/// ""` no longer satisfies the `robot-diff` row, matching the oracle.
+/// Go's rule is asymmetric (main.go `validateModifierFlags`): the MODIFIER
+/// side is `flags.Changed` — set at all, whatever the value — while each
+/// REQUIRED flag uses `isFlagActive`, which [`Presence::has`] answers:
+/// bool flags need a truthy last value and string flags need a
+/// TrimSpace-surviving value. So `--brief=false` DOES fire the `brief` row
+/// (Changed), `--export-format ""` fires its row too, and `--diff-since ""`
+/// does not satisfy the `robot-diff` row — all matching the oracle.
 ///
 /// `args` is retained for signature compatibility with the `main` call site;
 /// [`Presence`] already captured everything it needs at construction.
@@ -215,7 +202,7 @@ pub fn validate_modifier_requires_with(
     _args: Option<&[String]>,
 ) -> Option<ValidationError> {
     for (modifier, required) in MODIFIER_REQUIRES {
-        if present.has(modifier) && !required.iter().any(|r| present.has(r)) {
+        if present.changed(modifier) && !required.iter().any(|r| present.has(r)) {
             let rendered = format_required(required);
             return Some(ValidationError::MissingRequirement {
                 modifier: (*modifier).to_string(),
@@ -290,7 +277,15 @@ pub fn validate_exclusive_primaries(present: &Presence) -> Vec<ValidationError> 
 /// end in their own `os.Exit(1)`; a caller that merges stages reports messages
 /// for stages the oracle never reached.
 pub fn validate_watch_export_as_of(present: &Presence) -> Vec<ValidationError> {
-    if present.has("watch-export") && present.has("as-of") {
+    // Go reads the DEREFERENCED values here (main.go:1903:
+    // `*watchExport && *asOf != ""`), not `isFlagActive`: the bool needs
+    // its parsed value, and `as-of` needs only be non-empty — `" "` still
+    // conflicts because there is no TrimSpace on this path.
+    let watch = present
+        .raw_value("watch-export")
+        .is_some_and(|v| crate::argv::go_parse_bool(v).unwrap_or(false));
+    let as_of = present.raw_value("as-of").is_some_and(|v| !v.is_empty());
+    if watch && as_of {
         vec![ValidationError::WatchExportWithAsOf]
     } else {
         Vec::new()
@@ -512,5 +507,40 @@ mod tests {
     #[test]
     fn flag_value_is_not_a_flag() {
         assert!(check(&["bvr", "--export-md", "--robot-triage"]).is_empty());
+    }
+
+    /// The modifier side of a rule is pflag's `Changed`, not `isFlagActive`:
+    /// `--brief=false` was still SET, so it fires the `brief` requirement
+    /// even though the flag itself reads inactive. Same for a string
+    /// modifier set to the empty string.
+    #[test]
+    fn changed_modifier_fires_even_when_value_is_inactive() {
+        assert!(!check(&["bvr", "--brief=false"]).is_empty());
+        assert!(check(&["bvr", "--robot-triage", "--brief=false"]).is_empty());
+        assert!(!check(&["bvr", "--export-format", ""]).is_empty());
+        assert!(check(&["bvr", "--export", "out", "--export-format", ""]).is_empty());
+    }
+
+    /// `--as-of " "` is non-empty for Go's `*asOf != ""` guard — this path
+    /// has no TrimSpace — so it still conflicts with `--watch-export`.
+    #[test]
+    fn watch_export_conflicts_with_whitespace_as_of() {
+        assert!(!check(&[
+            "bvr",
+            "--export-pages",
+            "out",
+            "--watch-export",
+            "--as-of",
+            " "
+        ])
+        .is_empty());
+    }
+
+    /// `--` ends flag parsing for `Presence` too: flag-looking tokens after
+    /// the terminator activate nothing.
+    #[test]
+    fn double_dash_ends_presence_scan() {
+        assert!(check(&["bvr", "--", "--brief"]).is_empty());
+        assert!(check(&["bvr", "--robot-triage", "--", "--robot-next"]).is_empty());
     }
 }

@@ -649,6 +649,11 @@ pub fn compute_impact_scores_with_weights(
         .max()
         .unwrap_or(0);
 
+    // One readiness index for the whole pass — `blocker_chain::open_blockers`
+    // delegates to `ReadinessIndex.Blockers`, so the O(n) build must not be
+    // repeated per issue (Go's TriageContext caches it the same way).
+    let readiness = crate::triage::Readiness::new(inputs.issues);
+
     let mut results: Vec<IssueImpact> = Vec::new();
     for issue in inputs.issues {
         // Skip closed/tombstone (Go parity).
@@ -901,9 +906,8 @@ pub fn compute_impact_scores_with_weights(
         //     `!is_open` guard dropped it for open-but-blocked issues, which
         //     is most of a dependency chain. Ancestor-epic parity (#2):
         //     inherited parent-child blockers surface via the shared helper.
-        let by_id_map: std::collections::HashMap<&str, &Issue> =
-            inputs.issues.iter().map(|i| (i.id.as_str(), i)).collect();
-        let blocker_ids: Vec<String> = crate::blocker_chain::open_blockers(&by_id_map, &issue.id);
+        let blocker_ids: Vec<String> =
+            crate::blocker_chain::open_blockers_in(&readiness, &issue.id);
         if blocker_ids.len() == 1 {
             reasons.push(format!(
                 "⏳ Blocked by {} - complete that first",
