@@ -1328,6 +1328,37 @@ fn export_graph_result(issues: &[bv_core::model::Issue], data_hash: &str) -> ser
     serde_json::from_str(&out).unwrap_or(serde_json::Value::Null)
 }
 
+/// Shared `--export-include-graph` read for BOTH `--export` and `--export-md`.
+///
+/// Go main.go:4385-4387 applies the override inside the shared
+/// `*exportFile != "" || *exportReport != ""` block, so `--export-md` honours
+/// the flag exactly like `--export` does. When the flag is absent,
+/// `ResolveReportOptions` (pkg/export/markdown.go:57-62) derives the default
+/// from the format: `format != "csv"`, with recipe defaults layered under
+/// the explicit override — the recipe layer is applied by the caller through
+/// `ReportOptions` defaults, so only the format-derived fallback lives here.
+///
+/// Returns `Err(exit code)` after printing Go's pflag parse error when the
+/// value is not a Go bool.
+fn export_include_graph_flag(args: &[String], format: &str) -> Result<bool, ExitCode> {
+    let mut include_graph_raw: Option<&str> = None;
+    crate::argv::each_flag_set(args, |name, value| {
+        if name == "export-include-graph" {
+            include_graph_raw = Some(value);
+        }
+    });
+    match include_graph_raw {
+        None => Ok(format != "csv"),
+        Some(raw) => match parse_go_bool(raw) {
+            Some(parsed) => Ok(parsed),
+            None => {
+                eprintln!("invalid boolean value {raw:?} for -export-include-graph: parse error");
+                Err(ExitCode::from(2))
+            }
+        },
+    }
+}
+
 fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     // `--export-format`/`--export-template` are pflag strings, so the `=`
     // spelling and last-occurrence-wins both apply — the shared `flag_value`
@@ -1358,21 +1389,9 @@ fn run_export_report(args: &[String], output_path: &str) -> ExitCode {
     // `=`-prefix-only scan dropped the bare form, so
     // `--export-format csv --export-include-graph` skipped Go's
     // "CSV cannot include a graph" rejection below.
-    let mut include_graph_raw: Option<&str> = None;
-    crate::argv::each_flag_set(args, |name, value| {
-        if name == "export-include-graph" {
-            include_graph_raw = Some(value);
-        }
-    });
-    let include_graph_flag = match include_graph_raw {
-        None => format != "csv",
-        Some(raw) => match parse_go_bool(raw) {
-            Some(parsed) => parsed,
-            None => {
-                eprintln!("invalid boolean value {raw:?} for -export-include-graph: parse error");
-                return ExitCode::from(2);
-            }
-        },
+    let include_graph_flag = match export_include_graph_flag(args, &format) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     //
     // `ResolveReportOptions` returns this error bare (main.go:4396-4398) —
@@ -2106,10 +2125,21 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+        // Go forces `overrides.Format = "markdown"` for `--export-md`,
+        // so the graph stays on (only `csv` turns it off) — UNLESS the
+        // caller passed `--export-include-graph`, which Go honours for
+        // BOTH spellings (main.go:4385-4387 sits inside the shared
+        // `--export`/`--export-md` block). The flag was previously read
+        // only by `--export`, so `--export-md=x.md
+        // --export-include-graph=false` still emitted the Dependency
+        // Graph section.
+        let include_graph = match export_include_graph_flag(&args, "markdown") {
+            Ok(v) => v,
+            Err(code) => return code,
+        };
         let mut options = bv_export::markdown::ReportOptions {
-            // Go forces `overrides.Format = "markdown"` for `--export-md`,
-            // so the graph stays on (only `csv` turns it off).
             format: "markdown".to_string(),
+            include_graph,
             // `robot_now()`, which honours SOURCE_DATE_EPOCH. A bare
             // `Timestamp::now()` here stamped the report footer with the wall
             // clock, so `--export-md` was not reproducible under the pin that
@@ -2169,10 +2199,14 @@ fn main() -> ExitCode {
         // matched only `.png`/`.svg`, so those three fell through to the DOT,
         // Mermaid and adjacency generators here and produced text nobody asked
         // for.
-        let is_static = !matches!(
-            output_path.to_ascii_lowercase().as_str(),
-            "html" | "interactive"
-        ) && !output_path.to_ascii_lowercase().ends_with(".html");
+        // Go's interactive test (main.go:3499) is
+        // `HasSuffix(ToLower(path), ".html") || path == "html" ||
+        // path == "interactive"`. The bare words are CASE-SENSITIVE `==`
+        // comparisons, so `--export-graph HTML` is NOT interactive in Go —
+        // it falls to `SaveGraphSnapshot`, which sees no extension and
+        // writes `HTML.svg`. Only the `.html` suffix check lowercases.
+        let bare_word = output_path == "html" || output_path == "interactive";
+        let is_static = !bare_word && !output_path.to_ascii_lowercase().ends_with(".html");
         if is_static {
             // Go main.go:1512 defaults this to "compact" and has no enum rule
             // for it (main.go:1845-1848), so an unrecognised value is
@@ -2209,20 +2243,19 @@ fn main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         }
-        let fmt = if output_path.ends_with(".html") {
-            "html".to_string()
-        } else if output_path.ends_with(".dot") {
-            "dot".to_string()
-        } else if output_path.ends_with(".md") {
-            "mermaid".to_string()
-        } else {
-            "json".to_string()
-        };
+        // Only the interactive branch reaches this point — every other
+        // value went to `SaveGraphSnapshot` above — so the format is
+        // always "html". Go has no dot/mermaid/json `--export-graph`
+        // formats; the old extension-inference here sent the bare words
+        // `html`/`interactive` to the JSON arm and wrote a file literally
+        // named `html`.
+        let fmt = "html".to_string();
         let issues: Vec<bv_core::model::Issue> = issues;
-
-        let content = match fmt.as_str() {
-            "dot" => bv_export::graph_export::generate_dot(&issues, None),
-            "mermaid" => bv_export::graph_export::generate_mermaid_graph(&issues),
+        // The interactive writer picks its own timestamped filename when
+        // `path` is empty (Go main.go:3524-3527 sets `opts.Path = ""` for
+        // the bare words), so the path it actually wrote has to be carried
+        // out for the completion line and the final write below.
+        let (content, written_graph_path) = match fmt.as_str() {
             "html" => {
                 // Go main.go:3491-3503 — on the interactive/HTML branch an
                 // empty `--graph-title` falls back to `filepath.Base(cwd)`
@@ -2250,8 +2283,22 @@ fn main() -> ExitCode {
                 // byte-parity test against the Go 18afafa document; it was
                 // simply never wired to this branch. It writes the file
                 // itself, so the content is read back rather than returned.
-                let out_path = if output_path.is_empty() {
-                    format!("beads_graph.{fmt}")
+                // Go main.go:3524-3527 — the bare words `html`/`interactive`
+                // get `opts.Path = ""` so the writer auto-generates
+                // `{project}_graph_export__as_of__<date>__<time>__git_head_
+                // hash__<short>.html`; a real path is passed through (the
+                // writer still swaps a missing/foreign extension for `.html`,
+                // which is why the RETURNED path — not `out_path` — is what
+                // gets reported). The bv-export port of the auto-namer emits
+                // a different shape, so the Go name is computed here and
+                // passed in explicitly.
+                let project_name = cwd
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "project".to_string());
+                let out_path = if bare_word {
+                    go_interactive_graph_autoname(&project_name, &cwd)
                 } else {
                     output_path.clone()
                 };
@@ -2264,10 +2311,7 @@ fn main() -> ExitCode {
                     title,
                     data_hash: hash.clone(),
                     path: std::path::PathBuf::from(&out_path),
-                    project_name: cwd
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "project".to_string()),
+                    project_name: project_name.clone(),
                     robot_envelope: full_envelope_for(&hash, &issues)
                         .as_object()
                         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -2275,27 +2319,25 @@ fn main() -> ExitCode {
                     generated_at: jiff_now(),
                 };
                 match bv_export::graph_interactive::generate_interactive_graph_html(&opts) {
-                    Ok(_) => std::fs::read_to_string(&out_path).unwrap_or_default(),
+                    Ok(written) => {
+                        let content = std::fs::read_to_string(&written).unwrap_or_default();
+                        (content, Some(written.to_string_lossy().to_string()))
+                    }
                     Err(e) => {
                         eprintln!("Error exporting interactive graph: {e}");
                         return ExitCode::from(1);
                     }
                 }
             }
-            _ => serde_json::to_string_pretty(&serde_json::json!({
-                "format": "json",
-                "graph": bv_export::graph_export::generate_adjacency(&issues, None),
-                "nodes": issues.len(),
-                "data_hash": hash,
-            }))
-            .unwrap_or_default(),
+            // `fmt` is always "html" here — every non-interactive value was
+            // dispatched to `SaveGraphSnapshot` above.
+            _ => unreachable!("export-graph only reaches the interactive branch"),
         };
 
-        let out = if output_path.is_empty() {
-            format!("beads_graph.{fmt}")
-        } else {
-            output_path.clone()
-        };
+        // `output_path` is guaranteed non-empty (the flag gate filters the
+        // empty equals form), so the fallback is only for the hypothetical
+        // case the writer somehow returned no path.
+        let out = written_graph_path.unwrap_or_else(|| output_path.clone());
         // Go main.go:3091 — pre-export hooks wrap every export, gated on
         // `!*noHooks`. The DEFAULT path (no flag) is the one that matters: Go
         // runs the hooks, so skipping them unconditionally was a divergence
@@ -20063,6 +20105,50 @@ fn jiff_local_now() -> String {
             dt.second()
         )
     }
+}
+
+/// Go `GenerateInteractiveGraphFilename`
+/// (`pkg/export/graph_interactive.go:97-114`) — the name
+/// `--export-graph html` / `--export-graph interactive` auto-generate:
+/// `{safe}_graph_export__as_of__YYYY_MM_DD__HH_MM__git_head_hash__{short}.html`.
+///
+/// The timestamp is `time.Now()` in the LOCAL zone at minute precision —
+/// deliberately not `robotNow()`, so SOURCE_DATE_EPOCH does not pin it, same
+/// as Go. The git half is `git rev-parse --short HEAD` run in `dir`, falling
+/// back to `nogit` on any failure, exactly like Go's `cmd.Output()` check.
+///
+/// This lives here rather than in bv-export because that crate's port of the
+/// same helper emits a different shape (`{safe}_graph_export__{rfc3339}.html`);
+/// passing the Go-faithful name in as `opts.path` reaches the same bytes on
+/// disk without touching the other crate.
+fn go_interactive_graph_autoname(project_name: &str, dir: &std::path::Path) -> String {
+    // Two successive Go `strings.ReplaceAll` calls — equivalent to one pass
+    // over either character, same as the bv-export port notes.
+    let safe_name = project_name.replace([' ', '/'], "_");
+    let offset = local_utc_offset_seconds();
+    let offset_dur = std::time::Duration::from_secs(offset.unsigned_abs());
+    let now = jiff::Timestamp::now();
+    let local = if offset < 0 {
+        now.checked_sub(offset_dur)
+    } else {
+        now.checked_add(offset_dur)
+    }
+    .unwrap_or(now);
+    let dt = local.to_zoned(jiff::tz::TimeZone::UTC).datetime();
+    let date_str = dt.strftime("%Y_%m_%d").to_string();
+    let time_str = dt.strftime("%H_%M").to_string();
+    let git_short = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "nogit".to_string());
+    format!(
+        "{safe_name}_graph_export__as_of__{date_str}__{time_str}__git_head_hash__{git_short}.html"
+    )
 }
 
 /// The machine's current UTC offset in seconds, from the C library's
