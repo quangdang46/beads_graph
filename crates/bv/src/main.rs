@@ -1584,6 +1584,21 @@ fn attach_report_origins(
 }
 
 fn main() -> ExitCode {
+    // Rust's std runtime installs SIG_IGN for SIGPIPE at startup, so a write
+    // to a closed stdout surfaces as a `println!` panic — "failed printing to
+    // stdout: Broken pipe", exit 101 — where `bvr --robot-help | head -1`
+    // used to die. Go's runtime does the opposite for fd 1/2: the SIGPIPE is
+    // delivered and the process is killed by it, so the oracle exits 141
+    // with no message at all. Restore the default disposition before ANY
+    // output so every print path (`emit_json`, `print_robot_help`, the TUI)
+    // dies on the signal exactly like Go.
+    #[cfg(unix)]
+    unsafe {
+        // SAFETY: `libc::signal` with SIG_DFL only resets a disposition; no
+        // handler is installed and nothing is read back.
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args = argv::rewrite_args(&raw);
 
@@ -1786,7 +1801,13 @@ fn main() -> ExitCode {
     // reported an agent file instead of the bad format. The check belongs
     // here: after the stages Go runs first, before the first command Go
     // dispatches.
-    if presence.has("format") {
+    // Go resolves and validates `robotOutputFormat` UNCONDITIONALLY at
+    // main.go:2029-2041 — `resolveRobotOutputFormat(*outputFormat)` runs on
+    // every invocation, so `BV_OUTPUT_FORMAT`/`TOON_DEFAULT_FORMAT` apply even
+    // with no `--format` flag, an empty `--format=` falls through to the env
+    // chain, and a bogus env value exits 2 before any dispatch. Gating this on
+    // `presence.has("format")` skipped all of that.
+    {
         // Go `resolveRobotOutputFormat` (main.go:7567-7579): TrimSpace the
         // flag, fall back through BV_OUTPUT_FORMAT → TOON_DEFAULT_FORMAT →
         // "json" on empty, then ToLower — so `--format=TOON ` is valid and
@@ -1925,6 +1946,19 @@ fn main() -> ExitCode {
     // the version where Go prints the help, and `--robot-help --check-update`
     // reached the network where Go never leaves the registry.
     if presence.has("robot-help") {
+        // Go's robot-help handler (robot_registry.go:676-684) switches on
+        // `StructuredOutput()` — `flag.CommandLine.Changed("format")`, i.e.
+        // pflag's Changed, which is true for ANY `--format` spelling
+        // including the empty `--format=` — and then encodes
+        // `generateRobotDocs("guide")` through the same format-aware encoder
+        // `--robot-docs guide` uses, so `--format toon` yields TOON. `changed`,
+        // not `has`: `has` treats `--format=` (empty string value) as absent.
+        // `--robot-help --json` never reaches this arm — argv rewriting has
+        // already turned it into the `robot-docs guide` intent.
+        if presence.changed("format") {
+            let payload = bv_robot::docs::generate_robot_docs("guide", GO_APP_VERSION, &jiff_now());
+            return emit_json(&sort_json_maps_like_go(&payload));
+        }
         print_robot_help();
         return ExitCode::from(0);
     }
@@ -2191,16 +2225,25 @@ fn main() -> ExitCode {
         .map(str::to_string)
     {
         let cwd = go_working_dir();
-        let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
-            Ok(x) => x,
-            Err(e) => {
-                if is_unresolved_source_error(&e.to_string()) {
-                    return emit_unresolved_source(&e.to_string());
+        // Go's handler reads the shared dispatch context, so `--as-of` loads
+        // the historical snapshot here exactly as it does for the robot
+        // commands (main.go:2633-2677, :3468).
+        let as_of = extract_as_of();
+        let (issues, hash, as_of_commit, loaded_source) =
+            match load_issues_auto_meta(&cwd, as_of.as_deref()) {
+                Ok(x) => x,
+                Err(e) => {
+                    if is_unresolved_source_error(&e.to_string()) {
+                        return emit_unresolved_source(&e.to_string());
+                    }
+                    eprintln!("Error: {e}");
+                    return ExitCode::from(1);
                 }
-                eprintln!("Error: {e}");
-                return ExitCode::from(1);
-            }
-        };
+            };
+        set_as_of(
+            as_of.clone().unwrap_or_default(),
+            as_of_commit.clone().unwrap_or_default(),
+        );
 
         // Format inferred from extension (Go: .html interactive, .dot, else json).
         // Note: --graph-format/--graph-depth are robot-graph-only in Go validation.
@@ -2323,7 +2366,9 @@ fn main() -> ExitCode {
                     issues: issues.clone(),
                     stats: bv_export::graph_snapshot::GraphSnapshotMetrics::default(),
                     extras: bv_export::graph_interactive::GraphSnapshotMetricsExtras::default(),
-                    triage: None,
+                    // Go main.go:3505-3520 embeds the claim-suppressed
+                    // TriageResult; `interactive_graph_triage` builds it.
+                    triage: Some(interactive_graph_triage(&issues, &loaded_source)),
                     history: None,
                     title,
                     data_hash: hash.clone(),
@@ -6086,6 +6131,198 @@ fn suppress_unproven_triage_claims(triage: &mut serde_json::Value) {
     }
 }
 
+/// Go `Suggestion.WithMetadata` (suggestions.go:210-218) for the
+/// `--robot-suggest` claim gate: merge into the existing metadata object —
+/// or create it — and keep the keys sorted, because Go marshals a
+/// `map[string]interface{}` in key order regardless of insertion order.
+fn suggestion_metadata_upsert(
+    metadata: &mut Option<serde_json::Value>,
+    key: &str,
+    value: serde_json::Value,
+) {
+    let m = metadata.get_or_insert_with(|| serde_json::json!({}));
+    let Some(obj) = m.as_object_mut() else {
+        return;
+    };
+    obj.insert(key.to_string(), value);
+    let mut entries: Vec<(String, serde_json::Value)> =
+        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    *obj = entries.into_iter().collect();
+}
+
+/// Go `SuggestionSet.computeStats` (suggestions.go:237-261) rerun by
+/// `NewSuggestionSetAt` after the `--robot-suggest` claim gate strips every
+/// action: `actionable_count` drops to zero and the by-type / by-confidence
+/// tallies are a pure recount of the surviving suggestions.
+fn recompute_suggestion_stats(
+    suggestions: &[bv_analysis::suggestions::Suggestion],
+) -> bv_analysis::suggestions::SuggestionStats {
+    let mut stats = bv_analysis::suggestions::SuggestionStats {
+        total: suggestions.len(),
+        ..Default::default()
+    };
+    for s in suggestions {
+        *stats.by_type.entry(s.sug_type.clone()).or_insert(0) += 1;
+        // Go `GetConfidenceLevel` (suggestions.go:118-126): low < 0.4,
+        // high >= 0.7, medium between.
+        let level = if s.confidence < 0.4 {
+            "low"
+        } else if s.confidence >= 0.7 {
+            "high"
+        } else {
+            "medium"
+        };
+        *stats.by_confidence.entry(level.to_string()).or_insert(0) += 1;
+        if level == "high" {
+            stats.high_confidence_count += 1;
+        }
+        if s.action_command.is_some() {
+            stats.actionable_count += 1;
+        }
+    }
+    stats
+}
+
+/// The `analysis.TriageResult` Go embeds in the `--export-graph` HTML page
+/// (main.go:3505-3520 → graph_interactive.go:292-294).
+///
+/// Go runs `ComputeTriageWithOptions(exportIssues, TriageOptions{
+/// WaitForPhase2: true, Readiness, CandidateIDs})` — the FULL analysis config,
+/// not the fast triage one — then `suppressUnprovenTriageClaims` when
+/// `!ctx.claimsProven()`. The same construction the pages export performs for
+/// `data/triage.json`, minus the file write and the envelope overlay: the
+/// interactive page splices this object under `"triage"` verbatim.
+fn interactive_graph_triage(
+    issues: &[bv_core::model::Issue],
+    source: &SourceMeta,
+) -> serde_json::Value {
+    let graph = bv_analysis::analyzer::build_graph(issues);
+    let edge_count = graph.edge_count();
+    // Go's export call sites never set `UseFastConfig`, so the triage scores
+    // read the FULL `ConfigForSize` metrics — `build_triage` would score
+    // against the fast config `--robot-triage` uses and rank differently.
+    let mut triage =
+        bv_analysis::triage::build_triage_full_metrics(issues, &graph, robot_now(), false);
+    // Go stamps every recommendation with `issue.Actions(claimable)`
+    // (triage.go:660); the tracker route needs the loaded source path, which
+    // only the CLI layer has.
+    for rec in triage.recommendations.iter_mut() {
+        rec.actions = Some(
+            serde_json::to_value(actions_for_source(source, &rec.id, rec.claimable))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        restate_unblock_reason(&mut rec.reasons, &rec.unblocks_ids);
+    }
+    let views = triage_views(&triage, issues, edge_count);
+
+    // `buildCommands` (triage.go:1243-1251, called at :738) reads the
+    // UN-suppressed `topPicks[0]` — suppression later blanks only `claim_top`,
+    // so `show_top` keeps its route. Same `topID != ""` claimable argument Go
+    // passes (`Actions(topID != "")`), which `actions_for_source` reduces to
+    // the unavailable-reason object for an empty id.
+    let top_id = views["top_picks"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let top_actions = actions_for_source(source, top_id, true);
+    let commands = serde_json::json!({
+        "claim_top": top_actions.claim.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
+        "show_top": top_actions.show.as_ref().map(|c| c.shell.as_str()).unwrap_or(""),
+        "list_ready": "",
+        "list_blocked": "",
+        "refresh_triage": "bvr --robot-triage",
+    });
+
+    // The triage's own analysis ran the full config when work is open
+    // (triage.go:503-512) and `NoPhase2Config` when nothing is — the same
+    // branch the pages export resolves for `data/triage.json`.
+    let has_open = issues.iter().any(|i| !i.status.is_closed());
+    let node_count = issues.len();
+    let density = if node_count > 1 {
+        edge_count as f64 / (node_count as f64 * (node_count as f64 - 1.0))
+    } else {
+        0.0
+    };
+    let triage_cfg = bv_analysis::analyzer::config_for_size(node_count, edge_count, density);
+    let (full_stats, _) =
+        bv_analysis::analyzer::analyze_with_profile(std::sync::Arc::new(graph), &triage_cfg);
+    let triage_status = if has_open {
+        full_stats.status.to_json_map()
+    } else {
+        triage.metric_status.to_json_map()
+    };
+    // `project_health.graph`'s cycle fields come from that same analysis
+    // (`buildGraphHealth`, triage.go:1224-1240); `NoPhase2Config` leaves
+    // `ComputeCycles` off, so a finished workspace reports no cycles.
+    let cycle_count = if has_open {
+        full_stats.cycles.as_ref().map_or(0, Vec::len)
+    } else {
+        0
+    };
+    let mut project_health = views["project_health"].clone();
+    if let Some(old) = project_health
+        .get("graph")
+        .and_then(|g| g.as_object())
+        .cloned()
+    {
+        // Go `GraphHealth` field order (triage.go:220-227): node_count,
+        // edge_count, density, has_cycles, cycle_count, phase2_ready.
+        let mut graph_obj = serde_json::Map::new();
+        for key in ["node_count", "edge_count", "density"] {
+            if let Some(v) = old.get(key) {
+                graph_obj.insert(key.into(), v.clone());
+            }
+        }
+        graph_obj.insert("has_cycles".into(), serde_json::json!(cycle_count > 0));
+        if cycle_count > 0 {
+            graph_obj.insert("cycle_count".into(), serde_json::json!(cycle_count));
+        }
+        if let Some(v) = old.get("phase2_ready") {
+            graph_obj.insert("phase2_ready".into(), v.clone());
+        }
+        project_health["graph"] = serde_json::Value::Object(graph_obj);
+    }
+
+    let mut payload = serde_json::json!({
+        // `TriageMeta.GeneratedAt` is `time.Now()` in the LOCAL zone
+        // (triage.go:712) — not the UTC stamp `--robot-triage` uses.
+        "meta": {
+            "version": "1.0.0",
+            "generated_at": go_rfc3339_nano_local(),
+            "phase2_ready": true,
+            "issue_count": triage.counts.total,
+            "compute_time_ms": 0,
+        },
+        "status": triage_status,
+        "quick_ref": {
+            "open_count": triage.quick_ref.open_count,
+            "actionable_count": triage.quick_ref.actionable_count,
+            "blocked_count": triage.quick_ref.blocked_count,
+            "in_progress_count": triage.quick_ref.in_progress_count,
+            "not_closed_count": triage.quick_ref.not_closed_count,
+            "not_actionable_count": triage.quick_ref.not_actionable_count,
+            "top_picks": views["top_picks"],
+        },
+        "recommendations": recommendations_top_n(&triage.recommendations),
+        "quick_wins": views["quick_wins"],
+        "blockers_to_clear": views["blockers_to_clear"],
+        "project_health": project_health,
+        "commands": commands,
+    });
+    // Go main.go:3508-3510 — `suppressUnprovenTriageClaims` runs on the
+    // finished TriageResult, so the serialized object is mutated in place:
+    // picks/wins emptied, every recommendation unclaimable with the
+    // inspect-diagnostics action, `claim_top` blanked while `show_top` keeps
+    // its route.
+    if !source_claim_safe(source) {
+        suppress_unproven_triage_claims(&mut payload);
+    }
+    payload
+}
+
 /// Go's `Issue.Actions` for an issue the loader gave no tracker Origin
 /// (types.go:165-167). The time-travel loader is the case that reaches it: a
 /// `--as-of` issue carries no Origin, so Go never derives a local id and never
@@ -9356,10 +9593,25 @@ fn baseline_stats_tolerant(v: &serde_json::Value) -> bv_analysis::drift::Baselin
 }
 
 fn run_check_drift() -> ExitCode {
+    // Go main.go:3635-3640 — `baseline.Exists` gates BOTH --check-drift and
+    // --check-drift --robot-drift (the check sits inside the `*checkDrift`
+    // block, before the `*robotDriftCheck` JSON branch), so a missing
+    // baseline is two stderr lines and exit 1 with NOTHING on stdout. It is
+    // not a degraded JSON document.
+    if std::fs::metadata(baseline_path()).is_err() {
+        eprintln!("Error: No baseline found.");
+        eprintln!("Create one with: bv --save-baseline \"description\"");
+        return ExitCode::from(1);
+    }
     let baseline_doc = match std::fs::read_to_string(baseline_path()) {
         Ok(raw) => raw,
-        Err(_) => {
-            eprintln!("No baseline found at {BASELINE_PATH}. Save one with --save-baseline.");
+        Err(e) => {
+            // Go `baseline.Load` (baseline.go:115-118): a file that exists but
+            // cannot be read is `Error loading baseline: reading baseline: ...`
+            eprintln!(
+                "Error loading baseline: reading baseline: {}",
+                go_path_error("open", &baseline_path().to_string_lossy(), &e)
+            );
             return ExitCode::from(1);
         }
     };
@@ -9479,14 +9731,22 @@ fn rfc3339_second_precision(rfc3339: &str) -> String {
 }
 
 fn run_robot_drift() -> ExitCode {
+    // Same gate as `run_check_drift` — in Go this flag only selects the JSON
+    // encoder INSIDE the shared `*checkDrift` block (main.go:3708), so every
+    // pre-analysis failure, missing baseline included, takes the plain
+    // stderr path with an empty stdout.
+    if std::fs::metadata(baseline_path()).is_err() {
+        eprintln!("Error: No baseline found.");
+        eprintln!("Create one with: bv --save-baseline \"description\"");
+        return ExitCode::from(1);
+    }
     let baseline_doc = match std::fs::read_to_string(baseline_path()) {
         Ok(raw) => raw,
-        Err(_) => {
-            let payload = serde_json::json!({
-                "generated_at": jiff_now(),
-                "error": format!("No baseline found at {BASELINE_PATH}. Save one with --save-baseline."),
-            });
-            emit_json(&payload);
+        Err(e) => {
+            eprintln!(
+                "Error loading baseline: reading baseline: {}",
+                go_path_error("open", &baseline_path().to_string_lossy(), &e)
+            );
             return ExitCode::from(1);
         }
     };
@@ -13522,16 +13782,27 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
     let suggest_bead = flag_value(args, "suggest-bead").map(str::to_string);
 
     let cwd = go_working_dir();
-    let (issues, hash, _as_of_commit, loaded_source) = match load_issues_auto_meta(&cwd, None) {
-        Ok(x) => x,
-        Err(e) => {
-            if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source(&e.to_string());
+    // Go's shared dispatch context loads once with `--as-of` applied
+    // (main.go:2633-2677) and the handler reads `ctx.AsOf` for the claim gate
+    // below, so the flag has to reach the loader, not just the suppression.
+    let as_of = extract_as_of();
+    let (issues, hash, as_of_commit, loaded_source) =
+        match load_issues_auto_meta(&cwd, as_of.as_deref()) {
+            Ok(x) => x,
+            Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source(&e.to_string());
+                }
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
             }
-            eprintln!("Error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+        };
+    // Publishes both fields for the envelope builder (as_of_pair), the same
+    // way the other robot handlers record them after their load.
+    set_as_of(
+        as_of.clone().unwrap_or_default(),
+        as_of_commit.clone().unwrap_or_default(),
+    );
 
     let mut config = bv_analysis::suggestions::SuggestAllConfig::default();
 
@@ -13565,12 +13836,37 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
     // Tracker-backed mutation commands need the loaded source path; the
     // suggestion layer cannot resolve an issue's live route without it.
     let source = loaded_source;
-    let output = bv_analysis::suggestions::generate_robot_suggest_output(
+    let mut output = bv_analysis::suggestions::generate_robot_suggest_output(
         &issues,
         &config,
         &hash,
         &source.path,
     );
+
+    // Go robot_registry.go:1302-1311 — `!ctx.claimsProven() || ctx.AsOf != ""`
+    // strips every suggestion's action: `WithAction(nil)` drops both the
+    // structured action and the shell string, `WithMetadata` records why, and
+    // `NewSuggestionSetAt` recomputes the stats so `actionable_count` falls to
+    // zero. The reason prefers the historical-snapshot wording whenever
+    // `--as-of` is what triggered the gate.
+    let has_as_of = as_of.as_deref().is_some_and(|s| !s.is_empty());
+    if !source_claim_safe(&source) || has_as_of {
+        let reason = if has_as_of {
+            "historical snapshots cannot authorize tracker mutations"
+        } else {
+            "source authority is incomplete or unknown"
+        };
+        for sug in output.suggestions.suggestions.iter_mut() {
+            sug.action = None;
+            sug.action_command = None;
+            suggestion_metadata_upsert(
+                &mut sug.metadata,
+                "action_unavailable_reason",
+                serde_json::json!(reason),
+            );
+        }
+        output.suggestions.stats = recompute_suggestion_stats(&output.suggestions.suggestions);
+    }
     match serde_json::to_value(&output) {
         Ok(v) => {
             // Go v0.25.0 stamps the full envelope AHEAD of the command
@@ -13584,7 +13880,12 @@ fn run_robot_suggest(args: &[String]) -> ExitCode {
             // scope_hash all landed after filters/suggestions/usage_hints.
             // Structurally identical, byte-different, and invisible to a
             // harness that compares parsed objects.
-            let mut payload = full_envelope_for(&hash, &issues);
+            //
+            // The envelope is built from the loader's own `SourceMeta`, not
+            // `full_envelope_for`'s rediscovery: under `--as-of` the selected
+            // source is the git snapshot (`.beads@<ref>` / kind "git"), which
+            // the working-tree probe cannot see.
+            let mut payload = full_envelope_json_with_source(&hash, Some(&source), &issues);
             if let (Some(dst), Some(src)) = (payload.as_object_mut(), v.as_object()) {
                 for (key, value) in src {
                     dst.insert(key.clone(), value.clone());
@@ -19812,8 +20113,18 @@ fn run_robot_metrics() -> ExitCode {
         &issues,
     );
     // Go's `MetricsOutput.Timing` is `omitempty` (`pkg/metrics/cache.go:164`),
-    // so with collection disabled the key is absent rather than an empty array.
-    if collect {
+    // so the key is absent whenever `AllTimingStats` comes back empty — which
+    // is whenever the load never went through `loader.LoadIssuesFromFile
+    // WithOptions` (loader.go:917-918), the ONLY `loader.parse` producer on
+    // this path. That wrapper covers the JSONL datasource readers
+    // (internal/datasource/jsonl.go:33 and the legacy fallback at load.go:196),
+    // per-repo workspace loads (pkg/workspace/loader.go:499) and explicit
+    // JSONL `BEADS_DB` files; the SQLite reader and the `--as-of` git loader
+    // parse without it (pkg/loader/git.go:432 calls `ParseIssuesWithOptions`
+    // directly). With `beads.db` selected — as in this very repo — the oracle
+    // emits no `timing` key at all, so synthesizing `loader.parse`
+    // unconditionally was wrong.
+    if collect && source_kind_records_loader_parse(&loaded_source.kind) {
         payload["timing"] = go_timing_stats(parse_ns);
     }
     let m = bv_analysis::metrics::get_all_metrics();
@@ -19827,6 +20138,13 @@ fn run_robot_metrics() -> ExitCode {
     // the shape can — same exemption class as `timing`.
     payload["memory"] = m["memory"].clone();
     emit_json(&payload)
+}
+
+/// Whether Go's load for this `source_kind` records `loader.parse` timing —
+/// see `run_robot_metrics`. Only the JSONL-family loads do; `sqlite`, `git`
+/// and anything unrecognised leave `AllTimingStats` empty.
+fn source_kind_records_loader_parse(kind: &str) -> bool {
+    matches!(kind, "jsonl_local" | "jsonl_worktree" | "workspace")
 }
 
 /// Go `AllTimingStats` (`pkg/metrics/timing.go:252`) appends a metric only when

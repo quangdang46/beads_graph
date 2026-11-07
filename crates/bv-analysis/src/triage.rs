@@ -1156,6 +1156,62 @@ pub fn compute_triage_scores(
     .collect()
 }
 
+/// Go `ComputeTriageWithOptions` as the EXPORT paths reach it
+/// (cmd/bv/main.go:3122 for `--export-pages`, :3506 for `--export-graph`):
+/// `TriageOptions` leaves `UseFastConfig` unset, so `AnalyzeAsync` runs the
+/// full `ConfigForSize` analysis and `ComputeImpactScoresFromStats` reads the
+/// complete PageRank / betweenness / critical-path maps. `--robot-triage`
+/// passes `UseFastConfig: true` (robot_registry.go:2215) and scores against
+/// the fast config's metrics instead — the two produce different rankings on
+/// the same issue set, which is why this is a separate entry point rather
+/// than a flag on [`build_triage`].
+///
+/// The metrics come from a rebuilt graph handle for the same reason
+/// [`compute_triage_scores`] documents: `analyze_with_profile` takes
+/// ownership, and `build_graph` assigns node indices in sorted-id order, so
+/// the two graphs are isomorphic and the float results agree.
+pub fn build_triage_full_metrics(
+    issues: &[Issue],
+    g: &DiGraph,
+    now: jiff::Timestamp,
+    time_travelling: bool,
+) -> TriageOutput {
+    // Go's bv-perf shortcut (triage.go:492-508): with nothing open it analyses
+    // under `NoPhase2Config`, so the stats maps `ComputeImpactScoresFromStats`
+    // reads are the empty ones `graph.go:1740` makes — the graph terms drop
+    // out of every score exactly as they do for `build_triage_phase2_pending`.
+    let has_open = issues.iter().any(|i| !i.status.is_closed());
+    let (pagerank, betweenness, critical_path) = if has_open {
+        let config = crate::analyzer::config_for_size(g.len(), g.edge_count(), 0.0);
+        let owned = std::sync::Arc::new(crate::analyzer::build_graph(issues));
+        let (analysis, _) = crate::analyzer::analyze_with_profile(owned, &config);
+        (
+            analysis.page_rank.clone().unwrap_or_default(),
+            analysis.betweenness.clone().unwrap_or_default(),
+            analysis.critical_path_score.clone().unwrap_or_default(),
+        )
+    } else {
+        (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
+    };
+    let metrics = ScoreMetrics {
+        pagerank: &pagerank,
+        betweenness: &betweenness,
+        critical_path: Some(&critical_path),
+    };
+    // `WaitForPhase2: true` on both export call sites, gated by `hasOpenIssues`
+    // inside Go — `phase2_awaited` mirrors the open-work half of that guard.
+    build_triage_inner(
+        issues,
+        g,
+        now,
+        has_open,
+        time_travelling,
+        None,
+        None,
+        Some(metrics),
+    )
+}
+
 /// Go parity variant for `cmd/bv/main.go:4013` (`--emit-script`), the one
 /// triage caller that omits `TriageOptions.WaitForPhase2` (triage.go:400).
 /// The `opts.WaitForPhase2 && hasOpenIssues` guard at triage.go:517-519

@@ -15,6 +15,22 @@ fn run(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// `run` with an explicit working directory — datasource discovery is
+/// cwd-relative, so tests that need a controlled `.beads` layout (JSONL-only
+/// vs `beads.db`) cannot inherit the repo's own checkout.
+fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_bvr"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("binary runs");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
 #[test]
 fn version_exits_zero() {
     // `--version` reports the **port's own** version, so a bug report names the
@@ -683,7 +699,13 @@ fn label_scope_and_context_appear_on_plan_and_priority_but_not_next() {
 
 #[test]
 fn robot_metrics_emits_timing_and_cache_entries() {
-    let (code, stdout, _) = run(&["--robot-metrics"]);
+    // A JSONL-only fixture: `loader.parse` is only recorded when the load
+    // goes through `LoadIssuesFromFileWithOptions`, so this assertion needs a
+    // source that actually parses a file — the developer checkout's own
+    // `.beads/beads.db` would (correctly) omit `timing` entirely.
+    let dir = labelled_fixture_repo("metrics_timing");
+    let (code, stdout, _) = run_in(&dir, &["--robot-metrics"]);
+    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(code, 0);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
     assert!(parsed["timing"].is_array(), "timing must be array");
@@ -701,7 +723,9 @@ fn robot_metrics_emits_timing_and_cache_entries() {
 /// dropped, not reported as zero rows.
 #[test]
 fn robot_metrics_reports_only_instrumented_timing_metrics() {
-    let (code, stdout, _) = run(&["--robot-metrics"]);
+    let dir = labelled_fixture_repo("metrics_names");
+    let (code, stdout, _) = run_in(&dir, &["--robot-metrics"]);
+    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(code, 0);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
     let timing = parsed["timing"].as_array().expect("timing array");
@@ -781,6 +805,55 @@ fn robot_metrics_omits_timing_when_collection_disabled() {
         Some(4),
         "cache registry is reported even with collection disabled"
     );
+}
+
+/// A `.beads` holding ONLY `beads.db` — no JSONL candidate — forces the
+/// SQLite source, and the SQLite reader never calls
+/// `LoadIssuesFromFileWithOptions`, so Go's `AllTimingStats` stays empty and
+/// `omitempty` drops the `timing` key entirely (verified against the oracle:
+/// this very repository selects `beads.db` and emits no `timing`).
+#[test]
+fn robot_metrics_omits_timing_when_sqlite_source_selected() {
+    let dir = std::env::temp_dir().join(format!("bvr_cli_metrics_sqlite_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".beads")).unwrap();
+    {
+        let conn = rusqlite::Connection::open(dir.join(".beads").join("beads.db")).unwrap();
+        // The reduced-column set `load_issues_simple` queries; the 23-column
+        // main query fails to prepare and the reader falls back, exactly as
+        // it does for older schemas.
+        conn.execute_batch(
+            "CREATE TABLE issues (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                priority INTEGER NOT NULL DEFAULT 2,
+                issue_type TEXT NOT NULL DEFAULT 'task',
+                assignee TEXT,
+                estimated_minutes INTEGER,
+                created_at TEXT,
+                updated_at TEXT,
+                defer_until TEXT,
+                labels TEXT,
+                tombstone INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO issues (id, title, status, created_at, updated_at)
+            VALUES ('S-1', 'Sqlite row', 'open', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+    }
+    let (code, stdout, stderr) = run_in(&dir, &["--robot-metrics"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(parsed["source_kind"], "sqlite", "{parsed}");
+    assert!(
+        parsed.get("timing").is_none(),
+        "timing must be omitted for a sqlite load, not an empty array: {parsed}"
+    );
+    assert!(parsed["cache"].is_array(), "cache must still report");
+    assert!(parsed["memory"].is_object(), "memory must still report");
 }
 
 /// Issue #5 regression: `--generate-docs` and `--export` are registered flags,

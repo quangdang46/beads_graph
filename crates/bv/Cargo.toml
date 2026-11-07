@@ -80,3 +80,6 @@ flate2 = "1"
 # The watch-loop test has to deliver a real SIGINT to check the graceful
 # shutdown path; `Child::kill` sends SIGKILL, which skips the handler entirely.
 libc = "0.2"
+# `robot_metrics_omits_timing_when_sqlite_source_selected` builds a minimal
+# `beads.db` fixture; same bundled feature set bv-core already compiles.
+rusqlite = { version = "0.32", features = ["bundled"] }
