@@ -1728,12 +1728,7 @@ fn main() -> ExitCode {
     // here: after the stages Go runs first, before the first command Go
     // dispatches.
     if presence.has("format") {
-        let fmt_val = args
-            .iter()
-            .position(|a| a == "--format")
-            .and_then(|i| args.get(i + 1))
-            .unwrap_or(&"json".to_string())
-            .clone();
+        let fmt_val = flag_value(&args, "format").unwrap_or("json").to_string();
         if fmt_val != "json" && fmt_val != "toon" {
             eprintln!("Invalid --format \"{fmt_val}\" (expected json|toon)");
             return ExitCode::from(2);
@@ -2048,25 +2043,19 @@ fn main() -> ExitCode {
     // --export (Go main.go:4372) writes a report using recipe defaults, with
     // --export-format / --export-include-graph / --export-template as overrides.
     // Also must not fall through to the TUI.
-    if let Some(export_idx) = args.iter().position(|a| a == "--export") {
-        let output_path = args.get(export_idx + 1).cloned().unwrap_or_default();
-        let md_idx = args.iter().position(|a| a == "--export-md");
-        if !output_path.is_empty() {
-            if let Some(m) = md_idx {
-                let md_path = args.get(m + 1).cloned().unwrap_or_default();
-                eprintln!("Error: --export and --export-md specify conflicting output paths");
-                let _ = md_path;
-                return ExitCode::from(2);
-            }
+    if flag_present(&args, "export") {
+        let output_path = flag_value(&args, "export").unwrap_or_default().to_string();
+        if flag_present(&args, "export-md") && !output_path.is_empty() {
+            eprintln!("Error: --export and --export-md specify conflicting output paths");
+            return ExitCode::from(2);
         }
         return run_export_report(&args, &output_path);
     }
 
     // Export markdown (Phase 5a).
-    if let Some(output_path_idx) = args.iter().position(|a| a == "--export-md") {
-        let output_path = args
-            .get(output_path_idx + 1)
-            .cloned()
+    if flag_present(&args, "export-md") {
+        let output_path = flag_value(&args, "export-md")
+            .map(str::to_string)
             .unwrap_or_else(|| "report.md".to_string());
         let cwd = go_working_dir();
         let (issues, stats) = match load_issues_tracked(&cwd) {
@@ -2109,8 +2098,10 @@ fn main() -> ExitCode {
     }
 
     // Export graph (Go --export-graph: .html interactive / json|dot|mermaid).
-    if let Some(idx) = args.iter().position(|a| a == "--export-graph") {
-        let output_path = args.get(idx + 1).cloned().unwrap_or_default();
+    if flag_present(&args, "export-graph") {
+        let output_path = flag_value(&args, "export-graph")
+            .unwrap_or_default()
+            .to_string();
         let cwd = go_working_dir();
         let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
             Ok(x) => x,
@@ -2310,12 +2301,7 @@ fn main() -> ExitCode {
     if presence.has("check-drift") {
         return run_check_drift();
     }
-    if let Some(desc) = args
-        .iter()
-        .zip(args.iter().skip(1))
-        .find(|(a, _)| a.as_str() == "--save-baseline")
-        .map(|(_, v)| v.clone())
-    {
+    if let Some(desc) = flag_value(&args, "save-baseline").map(str::to_string) {
         return run_save_baseline(&desc);
     }
 
@@ -2488,10 +2474,9 @@ fn main() -> ExitCode {
         return run_pages_wizard(&args);
     }
     // Export pages (static site bundle, Go --export-pages).
-    if let Some(idx) = args.iter().position(|a| a == "--export-pages") {
-        let out_dir = args
-            .get(idx + 1)
-            .cloned()
+    if flag_present(&args, "export-pages") {
+        let out_dir = flag_value(&args, "export-pages")
+            .map(str::to_string)
             .unwrap_or_else(|| "./bv-pages".to_string());
         // Go main.go:1622 registers `--pages-title` with an empty default, and
         // the emptiness is load-bearing twice over: `replaceTitle` is skipped
@@ -2500,12 +2485,9 @@ fn main() -> ExitCode {
         // "Project Dashboard" (main.go:5532). A non-empty default here would
         // rewrite both, so a plain `--export-pages` would ship a retitled
         // document that the oracle never produces.
-        let title = args
-            .iter()
-            .position(|a| a == "--pages-title")
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-            .unwrap_or_default();
+        let title = flag_value(&args, "pages-title")
+            .unwrap_or_default()
+            .to_string();
         // Go main.go:1623 registers `--pages-include-closed` with pflag default
         // TRUE, so a plain `--export-pages` ships closed issues too. Reading the
         // flag as "present means on" made the DEFAULT invocation drop every
@@ -3075,7 +3057,7 @@ fn main() -> ExitCode {
 
         // Go main.go:3223 — only now does watch mode take over; without the
         // flag this falls straight through to the success message.
-        if args.iter().any(|a| a == "--watch-export") {
+        if bool_flag_active(&args, "watch-export") {
             // Watch the file that was actually LOADED, not a hardcoded
             // `.beads/issues.jsonl`. Go appends `beadsPath` — the discovered
             // source (main.go:3268) — so `--db`, `BEADS_DB` and auto-discovery
@@ -3097,10 +3079,9 @@ fn main() -> ExitCode {
     }
 
     // Preview pages (Go --preview-pages): export then serve with livereload.
-    if let Some(idx) = args.iter().position(|a| a == "--preview-pages") {
-        let dir = args
-            .get(idx + 1)
-            .cloned()
+    if flag_present(&args, "preview-pages") {
+        let dir = flag_value(&args, "preview-pages")
+            .map(str::to_string)
             .unwrap_or_else(|| "./bv-pages".to_string());
         // Go has no pre-flight check: it hands the path straight to
         // `runPreviewServer` (main.go:3050-3051), whose own stat is what
@@ -3116,7 +3097,7 @@ fn main() -> ExitCode {
         let root = std::path::PathBuf::from(&dir);
         // Go main.go:3051 — `runPreviewServer(*previewPages, !*previewNoLiveReload)`,
         // so the flag negates into the library's `livereload_enabled` argument.
-        let livereload = !args.iter().any(|a| a == "--no-live-reload");
+        let livereload = !bool_flag_active(&args, "no-live-reload");
         match bv_export::preview::start_preview(
             &root,
             |port| {
@@ -3530,6 +3511,7 @@ fn source_authority(meta: &SourceMeta, data_hash: &str) -> bv_robot::RobotSource
         tombstones: meta.tombstones,
         warning_count: 0,
         sources: vec![report],
+        error: String::new(),
     }
 }
 
@@ -3581,6 +3563,9 @@ fn failed_source_authority(source_path: &str, error: &str) -> bv_robot::RobotSou
         tombstones: 0,
         warning_count: 0,
         sources: vec![report],
+        // Go main.go:2688/3345 set the authority `error` through
+        // `boundedSourceMessage` — rune-bounded, applied here the same way.
+        error: bv_robot::envelope::bounded_source_message(error),
     }
 }
 
@@ -3964,15 +3949,29 @@ fn apply_scope(issues: &[bv_core::model::Issue]) -> (Vec<bv_core::model::Issue>,
 /// away the very list the picker is meant to filter.
 fn recipe_scope_active() -> bool {
     let args: Vec<String> = std::env::args().collect();
-    let named = |flag: &str| args.iter().any(|a| a == flag);
-    let valued = |flag: &str| {
+    // Go's flag package treats `--flag=value` as the same flag as
+    // `--flag value`; both spellings have to count here.
+    let named = |flag: &str| {
         args.iter().any(|a| {
             a == flag
-                && args
-                    .iter()
-                    .position(|x| x == flag)
-                    .is_some_and(|i| args.get(i + 1).is_some_and(|v| !v.starts_with('-')))
+                || a.strip_prefix(flag)
+                    .is_some_and(|rest| rest.starts_with('='))
         })
+    };
+    let valued = |flag: &str| {
+        for (i, a) in args.iter().enumerate() {
+            if a == flag {
+                if args.get(i + 1).is_some_and(|v| !v.starts_with('-')) {
+                    return true;
+                }
+            } else if let Some(v) = a.strip_prefix(flag).and_then(|rest| rest.strip_prefix('=')) {
+                // Go's `*flag != ""` test: `--flag=` is still empty.
+                if !v.is_empty() {
+                    return true;
+                }
+            }
+        }
+        false
     };
     named("--robot-help")
         || named("--robot-capabilities")
@@ -3981,8 +3980,9 @@ fn recipe_scope_active() -> bool {
         || named("--robot-recipes")
         || args.iter().any(|a| a.starts_with("--robot-"))
         || valued("--export")
+        || valued("--export-md")
         || valued("--export-pages")
-        || named("--export-graph")
+        || valued("--export-graph")
 }
 
 /// Go's `*analysis.GraphStats` behind the metric lookups `recipe::apply` needs
@@ -4652,8 +4652,16 @@ fn deploy_to_github(
 
     // `RepoHasContent` (github.go:236-260) — a 404 or an empty listing means
     // no content, and Go's `is_update` (`ForceOverwrite`) is what lets an
-    // existing bundle be replaced.
-    let existing_content = repo_has_content(&repo_full_name).unwrap_or(false);
+    // existing bundle be replaced. A failed lookup is NOT "no content":
+    // swallowing it here would let the push overwrite a repository whose
+    // state was never actually read.
+    let existing_content = match repo_has_content(&repo_full_name) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(1);
+        }
+    };
     if existing_content && !wizard.is_update {
         eprintln!(
             "Error: repository {repo_full_name} has existing content - use ForceOverwrite option to overwrite"
@@ -5184,7 +5192,11 @@ fn load_issues_auto_meta_raw(
                     SourceMeta {
                         path: format!("bd export --all@{}", cwd.display()),
                         envelope_path: String::new(),
-                        kind: "bd_export".to_string(),
+                        // `bd export` emits the same JSONL record stream the
+                        // local loader parses; the schema's source-kind enum
+                        // has no `bd_export`, and `jsonl_local` is the kind
+                        // whose payload shape this actually is.
+                        kind: "jsonl_local".to_string(),
                         valid: stats.valid,
                         errors: stats.errors,
                         skipped: stats.skipped,
@@ -5238,16 +5250,21 @@ fn load_issues_auto_meta_raw(
 fn run_robot_next() -> ExitCode {
     let cwd = go_working_dir();
     let as_of = extract_as_of();
-    let (issues, hash, as_of_commit, source) = match load_issues_auto_meta(&cwd, as_of.as_deref()) {
-        Ok(x) => x,
-        Err(e) => {
-            if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source(&e.to_string());
+    let (loaded, loader_hash, as_of_commit, source) =
+        match load_issues_auto_meta_raw(&cwd, as_of.as_deref()) {
+            Ok(x) => x,
+            Err(e) => {
+                if is_unresolved_source_error(&e.to_string()) {
+                    return emit_unresolved_source(&e.to_string());
+                }
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
             }
-            eprintln!("Error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+        };
+    // `--repo` then `--label` narrow at the same point Go's
+    // `scopeLoadedIssues` does; the loader digest survives for the authority.
+    let (issues, hash_override) = apply_scope(&loaded);
+    let hash = hash_override.unwrap_or_else(|| loader_hash.clone());
 
     // The loader reported the source; re-deriving it from the working tree
     // names a different file under `--as-of`.
@@ -5256,7 +5273,7 @@ fn run_robot_next() -> ExitCode {
         as_of_commit.clone().unwrap_or_default(),
     );
     let mut payload =
-        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&source), &issues);
+        full_envelope_json_with_source_and_authority(&hash, &loader_hash, Some(&source), &issues);
     if let Some(ref a) = as_of {
         payload["as_of"] = serde_json::json!(a);
     }
@@ -5289,9 +5306,14 @@ fn run_robot_next() -> ExitCode {
     let out = bv_analysis::triage::build_triage(&issues, &g, robot_now(), as_of.is_some());
 
     // Claimability filter (Go robotNextClaimabilityReasons): the pick must
-    // be open, non-epic, unassigned, and free of open blockers.
+    // be open, non-epic, unassigned, and free of open blockers — the same
+    // gates `ReadinessIndex.Claimable` applies for triage, including the
+    // parent-with-open-children check and the not-ready label exclusion.
     let issue_by_id: std::collections::HashMap<&str, &bv_core::model::Issue> =
         issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    let next_readiness = bv_analysis::triage::Readiness::new(&issues);
+    let next_now = robot_now();
+    let not_ready_labels = resolve_not_ready_labels();
     let claimability_reasons = |pick: &serde_json::Value| -> Vec<String> {
         let Some(id) = pick["id"].as_str() else {
             return vec!["pick lacks id".into()];
@@ -5309,6 +5331,26 @@ fn run_robot_next() -> ExitCode {
         let assignee = issue.assignee.trim();
         if !assignee.is_empty() {
             reasons.push(format!("{id} is already assigned to {assignee}"));
+        }
+        // `ReadinessIndex.Claimable`'s `Ready` half: a deferred issue is not
+        // claimable work yet, whatever its blockers say.
+        if next_readiness.is_deferred_at(id, next_now) {
+            reasons.push(format!("{id} is deferred"));
+        }
+        // `ReadinessIndex.Claimable` (readiness.go:181-185) also refuses a
+        // parent that still has open children — finishing it now would leave
+        // the subtree it gates unfinished.
+        if next_readiness.has_open_children(id) {
+            reasons.push(format!("{id} has open children"));
+        }
+        // `--robot-not-ready-labels` marks beads an operator has declared
+        // not claimable; triage's top picks honour the same gate.
+        if issue
+            .labels
+            .iter()
+            .any(|l| not_ready_labels.iter().any(|n| n == l))
+        {
+            reasons.push(format!("{id} carries a not-ready label"));
         }
         // Ancestor-epic parity (#2): route through the shared
         // blocker_chain helper so parent-child inherited blocking gates
@@ -5335,26 +5377,21 @@ fn run_robot_next() -> ExitCode {
         reasons
     };
 
-    // Build top picks exactly as run_robot_triage does (top 5 recommendations
-    // with direct unblock counts).
+    // Build top picks exactly as run_robot_triage does — the top five
+    // recommendations, and `unblocks` counts `UnblocksIDs`, the readiness
+    // authority `build_triage` stamps (sole open blocker), not the raw
+    // blocking in-degree which credits dependents still multiply blocked.
     let picks: Vec<serde_json::Value> = out
         .recommendations
         .iter()
+        .take(5)
         .map(|r| {
-            let unblocks: usize = issues
-                .iter()
-                .filter(|o| {
-                    o.dependencies
-                        .iter()
-                        .any(|d| d.r#type.is_blocking() && d.effective_depends_on() == r.id)
-                })
-                .count();
             serde_json::json!({
                 "id": r.id,
                 "title": r.title,
                 "score": r.score,
                 "reasons": r.reasons,
-                "unblocks": unblocks,
+                "unblocks": r.unblocks_ids.len(),
             })
         })
         .collect();
@@ -5586,15 +5623,14 @@ fn recommendations_top_n_refs(
 /// this is a no-op unless the flag or env var is configured.
 fn resolve_not_ready_labels() -> Vec<String> {
     // robot_registry.go:2075-2079 — the FLAG wins over the env var, and only
-    // when it is non-blank. The flag has no short alias, so raw argv is
-    // equivalent to the rewritten vector here.
-    let argv: Vec<String> = std::env::args().collect();
-    let flag_raw = argv
-        .iter()
-        .position(|a| a == "--robot-not-ready-labels")
-        .and_then(|i| argv.get(i + 1))
+    // when it is non-blank. The flag has no short alias, so the rewritten
+    // vector is equivalent here — and it is what makes the single-dash long
+    // spelling (`-robot-not-ready-labels`) visible to `flag_value`.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let argv = argv::rewrite_args(&raw);
+    let flag_raw = flag_value(&argv, "robot-not-ready-labels")
         .filter(|v| !v.trim().is_empty())
-        .cloned();
+        .map(str::to_string);
     let raw =
         flag_raw.unwrap_or_else(|| std::env::var("BV_ROBOT_NOT_READY_LABELS").unwrap_or_default());
     let raw = raw.trim();
@@ -6665,7 +6701,7 @@ fn run_robot_triage() -> ExitCode {
     // `project_health`/`commands`/`usage_hints`/`feedback` are ever assembled.
     // One branch covers all three triage primaries because they share
     // `handleRobotTriage` (robot_registry.go:1671-1679).
-    if std::env::args().any(|a| a == "--brief") {
+    if bool_flag_active(&std::env::args().skip(1).collect::<Vec<_>>(), "brief") {
         let brief_recs: Vec<serde_json::Value> = out
             .recommendations
             .iter()
@@ -6771,7 +6807,7 @@ fn run_robot_triage() -> ExitCode {
         // to both groupers at :697 and :700.
         let grouped: Vec<&bv_analysis::impact::IssueImpact> =
             recommendations_top_n_refs(&out.recommendations);
-        if argv.iter().any(|a| a == "--robot-triage-by-track") {
+        if bool_flag_active(&argv, "robot-triage-by-track") {
             let by_track = build_recommendations_by_track(&grouped, &issue_by_id);
             // `RecommendationsByTrack` is `omitempty` (triage.go:52), and Go
             // leaves the slice nil when the grouper produces nothing — which
@@ -6782,7 +6818,7 @@ fn run_robot_triage() -> ExitCode {
                 payload["triage"]["recommendations_by_track"] = serde_json::json!(by_track);
             }
         }
-        if argv.iter().any(|a| a == "--robot-triage-by-label") {
+        if bool_flag_active(&argv, "robot-triage-by-label") {
             let by_label = build_recommendations_by_label(&grouped, &issue_by_id);
             if !by_label.is_empty() {
                 payload["triage"]["recommendations_by_label"] = serde_json::json!(by_label);
@@ -6856,9 +6892,14 @@ fn baseline_cycle_limit(nodes: usize) -> usize {
 /// list and the traversal below walks the same edges in the same direction.
 /// Node ids are the issue-id-sorted dense indices `build_graph` assigns, so
 /// comparing indices is Go's comparing `node.ID()`.
-fn find_cycles_safe(g: &bv_graph_core::DiGraph, limit: usize) -> Vec<Vec<String>> {
+/// Returns `(stored, total)`: Go records the cycle count BEFORE the
+/// `MaxCyclesToStore` slice (graph_cycles.go:61-64), so a graph with more
+/// cycles than the tier cap still reports the true total while only the
+/// first `limit` paths are kept. `total` is 0 when the tier disables cycle
+/// computation entirely (`limit == 0`, the XL `ComputeCycles: false` case).
+fn find_cycles_safe(g: &bv_graph_core::DiGraph, limit: usize) -> (Vec<Vec<String>>, usize) {
     if limit == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let scc = bv_analysis::algorithms::cycles::tarjan_scc(g);
     let mut cycles: Vec<Vec<String>> = Vec::new();
@@ -6881,8 +6922,9 @@ fn find_cycles_safe(g: &bv_graph_core::DiGraph, limit: usize) -> Vec<Vec<String>
     cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.iter().cmp(b.iter())));
     // graph_cycles.go:61-64 — the total is recorded before the slice, so
     // truncation is reported without claiming every simple cycle was missed.
+    let total = cycles.len();
     cycles.truncate(limit);
-    cycles
+    (cycles, total)
 }
 
 fn node_label(g: &bv_graph_core::DiGraph, idx: usize) -> String {
@@ -7007,7 +7049,7 @@ fn capture_baseline_for(issues: &[bv_core::model::Issue]) -> Result<BaselineCapt
     // component contents that are not a cycle at all, and dropped the
     // self-loop entirely, so the drift baseline disagreed with the oracle on
     // both the count and every cycle's contents.
-    let new_cycles = find_cycles_safe(&g, baseline_cycle_limit(g.len()));
+    let (new_cycles, cycle_total) = find_cycles_safe(&g, baseline_cycle_limit(g.len()));
     // Go keeps the top 10 PageRank entries for drift comparison
     // (main.go:5242 buildMetricItems): rank by value descending, then
     // truncate. Ranking by graph iteration order instead selected a
@@ -7078,7 +7120,7 @@ fn capture_baseline_for(issues: &[bv_core::model::Issue]) -> Result<BaselineCapt
                 .iter()
                 .filter(|i| i.status == bv_core::model::Status::Blocked)
                 .count(),
-            cycle_count: new_cycles.len(),
+            cycle_count: cycle_total,
             actionable,
             pagerank: pr_map,
         },
@@ -7317,7 +7359,12 @@ fn run_save_baseline(desc: &str) -> ExitCode {
             let created_at = doc["created_at"].as_str().unwrap_or_default().to_string();
             let stats = &stats;
             let top = &top_metrics;
-            match std::fs::write(baseline_path(), serde_json::to_vec_pretty(&doc).unwrap()) {
+            // Go writes the document with `json.MarshalIndent`-family
+            // semantics: HTML-safe escaping and Go float rendering (a whole
+            // float is `1`, not `1.0`). `serde_json::to_vec_pretty` does
+            // neither, so the file a Go reader compares byte-for-byte
+            // differed on both counts.
+            match std::fs::write(baseline_path(), go_json_string_pretty(&doc)) {
                 Ok(_) => {
                     // Go main.go:3629-3630: the path, then `bl.Summary()`.
                     // Go builds the path from an absolute `os.Getwd()`
@@ -7466,37 +7513,106 @@ fn run_baseline_info() -> ExitCode {
 
 /// Render an RFC3339 timestamp the way Go's `time.RFC1123` layout does:
 /// `Mon, 02 Jan 2006 15:04:05 MST`.
-/// The signed seconds an RFC3339 zone designator like `+07:00` denotes.
-fn rfc3339_offset_seconds(label: &str) -> Option<i64> {
-    let (sign, rest) = match label.strip_prefix('-') {
-        Some(r) => (-1i64, r),
-        None => (1i64, label.strip_prefix('+')?),
-    };
-    // `+07` and `+07:00` both reach here: the wire form carries minutes, the
-    // label `rfc3339_offset_label` produces is hour-only because that is what
-    // Go's `MST` layout prints.
-    let (h, m) = match rest.split_once(':') {
-        Some((h, m)) => (h, m),
-        None => (rest, "0"),
-    };
-    Some(sign * (h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60))
+/// The zone designator an RFC3339 timestamp carries, resolved the way Go's
+/// `time.Parse` resolves it (time/format_rfc3339.go `parseRFC3339`).
+struct Rfc3339Zone {
+    /// Signed offset of the wire designator, in seconds. `Z` is 0.
+    offset_seconds: i64,
+    /// `Z`/`z` on the wire — Go keeps the UTC location, so the `MST` label is
+    /// `UTC` and a read-back `time.RFC3339` render prints `Z`.
+    zulu: bool,
 }
 
-/// The zone label Go's `MST` layout prints for an RFC3339 timestamp: `UTC` for
-/// `Z`, otherwise the numeric offset truncated to whole hours (`+07`).
-fn rfc3339_offset_label(rfc3339: &str) -> Option<String> {
+/// Parse the zone designator of an RFC3339 timestamp. `+07`, `+0700` and
+/// `+07:00` all occur in the wild; RFC3339 proper is the colon form and is
+/// what `encoding/json` writes into `baseline.created_at`.
+fn rfc3339_zone(rfc3339: &str) -> Option<Rfc3339Zone> {
     let (_, tail) = rfc3339.rsplit_once('T')?;
     // The zone designator is the first `+` or `-` after the time fields. The
     // date's own `-` signs are behind us, so anything here is an offset.
-    let idx = tail.find(['+', '-'])?;
-    let sign = &tail[idx..idx + 1];
-    let digits: String = tail[idx + 1..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    // `+07:00` and `+0700` both occur; the label Go prints is whole hours.
-    let hours: i64 = digits.get(..2)?.parse().ok()?;
-    Some(format!("{sign}{hours:02}"))
+    let Some(idx) = tail.find(['+', '-']) else {
+        // No numeric offset: `Z` is the only zone form left.
+        return if tail.ends_with(['Z', 'z']) {
+            Some(Rfc3339Zone {
+                offset_seconds: 0,
+                zulu: true,
+            })
+        } else {
+            None
+        };
+    };
+    let sign: i64 = if tail.as_bytes()[idx] == b'-' { -1 } else { 1 };
+    let rest = &tail[idx + 1..];
+    let (h, m): (String, String) = match rest.split_once(':') {
+        Some((h, m)) => (h.to_string(), m.to_string()),
+        None => {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            // `+07` is hour-only; `+0730` packs the minutes in.
+            if digits.len() >= 4 {
+                (digits[..2].to_string(), digits[2..4].to_string())
+            } else {
+                (digits, "0".to_string())
+            }
+        }
+    };
+    let hours: i64 = h.parse().ok()?;
+    let minutes: i64 = m.parse().ok()?;
+    Some(Rfc3339Zone {
+        offset_seconds: sign * (hours * 3600 + minutes * 60),
+        zulu: false,
+    })
+}
+
+/// `(gmtoff, abbreviation)` of the machine's local zone at `unix_secs`, read
+/// from the C library — the same source Go's `time.Local` consults. jiff's
+/// `TimeZone::system()` resolves UTC on macOS (see `jiff_local_now`), so the
+/// tz database cannot answer this.
+#[cfg(unix)]
+fn local_zone_at(unix_secs: i64) -> Option<(i64, String)> {
+    // SAFETY: `localtime_r` writes a single `tm` we own and initialise to
+    // zero first.
+    unsafe {
+        let t = unix_secs as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return None;
+        }
+        let name = if tm.tm_zone.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(tm.tm_zone)
+                .to_string_lossy()
+                .into_owned()
+        };
+        Some((tm.tm_gmtoff as i64, name))
+    }
+}
+
+#[cfg(not(unix))]
+fn local_zone_at(_unix_secs: i64) -> Option<(i64, String)> {
+    None
+}
+
+/// The `MST` label Go's `time.RFC1123` layout prints for a parsed RFC3339
+/// zone: `UTC` for `Z`; the machine's own zone abbreviation when the offset
+/// matches `time.Local` at that instant (Go's `local.lookup`,
+/// format_rfc3339.go — the parsed time adopts the local location); otherwise
+/// the numeric `±hhmm` a nameless `FixedZone` produces, e.g. `+0530`,
+/// `-0330`, `+0000`.
+fn rfc3339_mst_label(zone: &Rfc3339Zone, ts: jiff::Timestamp) -> String {
+    if zone.zulu {
+        return "UTC".to_string();
+    }
+    if let Some((_, name)) =
+        local_zone_at(ts.as_second()).filter(|(off, _)| *off == zone.offset_seconds)
+    {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    let sign = if zone.offset_seconds < 0 { '-' } else { '+' };
+    let abs = zone.offset_seconds.unsigned_abs();
+    format!("{sign}{:02}{:02}", abs / 3600, (abs % 3600) / 60)
 }
 
 fn go_rfc1123(rfc3339: &str) -> String {
@@ -7504,20 +7620,24 @@ fn go_rfc1123(rfc3339: &str) -> String {
         return rfc3339.to_string();
     };
     // Go renders the timestamp in its own location ("Mon, 02 Jan 2006
-    // 15:04:05 MST"), so a baseline saved in +07:00 prints "+07" while one
-    // stored as UTC prints "UTC". Forcing UTC reported the right instant under
-    // the wrong zone, and the wrong wall clock under the right zone.
+    // 15:04:05 MST"), so a baseline saved in +07:00 prints its zone label
+    // while one stored as UTC prints "UTC". Forcing UTC reported the right
+    // instant under the wrong zone, and the wrong wall clock under the right
+    // zone.
     // Shift into the zone the timestamp is written in. Parsing normalises to
     // UTC, so without this the printed wall clock is the UTC one under a local
     // label — "00:44 +07" for an instant that is 07:44 local.
-    let label = rfc3339_offset_label(rfc3339);
-    let offset_secs = label
-        .as_deref()
-        .and_then(rfc3339_offset_seconds)
-        .unwrap_or(0);
-    let shifted = ts
-        .checked_add(std::time::Duration::from_secs(offset_secs.unsigned_abs()))
-        .unwrap_or(ts);
+    let zone = rfc3339_zone(rfc3339);
+    let offset_secs = zone.as_ref().map_or(0, |z| z.offset_seconds);
+    let offset_dur = std::time::Duration::from_secs(offset_secs.unsigned_abs());
+    // The offset is signed: a `-03:30` zone shifts the wall clock BACK, and
+    // `unsigned_abs` alone used to push it forward.
+    let shifted = if offset_secs < 0 {
+        ts.checked_sub(offset_dur)
+    } else {
+        ts.checked_add(offset_dur)
+    }
+    .unwrap_or(ts);
     let dt = shifted.to_zoned(jiff::tz::TimeZone::UTC).datetime();
     // jiff numbers weekdays Monday=1..Sunday=7; Go's `time.RFC1123` layout
     // ("Mon, 02 Jan 2006 15:04:05 MST") indexes a Monday-first table. The old
@@ -7534,7 +7654,10 @@ fn go_rfc1123(rfc3339: &str) -> String {
     // `Timestamp` is UTC-based, so parsing has already discarded the offset
     // and it has to be read back off the wire form. Go keeps it: a
     // `time.Time` carries its own location, and `MST` prints that.
-    let zone = label.unwrap_or_else(|| "UTC".to_string());
+    let zone = zone
+        .as_ref()
+        .map(|z| rfc3339_mst_label(z, ts))
+        .unwrap_or_else(|| "UTC".to_string());
     format!(
         "{weekday}, {:02} {} {:04} {:02}:{:02}:{:02} {zone}",
         dt.day(),
@@ -7761,7 +7884,7 @@ fn run_update(args: &[String]) -> ExitCode {
         eprintln!("Latest release cannot be installed automatically: {e}");
         return ExitCode::from(1);
     }
-    if !args.iter().any(|a| a == "--yes" || a == "-y") {
+    if !bool_flag_active(args, "yes") && !args.iter().any(|a| a == "-y") {
         let mut out = std::io::stdout();
         let mut err = std::io::stderr();
         let version = bv_update::current_version();
@@ -8652,6 +8775,39 @@ fn drift_summary(result: &bv_analysis::drift::DriftResult) -> String {
     sb
 }
 
+/// Tolerant read of a saved baseline's `stats` object.
+///
+/// Go's `json.Unmarshal` into `baseline.Stats` fills each field it can and
+/// leaves the rest at their zero value; it does not reject the whole document
+/// because one count arrived as a string or a float. serde's derive is
+/// all-or-nothing, so when the strict pass fails the fields are read
+/// individually — same names, same aliases, same zero defaults.
+fn baseline_stats_tolerant(v: &serde_json::Value) -> bv_analysis::drift::BaselineStats {
+    use bv_analysis::drift::BaselineStats;
+    if let Ok(s) = serde_json::from_value::<BaselineStats>(v.clone()) {
+        return s;
+    }
+    let count = |keys: &[&str]| -> usize {
+        keys.iter()
+            .find_map(|k| {
+                v.get(*k)
+                    .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f.max(0.0) as u64)))
+            })
+            .unwrap_or(0) as usize
+    };
+    BaselineStats {
+        node_count: count(&["node_count"]),
+        edge_count: count(&["edge_count"]),
+        density: v.get("density").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        open: count(&["open_count", "open"]),
+        closed: count(&["closed_count", "closed"]),
+        blocked: count(&["blocked_count", "blocked"]),
+        cycle_count: count(&["cycle_count"]),
+        actionable: count(&["actionable_count", "actionable"]),
+        pagerank: Default::default(),
+    }
+}
+
 fn run_check_drift() -> ExitCode {
     let baseline_doc = match std::fs::read_to_string(baseline_path()) {
         Ok(raw) => raw,
@@ -8670,14 +8826,7 @@ fn run_check_drift() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut base_stats: bv_analysis::drift::BaselineStats =
-        match serde_json::from_value(base["stats"].clone()) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Error loading baseline: parsing baseline: {e}");
-                return ExitCode::from(1);
-            }
-        };
+    let mut base_stats = baseline_stats_tolerant(&base["stats"]);
     base_stats.pagerank = baseline_top_metrics(&base).pagerank_map();
     let old_cycles: Vec<Vec<String>> = base
         .get("cycles")
@@ -8756,13 +8905,18 @@ fn rfc3339_second_precision(rfc3339: &str) -> String {
     let Ok(ts) = rfc3339.parse::<jiff::Timestamp>() else {
         return rfc3339.to_string();
     };
-    let offset = rfc3339_offset_label(rfc3339)
-        .as_deref()
-        .and_then(rfc3339_offset_seconds)
-        .unwrap_or(0);
-    let shifted = ts
-        .checked_add(std::time::Duration::from_secs(offset.unsigned_abs()))
-        .unwrap_or(ts);
+    // The offset comes off the wire form, not a re-derived label: a `+05:30`
+    // zone is 19800 seconds, and an hour-truncated label used to render it
+    // back as `+05:00`.
+    let offset = rfc3339_zone(rfc3339).map_or(0, |z| z.offset_seconds);
+    let offset_dur = std::time::Duration::from_secs(offset.unsigned_abs());
+    // Signed, like `go_rfc1123`: a negative offset shifts the wall clock back.
+    let shifted = if offset < 0 {
+        ts.checked_sub(offset_dur)
+    } else {
+        ts.checked_add(offset_dur)
+    }
+    .unwrap_or(ts);
     let dt = shifted.to_zoned(jiff::tz::TimeZone::UTC).datetime();
     let zone = if offset == 0 {
         "Z".to_string()
@@ -8807,14 +8961,7 @@ fn run_robot_drift() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut base_stats: bv_analysis::drift::BaselineStats =
-        match serde_json::from_value(base["stats"].clone()) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Error loading baseline: parsing baseline: {e}");
-                return ExitCode::from(1);
-            }
-        };
+    let mut base_stats = baseline_stats_tolerant(&base["stats"]);
     base_stats.pagerank = baseline_top_metrics(&base).pagerank_map();
     let old_cycles: Vec<Vec<String>> = base
         .get("cycles")
@@ -8973,7 +9120,12 @@ fn validate_correlation_repository(repo: &std::path::Path) -> Result<(), String>
 /// `--flag value`. `rewrite_args` only rewrites bare boolean flags, so the raw
 /// argv still carries every valued flag verbatim.
 fn history_flag_value(name: &str) -> Option<String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Read the REWRITTEN argv: `normalize_flag_spelling` expands the
+    // single-dash long forms (`-bead-history`, `-history-since`) that Go's
+    // pflag accepts, and scanning the raw argv missed them entirely — the
+    // command dispatched but the value never arrived.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let args = argv::rewrite_args(&raw);
     let with_eq = format!("--{name}=");
     for (i, a) in args.iter().enumerate() {
         if let Some(v) = a.strip_prefix(&with_eq) {
@@ -9010,28 +9162,33 @@ fn parse_relative_time(raw: &str) -> Result<Option<String>, String> {
     if s.is_empty() {
         return Ok(None);
     }
-    // Relative form: a digit run followed by one of d/w/m/y.
-    let lower = s.to_lowercase();
-    if lower.len() >= 2 {
-        let (digits, unit) = lower.split_at(lower.len() - 1);
-        if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-            let n: i64 = digits
-                .parse()
-                .map_err(|_| format!("could not parse time \"{raw}\""))?;
+    // Relative form: Go's `(\d+)([dwmy])` — a digit run followed by one unit
+    // letter. Splitting on `chars` (not `split_at(len - 1)`) keeps a multi-byte
+    // final character from panicking on a byte boundary, and an unknown unit
+    // fails the match and falls through to the absolute formats below, exactly
+    // as Go does.
+    let lowered = s.to_lowercase();
+    if let Some(unit) = lowered.chars().next_back() {
+        let digits = &lowered[..lowered.len() - unit.len_utf8()];
+        if !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && matches!(unit, 'd' | 'w' | 'm' | 'y')
+        {
+            // Go ignores `strconv.Atoi`'s error, so an overflowing count
+            // becomes 0 and the threshold lands exactly on `now`.
+            let n: i64 = digits.parse().unwrap_or(0);
             let span = match unit {
-                "d" => jiff::Span::new().days(-n),
-                "w" => jiff::Span::new().days(-n * 7),
-                "m" => jiff::Span::new().months(-n),
-                "y" => jiff::Span::new().years(-n),
-                _ => jiff::Span::new().days(0),
+                'd' => jiff::Span::new().days(-n),
+                'w' => jiff::Span::new().days(-n * 7),
+                'm' => jiff::Span::new().months(-n),
+                'y' => jiff::Span::new().years(-n),
+                _ => unreachable!("unit already checked against dwmy"),
             };
-            if !span.is_zero() {
-                let shifted = robot_now()
-                    .to_zoned(robot_now_zone())
-                    .checked_add(span)
-                    .map_err(|e| e.to_string())?;
-                return Ok(Some(shifted.timestamp().to_string()));
-            }
+            let shifted = robot_now()
+                .to_zoned(robot_now_zone())
+                .checked_add(span)
+                .map_err(|e| e.to_string())?;
+            return Ok(Some(shifted.timestamp().to_string()));
         }
     }
     // An explicit instant is already in the shape the report echoes back.
@@ -9311,6 +9468,11 @@ type AnalysisTuple = (
     // matched nothing, which reads as an empty repository rather than an empty
     // selection.
     SourceMeta,
+    // The loader's own digest over the UNSCOPED set (`_hash` above). Go keeps
+    // it for `source_authority`'s fallback: `file_hash_or` prefers the file
+    // digest, but loaders that cannot produce one (workspace) still need a
+    // digest that names the loaded file, not the `--repo`/`--label` narrowing.
+    String,
 );
 
 /// Shared helper: load issues, build graph, run analysis phases.
@@ -9352,7 +9514,10 @@ fn load_and_analyze(as_of: Option<&str>) -> Result<AnalysisTuple, ExitCode> {
     // with no `quick_ref` to read, so "nothing matched my filter" was
     // indistinguishable from "the command failed". The analysis is defined for
     // an empty graph; `run_robot_triage` was fixed the same way in 884bc45.
-    let data_hash = hash_override.unwrap_or_else(|| bv_core::data_hash::compute_data_hash(&issues));
+    // Go main.go:4890-4901 — only a `--repo` scope re-hashes; `--label` and
+    // recipe narrowing keep the loader's digest so the payload still names
+    // the file it came from.
+    let data_hash = hash_override.unwrap_or_else(|| _hash.clone());
     let g = std::sync::Arc::new(bv_analysis::build_graph(&issues));
     let p1 = bv_analysis::analyze_phase1(&g);
     let budget = bv_analysis::AnalysisBudget {
@@ -9366,7 +9531,7 @@ fn load_and_analyze(as_of: Option<&str>) -> Result<AnalysisTuple, ExitCode> {
     let g2 = std::sync::Arc::clone(&g);
     let (status, _phase2) = bv_analysis::analyze_phase2_blocking(g2, &budget);
 
-    Ok((issues, data_hash, p1, status, g, loaded_source))
+    Ok((issues, data_hash, p1, status, g, loaded_source, _hash))
 }
 
 /// Go `NewRobotEnvelope` parity: for handlers whose Go output embeds the
@@ -9654,6 +9819,10 @@ fn go_escape_string(s: &str) -> String {
             '<' => out.push_str("\\u003c"),
             '>' => out.push_str("\\u003e"),
             '&' => out.push_str("\\u0026"),
+            // Go's encoding/json always escapes U+2028/U+2029 so the output
+            // stays safe inside a JS string literal.
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -9697,7 +9866,11 @@ fn write_go_json(v: &serde_json::Value, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                // Keys go through the same escaper as values: Go's
+                // `encoding/json` applies its HTML-safe escaping to map keys
+                // too, and `serde_json::to_string` would leave `<`, `>`, `&`
+                // and U+2028/U+2029 bare.
+                out.push_str(&go_escape_string(k));
                 out.push(':');
                 write_go_json(val, out);
             }
@@ -9978,6 +10151,9 @@ type AnalysisResultFull = (
     std::sync::Arc<bv_graph_core::DiGraph>,
     bv_analysis::GraphAnalysisPhase2,
     SourceMeta,
+    // The loader's digest over the UNSCOPED set — `source_authority`'s
+    // fallback when the source cannot produce a file digest of its own.
+    String,
 );
 
 fn load_full() -> Result<AnalysisResultFull, ExitCode> {
@@ -10072,8 +10248,9 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     };
     // Go main.go:2786 — scope before analysis; `--repo` re-hashes
     // (main.go:4883-4884), `--label` keeps the loader's hash (:4901).
+    let loader_hash = bv_core::data_hash::compute_data_hash(&issues);
     let (issues, hash_override) = apply_scope(&issues);
-    let data_hash = hash_override.unwrap_or_else(|| bv_core::data_hash::compute_data_hash(&issues));
+    let data_hash = hash_override.unwrap_or_else(|| loader_hash.clone());
     let source = source.unwrap_or_else(|| source_meta_for(&issues));
     let g = std::sync::Arc::new(bv_analysis::build_graph(&issues));
     let p1 = bv_analysis::analyze_phase1(&g);
@@ -10083,7 +10260,16 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     };
     let gc = std::sync::Arc::clone(&g);
     let (status, phase2) = bv_analysis::analyze_phase2_blocking(gc, &budget);
-    Ok((issues, data_hash, p1, status, g, phase2, source))
+    Ok((
+        issues,
+        data_hash,
+        p1,
+        status,
+        g,
+        phase2,
+        source,
+        loader_hash,
+    ))
 }
 
 fn to_id_map(
@@ -10232,7 +10418,7 @@ fn run_robot_insights() -> ExitCode {
 /// writes the identical insights object).
 fn build_robot_insights() -> Result<serde_json::Value, ExitCode> {
     let all = load_full()?;
-    let (issues, hash, p1, status, g, phase2, source) = all;
+    let (issues, hash, p1, status, g, phase2, source, loader_hash) = all;
 
     let pr_obj = to_id_map(&g, &bv_graph_core::pagerank_default(&g));
     // Go's betweenness here is the config-driven Phase 2 result, not a
@@ -10292,7 +10478,7 @@ fn build_robot_insights() -> Result<serde_json::Value, ExitCode> {
     };
 
     let mut payload =
-        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&source), &issues);
+        full_envelope_json_with_source_and_authority(&hash, &loader_hash, Some(&source), &issues);
     payload["analysis_config"] = insights_analysis_config(g.len());
     // Go's `statusEntry.MarshalJSON` (pkg/analysis/graph.go:131-147) omits
     // `reason` only when it is empty, and every Go site that sets
@@ -10586,7 +10772,16 @@ fn compute_top_what_if_deltas(
                 issues
                     .iter()
                     .find(|i| i.id == *id)
-                    .map(|i| i.estimated_minutes.unwrap_or(60) as f64)
+                    .map(|i| {
+                        // Go `estimateDaysSaved` (priority.go:985-1000): a
+                        // positive estimate is used, anything else falls back
+                        // to the 60-minute default — a stored 0 or negative
+                        // value must not silently report zero savings.
+                        match i.estimated_minutes {
+                            Some(m) if m > 0 => m as f64,
+                            _ => 60.0,
+                        }
+                    })
                     .unwrap_or(60.0)
             })
             .sum::<f64>()
@@ -11143,10 +11338,18 @@ fn generate_advanced_insights(
     // the suggestion is "complete this to widen parallel work", which only
     // makes sense for something that can be completed now. Iterating all open
     // issues admits a candidate at every depth of the graph.
-    let actionable_ids: Vec<&str> = open_set
+    // Go's actionable set is the readiness frontier, not "open with no open
+    // blocker in this hand-rolled adjacency": `defer_until`, the parent-child
+    // chain and dangling references all withhold readiness
+    // (readiness.go:109-161), and a candidate parked until next quarter or
+    // waiting on an unfinished parent is not work that can be completed now.
+    let insights_readiness = bv_analysis::triage::Readiness::new(issues);
+    let now_for_readiness = robot_now();
+    let actionable_ids: Vec<&str> = issues
         .iter()
-        .copied()
-        .filter(|id| blocked_by.get(*id).is_none_or(|v| v.is_empty()))
+        .filter(|i| is_open(i))
+        .filter(|i| insights_readiness.ready_after(i.id.as_str(), now_for_readiness, None))
+        .map(|i| i.id.as_str())
         .collect();
     for id in &actionable_ids {
         let mut newly: Vec<String> = Vec::new();
@@ -11200,7 +11403,6 @@ fn generate_advanced_insights(
     // parent chain, and it ignores which issues are candidates at all, so
     // deferred and excluded work was counted as ready. Over-counting 126 vs
     // Go's 119 on the ultraworkers set.
-    let insights_readiness = bv_analysis::triage::Readiness::new(issues);
     let completed_for_readiness: std::collections::BTreeSet<String> =
         completed_cut.iter().map(|id| (*id).to_string()).collect();
     let max_parallel = issues
@@ -11447,12 +11649,25 @@ fn plan_analysis_config(nodes: usize) -> serde_json::Value {
 }
 
 /// Go `AnalysisConfig` for `--robot-priority`: full Phase-2 config.
-fn priority_analysis_config(nodes: usize) -> serde_json::Value {
+fn priority_analysis_config(issues: &[bv_core::model::Issue]) -> serde_json::Value {
     // Go's `ConfigForSize` is the single source of truth for these values
     // (pkg/analysis/config.go:98). The hand-rolled tier table this replaced
     // hard-coded `BetweennessMode: "exact"` and `BetweennessSampleSize: 0` for
     // every size, so `--robot-priority` reported the wrong analysis shape on
     // any graph large enough for Go to sample.
+    //
+    // Go main.go:4983-4994 calls `ConfigForSize(len(issues), Σ len(deps))`
+    // and derives density inside `ConfigForSize` from the ISSUE list — the
+    // graph's edge count is smaller because `build_graph` drops non-blocking
+    // dependency kinds. Passing nodes alone with density 0.0 pinned every
+    // graph into the dense-small tier.
+    let node_count = issues.len();
+    let edge_count: usize = issues.iter().map(|i| i.dependencies.len()).sum();
+    let density = if node_count > 1 {
+        edge_count as f64 / (node_count as f64 * (node_count - 1) as f64)
+    } else {
+        0.0
+    };
     //
     // Go main.go:1728 substitutes `FullAnalysisConfig` when
     // `--force-full-analysis` is set (config.go:230-254), which is what makes
@@ -11460,7 +11675,7 @@ fn priority_analysis_config(nodes: usize) -> serde_json::Value {
     let report = if force_full_analysis() {
         bv_analysis::analyzer::full_analysis_config()
     } else {
-        bv_analysis::analyzer::config_for_size(nodes, 0, 0.0)
+        bv_analysis::analyzer::config_for_size(node_count, edge_count, density)
     };
     serde_json::to_value(report).unwrap_or_default()
 }
@@ -11534,8 +11749,8 @@ fn run_robot_plan() -> ExitCode {
     // revision parameter and no provenance, so `--as-of` was ignored and the
     // plan described the working tree rather than the requested commit.
     let as_of = extract_as_of();
-    let (issues, _hash, _as_of_commit, _source) =
-        match load_issues_auto_meta(&cwd, as_of.as_deref()) {
+    let (loaded, loader_hash, _as_of_commit, _source) =
+        match load_issues_auto_meta_raw(&cwd, as_of.as_deref()) {
             Ok(x) => x,
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
@@ -11545,6 +11760,10 @@ fn run_robot_plan() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+    // `--repo` then `--label` narrow at the same point Go's
+    // `scopeLoadedIssues` does; only `--repo` re-hashes (main.go:4883-4901).
+    let (issues, hash_override) = apply_scope(&loaded);
+    let hash = hash_override.unwrap_or_else(|| loader_hash.clone());
     // Publish the revision pair for the envelope builder, and keep the
     // loader's provenance: re-deriving it from the working tree would name a
     // different file entirely under `--as-of`.
@@ -11553,7 +11772,6 @@ fn run_robot_plan() -> ExitCode {
         _as_of_commit.clone().unwrap_or_default(),
     );
     let plan_source = _source.clone();
-    let hash = bv_core::data_hash::compute_data_hash(&issues);
     let g = bv_analysis::analyzer::build_graph(&issues);
     let blocked = bv_analysis::triage::compute_blocked_set(&issues);
     let _actionable: Vec<&bv_core::model::Issue> = issues
@@ -11744,8 +11962,12 @@ fn run_robot_plan() -> ExitCode {
     // with the shared helper instead of the hand-rolled two-field prefix.
     // The loader reported the source; re-deriving it from the working tree
     // names a different file under `--as-of`.
-    let mut payload =
-        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&plan_source), &issues);
+    let mut payload = full_envelope_json_with_source_and_authority(
+        &hash,
+        &loader_hash,
+        Some(&plan_source),
+        &issues,
+    );
     payload["analysis_config"] = plan_analysis_config(g.len());
     payload["status"] = plan_priority_status(&g);
     // Go declares LabelScope/LabelContext between Status and Plan
@@ -11805,6 +12027,7 @@ fn build_priority_recommendation(
     th: &PriorityThresholds,
     issues: &[bv_core::model::Issue],
     cp_height: &std::collections::BTreeMap<String, f64>,
+    children_by_parent: &std::collections::HashMap<&str, Vec<&str>>,
     structural: (
         &std::collections::BTreeMap<String, u32>,
         &std::collections::BTreeSet<String>,
@@ -11829,7 +12052,31 @@ fn build_priority_recommendation(
     // slice — also fixes the order `estimateDaysSaved` sums in (order is
     // irrelevant to the sum, but the cap would otherwise slice unsorted ids).
     let unblocks_count = unblocks_ids.len();
-    let blocked_reduction = unblocks_count;
+    // Go counts unblocked issues whose dependency state is not satisfied
+    // (priority.go:963-970) — an open issue still held up by an open blocker,
+    // not just ones parked in `blocked` status. Same check the what-if path
+    // applies at :10561-10576; `unblocks_count` alone counted every direct
+    // dependent regardless of its remaining blockers.
+    let blocked_reduction = unblocks_ids
+        .iter()
+        .filter(|id| {
+            issues.iter().any(|i| {
+                i.id == **id
+                    && i.dependencies.iter().any(|d| {
+                        d.r#type.is_blocking()
+                            && !d.effective_depends_on().is_empty()
+                            && issues.iter().any(|o| {
+                                o.id == d.effective_depends_on()
+                                    && !matches!(
+                                        o.status,
+                                        bv_core::model::Status::Closed
+                                            | bv_core::model::Status::Tombstone
+                                    )
+                            })
+                    })
+            })
+        })
+        .count();
     // Go scales the issue's critical-path height (priority.go:974-980), which
     // is not the pagerank norm.
     let depth_reduction = (cp_height.get(&r.id).copied().unwrap_or(0.0) / 10.0).min(1.0);
@@ -11914,16 +12161,21 @@ fn build_priority_recommendation(
         signals += 1;
         signal_strength += 0.3;
     }
-    let slack = slack_map.get(&r.id).copied().unwrap_or(0.0);
-    if slack == 0.0 {
-        reasoning.push("Zero slack on critical chain".into());
-        signals += 1;
-        signal_strength += 0.25;
-    } else if slack > 2.0 {
-        // Softer weight so parallel-friendly work does not outweigh bottlenecks.
-        reasoning.push("Parallel-friendly (slack available)".into());
-        signals += 1;
-        signal_strength += 0.15;
+    // Slack is only computed when the graph is acyclic (see the gate in
+    // `priority_recommendations`), so a missing entry means "no slack data",
+    // not "zero slack" — firing either signal on it invented a reason Go
+    // never emits.
+    if let Some(&slack) = slack_map.get(&r.id) {
+        if slack == 0.0 {
+            reasoning.push("Zero slack on critical chain".into());
+            signals += 1;
+            signal_strength += 0.25;
+        } else if slack > 2.0 {
+            // Softer weight so parallel-friendly work does not outweigh bottlenecks.
+            reasoning.push("Parallel-friendly (slack available)".into());
+            signals += 1;
+            signal_strength += 0.15;
+        }
     }
 
     // Go `generateRecommendation` (priority.go:735-869) yields a recommendation
@@ -11961,7 +12213,8 @@ fn build_priority_recommendation(
         }
     };
 
-    let transitive = count_transitive_unblocks(&r.id, issues, &issue_by_id);
+    let transitive =
+        count_transitive_unblocks(&r.id, &issue_by_id, g, readiness, children_by_parent);
     let (confidence, direction, reasoning, suggested) = match changed {
         Some((confidence, direction, reasoning)) => (confidence, direction, reasoning, suggested),
         // Go whatif.go:180 — an issue whose priority is not going to change is
@@ -12220,14 +12473,23 @@ fn what_if_explanation(
     out
 }
 
-/// Go `countTransitiveUnblocks` (priority.go:1041-1076): BFS over the
-/// dependency cascade, counting issues that become actionable once the
-/// simulated set of completed issues grows. Existing ready work is skipped —
-/// it was not caused by this completion.
+/// Go `countTransitiveUnblocks` (priority.go:1041-1077): BFS over the
+/// cascade frontier — direct dependents plus parent-child children, per
+/// `cascadeCandidates` (priority.go:1013-1037) — with a simulated-closed set.
+///
+/// Per candidate Go asks `ReadyAfter` twice: once with no completions (skip
+/// work that was already actionable — it was not caused by this completion)
+/// and once with the simulated set. `ReadyAfter` is the same authority the
+/// direct-unblocks count uses, so `defer_until`, the parent chain and
+/// claimability all gate the cascade exactly as they gate the frontier.
+/// The earlier port re-implemented "no open blocker" by hand over only the
+/// simulated-closed set, which ignored defer/parent edges and undercounted.
 fn count_transitive_unblocks(
     issue_id: &str,
-    issues: &[bv_core::model::Issue],
     by_id: &std::collections::HashMap<&str, &bv_core::model::Issue>,
+    g: &bv_graph_core::DiGraph,
+    readiness: &bv_analysis::triage::Readiness<'_>,
+    children_by_parent: &std::collections::HashMap<&str, Vec<&str>>,
 ) -> usize {
     let Some(issue) = by_id.get(issue_id) else {
         return 0;
@@ -12238,59 +12500,51 @@ fn count_transitive_unblocks(
     ) {
         return 0;
     }
-    let has_deps = issues.iter().any(|o| {
-        o.dependencies
-            .iter()
-            .any(|d| d.r#type.is_blocking() && d.effective_depends_on() == issue_id)
-    });
-    if !has_deps {
+    // Go returns early when the issue has neither dependents nor children —
+    // nothing can cascade through it (priority.go:1047-1049).
+    if g.node_idx(issue_id)
+        .is_none_or(|n| g.predecessors_slice(n).is_empty())
+        && !children_by_parent.contains_key(issue_id)
+    {
         return 0;
     }
 
-    // Direct dependents of a node, following blocking edges.
-    let dependents = |id: &str| -> Vec<String> {
-        issues
-            .iter()
-            .filter(|o| {
-                o.dependencies
-                    .iter()
-                    .any(|d| d.r#type.is_blocking() && d.effective_depends_on() == id)
-            })
-            .map(|o| o.id.clone())
-            .collect()
-    };
-
-    let actionable_with = |id: &str, closed: &std::collections::BTreeSet<String>| -> bool {
-        match by_id.get(id) {
-            Some(i) => {
-                i.status.is_open()
-                    && i.assignee.trim().is_empty()
-                    && !i.issue_type.eq_ignore_ascii_case("epic")
-                    && i.dependencies.iter().all(|d| {
-                        !d.r#type.is_blocking()
-                            || d.effective_depends_on().is_empty()
-                            || closed.contains(d.effective_depends_on())
-                    })
+    // Go `cascadeCandidates`: the issue's graph predecessors (dependents)
+    // union its parent-child children, deduped and sorted.
+    let cascade_candidates = |id: &str| -> Vec<String> {
+        let mut set: std::collections::BTreeSet<String> = Default::default();
+        if let Some(node) = g.node_idx(id) {
+            for &n in g.predecessors_slice(node) {
+                if let Some(dep_id) = g.node_id(n) {
+                    set.insert(dep_id.to_string());
+                }
             }
-            None => false,
         }
+        if let Some(kids) = children_by_parent.get(id) {
+            for k in kids {
+                set.insert((*k).to_string());
+            }
+        }
+        set.into_iter().collect()
     };
 
-    let mut simulated_closed: std::collections::BTreeSet<String> = Default::default();
-    simulated_closed.insert(issue_id.to_string());
+    let now = robot_now();
+    let mut simulated: std::collections::BTreeSet<String> = Default::default();
+    simulated.insert(issue_id.to_string());
     let mut queue: std::collections::VecDeque<String> = Default::default();
     queue.push_back(issue_id.to_string());
     let mut count = 0usize;
 
     while let Some(curr) = queue.pop_front() {
-        for candidate in dependents(&curr) {
-            if simulated_closed.contains(&candidate)
-                || actionable_with(&candidate, &Default::default())
-            {
+        for candidate in cascade_candidates(&curr) {
+            if simulated.contains(&candidate) {
                 continue;
             }
-            if actionable_with(&candidate, &simulated_closed) {
-                simulated_closed.insert(candidate.clone());
+            if readiness.ready_after(&candidate, now, None) {
+                continue;
+            }
+            if readiness.ready_after(&candidate, now, Some(&simulated)) {
+                simulated.insert(candidate.clone());
                 queue.push_back(candidate);
                 count += 1;
             }
@@ -12539,9 +12793,14 @@ fn compute_parallel_gain(issues: &[bv_core::model::Issue], limit: usize) -> serd
 /// (pkg/drift/drift.go:1062), which needs the same recommendations.
 fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json::Value> {
     let g = bv_analysis::build_graph(issues);
+    // Go only computes critical-path heights and slack when the topological
+    // order covers every issue (graph.go:2271); on a cyclic graph both are
+    // skipped, so the recommendation engine must see empty maps — a bogus
+    // longest-path number would fire depth/slack signals Go never emits.
+    let order_available = bv_analysis::analyzer::topological_order_available(&g);
     let pr = bv_graph_core::pagerank_default(&g);
     let bw = bv_analysis::analyzer::go_betweenness(&g);
-    let cp = bv_graph_core::critical_path_heights(&g);
+    let cp = order_available.then(|| bv_graph_core::critical_path_heights(&g));
     let pr_map: std::collections::BTreeMap<String, f64> = pr
         .iter()
         .enumerate()
@@ -12553,6 +12812,8 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
         .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), *v))
         .collect();
     let cp_map: std::collections::BTreeMap<String, f64> = cp
+        .as_deref()
+        .unwrap_or(&[])
         .iter()
         .enumerate()
         .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), *v))
@@ -12563,7 +12824,7 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
         issues,
         pagerank: &pr_map,
         betweenness: &bw_map,
-        critical_path: Some(&cp_map),
+        critical_path: order_available.then_some(&cp_map),
         g: &g,
         now,
     };
@@ -12583,11 +12844,15 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
             .into_iter()
             .map(|i| g.node_id(i).unwrap_or_default().to_string())
             .collect();
-    let slack_map: std::collections::BTreeMap<String, f64> = bv_graph_core::slack(&g)
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
-        .collect();
+    let slack_map: std::collections::BTreeMap<String, f64> = (if order_available {
+        bv_graph_core::slack(&g)
+    } else {
+        Vec::new()
+    })
+    .into_iter()
+    .enumerate()
+    .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), v))
+    .collect();
     let max_core = core_map.values().copied().max().unwrap_or(0);
 
     // Use the full impact scoring engine
@@ -12602,6 +12867,23 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
     // One readiness index for the whole batch — Go builds it once on the
     // Analyzer and `computeUnblocks` reads it per issue (plan.go:89-108).
     let readiness = bv_analysis::triage::Readiness::new(issues);
+    // Go `cascadeCandidates` (priority.go:1013-1037) walks parent-child
+    // children alongside graph predecessors; the reverse index is built once
+    // here rather than per recommendation.
+    let mut children_by_parent: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    for i in issues {
+        for d in &i.dependencies {
+            if matches!(d.r#type, bv_core::model::DependencyType::ParentChild) {
+                children_by_parent
+                    .entry(d.effective_depends_on())
+                    .or_default()
+                    .push(i.id.as_str());
+            }
+        }
+    }
+    for v in children_by_parent.values_mut() {
+        v.sort_unstable();
+    }
     let mut recommendations: Vec<serde_json::Value> = Vec::new();
     for r in &impact_results {
         let Some(issue) = issues.iter().find(|i| i.id == r.id) else {
@@ -12615,6 +12897,7 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
             &th,
             issues,
             &cp_map,
+            &children_by_parent,
             (&core_map, &art_set, &slack_map, max_core),
         ) {
             recommendations.push(rec);
@@ -12637,16 +12920,8 @@ fn priority_recommendations(issues: &[bv_core::model::Issue]) -> Vec<serde_json:
 }
 
 fn run_robot_priority(args: &[String]) -> ExitCode {
-    let by_label = args
-        .iter()
-        .position(|a| a == "--robot-by-label")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
-    let by_assignee = args
-        .iter()
-        .position(|a| a == "--robot-by-assignee")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let by_label = flag_value(args, "robot-by-label").map(str::to_string);
+    let by_assignee = flag_value(args, "robot-by-assignee").map(str::to_string);
     // Go robot_registry.go:941-943 — `--robot-min-confidence` filters the
     // scored recommendation list (not the issue set) and only bites when the
     // value is strictly positive. robot_registry.go:964-968 does the same for
@@ -12660,7 +12935,7 @@ fn run_robot_priority(args: &[String]) -> ExitCode {
         .filter(|v| *v > 0)
         .unwrap_or(10) as usize;
 
-    let (issues, _hash, _p1, status, _g, loaded_source) =
+    let (issues, hash, _p1, status, _g, loaded_source, loader_hash) =
         match load_and_analyze(extract_as_of().as_deref()) {
             Ok(x) => x,
             Err(code) => return code,
@@ -12669,8 +12944,8 @@ fn run_robot_priority(args: &[String]) -> ExitCode {
     // afterwards (robot_registry.go:940-951). Filtering the issue set first
     // shrank total_issues and stripped the graph context the surviving
     // recommendations need, so the filter returned nothing.
-    let hash = bv_core::data_hash::compute_data_hash(&issues);
-    let g = bv_analysis::build_graph(&issues);
+    // `hash` is the scoped digest load_and_analyze already resolved — a
+    // `--repo` re-hash, the loader's own hash otherwise.
 
     // Shared with the `priority_mismatch` alert so both consume one
     // implementation of Go's recommendation engine.
@@ -12709,9 +12984,13 @@ fn run_robot_priority(args: &[String]) -> ExitCode {
 
     recommendations.truncate(max_results);
 
-    let mut payload =
-        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&loaded_source), &issues);
-    payload["analysis_config"] = priority_analysis_config(g.len());
+    let mut payload = full_envelope_json_with_source_and_authority(
+        &hash,
+        &loader_hash,
+        Some(&loaded_source),
+        &issues,
+    );
+    payload["analysis_config"] = priority_analysis_config(&issues);
     // Real status from phase2 analysis (Go priority uses full config).
     // Go's `statusEntry.MarshalJSON` (pkg/analysis/graph.go:131-147) omits
     // `reason` only when the string is empty, and every Go site that sets
@@ -12775,21 +13054,10 @@ fn run_robot_priority(args: &[String]) -> ExitCode {
 
 fn run_robot_suggest(args: &[String]) -> ExitCode {
     // Parse --suggest-type, --suggest-confidence, --suggest-bead (Go parity).
-    let suggest_type = args
-        .iter()
-        .position(|a| a == "--suggest-type")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
-    let suggest_confidence = args
-        .iter()
-        .position(|a| a == "--suggest-confidence")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse::<f64>().ok());
-    let suggest_bead = args
-        .iter()
-        .position(|a| a == "--suggest-bead")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let suggest_type = flag_value(args, "suggest-type").map(str::to_string);
+    let suggest_confidence =
+        flag_value(args, "suggest-confidence").and_then(|s| s.parse::<f64>().ok());
+    let suggest_bead = flag_value(args, "suggest-bead").map(str::to_string);
 
     let cwd = go_working_dir();
     let (issues, hash, _as_of_commit, loaded_source) = match load_issues_auto_meta(&cwd, None) {
@@ -13597,10 +13865,7 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
     };
     let g = bv_analysis::build_graph(&issues);
 
-    let fmt = args
-        .iter()
-        .position(|a| a == "--graph-format")
-        .and_then(|i| args.get(i + 1))
+    let fmt = flag_value(args, "graph-format")
         .map(|s| s.to_lowercase())
         .unwrap_or_else(|| "json".to_string());
     if fmt != "json" && fmt != "dot" && fmt != "mermaid" {
@@ -13823,6 +14088,34 @@ fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     found
 }
 
+/// Whether `--name` appears in argv in either spelling (`--name` or
+/// `--name=...`). Dispatch sites that used `position(|a| a == "--name")`
+/// missed the `=` form entirely, so `--robot-related=id` read as absent.
+fn flag_present(args: &[String], name: &str) -> bool {
+    let long = format!("--{name}");
+    let with_eq = format!("--{name}=");
+    args.iter().any(|a| a == &long || a.starts_with(&with_eq))
+}
+
+/// Whether a BOOL flag is active in argv, honouring `--flag=false`.
+///
+/// The `a == "--flag"` scan these sites used treats `--flag=false` as absent
+/// only by accident and misses `--flag=true` entirely — Go's pflag parses the
+/// `=value` through `strconv.ParseBool`, so the last occurrence decides.
+fn bool_flag_active(args: &[String], name: &str) -> bool {
+    let long = format!("--{name}");
+    let with_eq = format!("--{name}=");
+    let mut active = false;
+    for a in args {
+        if a == &long {
+            active = true;
+        } else if let Some(v) = a.strip_prefix(&with_eq) {
+            active = go_parse_bool(v).unwrap_or(false);
+        }
+    }
+    active
+}
+
 /// Go `strconv.underscoreOK` — an underscore must follow a digit or a base
 /// prefix and must itself be followed by one, so `1_000` and `0x_10` parse
 /// while `_10`, `10_` and `1__0` are all syntax errors.
@@ -13911,7 +14204,17 @@ fn go_flag_parse_error(args: &[String]) -> Option<String> {
             None => (arg.as_str(), None),
         };
         let has_inline = inline.is_some();
-        let bare = name.trim_start_matches('-');
+        // Go's flag package strips at most the two dashes of a long option,
+        // so `---flag` names a flag literally called `-flag` — unknown, not
+        // `flag`. `flag_kind` trims ALL leading dashes, so the check has to
+        // happen here, before the registry lookup.
+        let bare = name
+            .strip_prefix("--")
+            .or_else(|| name.strip_prefix('-'))
+            .unwrap_or(name);
+        if bare.starts_with('-') {
+            return Some(format!("unknown flag: --{bare}"));
+        }
         let Some(kind) = flags::flag_kind(bare) else {
             // Cobra registers `--help`/`-h` on the root command, so they are
             // known flags that take no value. They are not in the port's
@@ -13974,7 +14277,24 @@ fn numeric_flag_detail(name: &str, kind: flags::FlagKind, raw: &str) -> Option<S
         flags::FlagKind::Int => go_parse_int_base0(raw).err(),
         flags::FlagKind::Float | flags::FlagKind::Float64 => go_parse_float(raw).err(),
         flags::FlagKind::PercentOrFraction => parse_percent_or_fraction(name, raw).err(),
+        // A bool flag only reaches here through `--flag=value` (it never
+        // consumes the next argv token), and Go's `strconv.ParseBool` rejects
+        // anything outside its accepted spellings at parse time.
+        flags::FlagKind::Bool => go_parse_bool(raw).err(),
         _ => None,
+    }
+}
+
+/// Go `strconv.ParseBool` — the conversion pflag runs for a `flag.Bool`
+/// `=value`. The accepted spellings are exactly Go's: `1`, `t`, `T`, `TRUE`,
+/// `true`, `True`, `0`, `f`, `F`, `FALSE`, `false`, `False`.
+fn go_parse_bool(raw: &str) -> Result<bool, String> {
+    match raw {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Ok(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Ok(false),
+        _ => Err(format!(
+            "strconv.ParseBool: parsing {raw:?}: invalid syntax"
+        )),
     }
 }
 
@@ -15827,12 +16147,9 @@ fn run_robot_search(args: &[String]) -> ExitCode {
 /// issue-corpus hash the loader computes: Go's `CausalityResult` carries
 /// `hr.DataHash` and `withEnvelope` lets it win over the envelope's own value.
 fn run_robot_causality(args: &[String]) -> ExitCode {
-    let bead_id = args
-        .iter()
-        .position(|a| a == "--robot-causality")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let bead_id = flag_value(args, "robot-causality")
+        .unwrap_or_default()
+        .to_string();
     let cwd = go_working_dir();
     if let Err(e) = validate_correlation_repository(&cwd) {
         if let Some(load_error) = unresolved_source_probe(&cwd) {
@@ -16044,12 +16361,9 @@ fn parse_percent_or_fraction(flag: &str, raw: &str) -> Result<i64, String> {
 
 /// Go `handleRobotRelated` — `--robot-related <bead-id>`.
 fn run_robot_related(args: &[String]) -> ExitCode {
-    let bead_id = args
-        .iter()
-        .position(|a| a == "--robot-related")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let bead_id = flag_value(args, "robot-related")
+        .unwrap_or_default()
+        .to_string();
     // Go main.go:1578 registers `--related-min-relevance` as a
     // percentOrFraction defaulting to 20 (flag_types.go:31-38).
     //
@@ -16228,20 +16542,14 @@ fn run_robot_related(args: &[String]) -> ExitCode {
 
 /// Go `handleRobotImpactNetwork` — `--robot-impact-network <bead-id|all>`.
 fn run_robot_impact_network(args: &[String]) -> ExitCode {
-    let target = args
-        .iter()
-        .position(|a| a == "--robot-impact-network")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let target = flag_value(args, "robot-impact-network")
+        .unwrap_or_default()
+        .to_string();
     // Go main.go:1590 registers `--network-depth` with default 2, and
     // robot_registry.go:3386-3390 clamps the result to 1..3. The old default
     // of 1 made an unflagged run a strict subgraph of Go's.
-    let depth: i64 = args
-        .iter()
-        .position(|a| a == "--network-depth")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
+    let depth: i64 = flag_value(args, "network-depth")
+        .and_then(|v| go_parse_int_base0(v).ok())
         .unwrap_or(2)
         .clamp(1, 3);
 
@@ -16472,12 +16780,9 @@ fn run_robot_sprint_list() -> ExitCode {
 
 /// Go `robot-sprint-show` — `--robot-sprint-show <sprint-id>`.
 fn run_robot_sprint_show(args: &[String]) -> ExitCode {
-    let sprint_id = args
-        .iter()
-        .position(|a| a == "--robot-sprint-show")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let sprint_id = flag_value(args, "robot-sprint-show")
+        .unwrap_or_default()
+        .to_string();
     let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
@@ -16772,8 +17077,14 @@ fn run_emit_script(args: &[String]) -> ExitCode {
     // actually shows.
     const TRIAGE_TOP_N: usize = 10;
     let total = out.recommendations.len().min(TRIAGE_TOP_N);
-    let recs: Vec<&bv_analysis::impact::IssueImpact> =
-        out.recommendations.iter().take(limit).collect();
+    // Go's recommendation list is already sliced to `opts.TopN` (10) before
+    // the script limit applies, so `--script-limit 50` can never emit more
+    // than ten picks.
+    let recs: Vec<&bv_analysis::impact::IssueImpact> = out
+        .recommendations
+        .iter()
+        .take(limit.min(TRIAGE_TOP_N))
+        .collect();
     let claim_shell = |r: &bv_analysis::impact::IssueImpact| -> Option<String> {
         r.actions
             .as_ref()
@@ -16942,7 +17253,12 @@ fn compute_brief_triage() -> Result<BriefTriage, ExitCode> {
         "quick_wins": Vec::<serde_json::Value>::new(),
         "blockers_to_clear": Vec::<serde_json::Value>::new(),
     });
-    let mut envelope = full_envelope_for(&data_hash, &loaded);
+    // The envelope describes the SCOPED set the analysis ran on (Go's
+    // scope_hash/visible counts come from ctx.Issues), while the source
+    // authority keeps the loader's provenance — `full_envelope_for` would
+    // re-derive the meta from the unscoped `loaded` list and report the
+    // pre-filter counts.
+    let mut envelope = full_envelope_json_with_source(&data_hash, Some(&loaded_source), &issues);
     envelope["output_format"] = serde_json::json!(output_format());
     envelope["version"] = serde_json::json!(GO_APP_VERSION);
     Ok(BriefTriage {
@@ -17359,12 +17675,9 @@ fn open_tty() -> Result<(), String> {
 }
 
 fn run_robot_explain_correlation(args: &[String]) -> ExitCode {
-    let raw = args
-        .iter()
-        .position(|a| a == "--robot-explain-correlation")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let raw = flag_value(args, "robot-explain-correlation")
+        .unwrap_or_default()
+        .to_string();
     let (sha, bead_id) = match parse_correlation_arg(&raw) {
         Ok(x) => x,
         Err(e) => {
@@ -17567,12 +17880,9 @@ fn file_index_payload(
 
 /// Go `handleRobotFileBeads` — `--robot-file-beads <path>`.
 fn run_robot_file_beads(args: &[String]) -> ExitCode {
-    let path = args
-        .iter()
-        .position(|a| a == "--robot-file-beads")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let path = flag_value(args, "robot-file-beads")
+        .unwrap_or_default()
+        .to_string();
     // Go main.go:1564 registers `--file-beads-limit` as a pflag `flag.Int`
     // with default 20, read at robot_registry.go:3140-3148. A negative value
     // clamps to 0 (emit none), which is the opposite of `--relations-limit` —
@@ -17722,12 +18032,9 @@ fn run_robot_file_hotspots(args: &[String]) -> ExitCode {
 /// Go `handleRobotFileRelations` — `--robot-file-relations <path>`: files
 /// that co-change with the target across correlated commits.
 fn run_robot_file_relations(args: &[String]) -> ExitCode {
-    let path = args
-        .iter()
-        .position(|a| a == "--robot-file-relations")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let path = flag_value(args, "robot-file-relations")
+        .unwrap_or_default()
+        .to_string();
     let cwd = go_working_dir();
     let issues = match load_issues_auto(&cwd, None) {
         Ok((issues, _, _)) => issues,
@@ -18910,11 +19217,7 @@ fn run_robot_capabilities() -> ExitCode {
 /// those aren't ported. See plan doc §11.
 fn run_robot_schema(args: &[String]) -> ExitCode {
     // Go: --schema-command filters to a single command's schema.
-    let command = args
-        .iter()
-        .position(|a| a == "--schema-command")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let command = flag_value(args, "schema-command").map(str::to_string);
 
     let full = bv_robot::schema::generate_robot_schemas(&jiff_now());
     let Some(name) = &command else {
@@ -18973,10 +19276,21 @@ fn run_robot_metrics() -> ExitCode {
     // `metrics.Timer(metrics.LoaderParse)` around the issue-file parse.
     let collect = bv_analysis::metrics::metrics_enabled();
     let started = std::time::Instant::now();
-    let loaded = load_issues_tracked(&cwd);
+    let loaded = load_issues_auto_meta_raw(&cwd, None);
     let parse_ns = started.elapsed().as_nanos();
-    let issues = match loaded {
-        Ok((issues, _stats)) => issues,
+    let (issues, hash, loader_hash, loaded_source) = match loaded {
+        Ok((loaded, loader_hash, _as_of_commit, loaded_source)) => {
+            // Go scopes every robot command's issue set through
+            // `scopeLoadedIssues` before the handler runs; only `--repo`
+            // re-hashes, so the loader digest survives for the authority.
+            let (issues, hash_override) = apply_scope(&loaded);
+            (
+                issues,
+                hash_override.unwrap_or_else(|| loader_hash.clone()),
+                loader_hash,
+                loaded_source,
+            )
+        }
         Err(e) => {
             if is_unresolved_source_error(&e.to_string()) {
                 return emit_unresolved_source(&e.to_string());
@@ -18985,8 +19299,12 @@ fn run_robot_metrics() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let hash = bv_core::data_hash::compute_data_hash(&issues);
-    let mut payload = full_envelope_for(&hash, &issues);
+    let mut payload = full_envelope_json_with_source_and_authority(
+        &hash,
+        &loader_hash,
+        Some(&loaded_source),
+        &issues,
+    );
     // Go's `MetricsOutput.Timing` is `omitempty` (`pkg/metrics/cache.go:164`),
     // so with collection disabled the key is absent rather than an empty array.
     if collect {
@@ -19084,12 +19402,9 @@ fn run_robot_docs(args: &[String]) -> ExitCode {
 
 /// Go `Analyzer.GetBlockerChain` — `--robot-blocker-chain <issue-id>`.
 fn run_robot_blocker_chain(args: &[String]) -> ExitCode {
-    let issue_id = args
-        .iter()
-        .position(|a| a == "--robot-blocker-chain")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let issue_id = flag_value(args, "robot-blocker-chain")
+        .unwrap_or_default()
+        .to_string();
     let cwd = go_working_dir();
     let (issues, hash, _as_of_commit) = match load_issues_auto(&cwd, None) {
         Ok(x) => x,
@@ -19249,15 +19564,19 @@ fn run_robot_correlation_feedback(args: &[String], flag: &str, feedback_type: &s
 }
 
 fn run_robot_label_health() -> ExitCode {
-    let (issues, hash, _p1, _status, _g, loaded_source) =
+    let (issues, hash, _p1, _status, _g, loaded_source, loader_hash) =
         match load_and_analyze(extract_as_of().as_deref()) {
             Ok(x) => x,
             Err(code) => return code,
         };
     let cfg = bv_analysis::label_health::LabelHealthConfig::default();
     let results = bv_analysis::label_health::compute_all_label_health(&issues, &cfg, robot_now());
-    let mut payload =
-        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&loaded_source), &issues);
+    let mut payload = full_envelope_json_with_source_and_authority(
+        &hash,
+        &loader_hash,
+        Some(&loaded_source),
+        &issues,
+    );
     payload["analysis_config"] = serde_json::to_value(&cfg).unwrap_or_default();
     payload["results"] = serde_json::to_value(&results).unwrap_or_default();
     payload["usage_hints"] = serde_json::json!([
@@ -19270,34 +19589,49 @@ fn run_robot_label_health() -> ExitCode {
 }
 
 fn run_robot_label_flow() -> ExitCode {
-    let (issues, hash, _p1, _status, _g, loaded_source) =
+    let (issues, hash, _p1, _status, _g, loaded_source, loader_hash) =
         match load_and_analyze(extract_as_of().as_deref()) {
             Ok(x) => x,
             Err(code) => return code,
         };
     let cfg = bv_analysis::label_health::LabelHealthConfig::default();
     let flow = bv_analysis::label_health::compute_cross_label_flow(&issues, &cfg);
-    let mut payload =
-        full_envelope_json_with_source_and_authority(&hash, &hash, Some(&loaded_source), &issues);
-    // Go: nil arrays serialize as null (not []) for empty list fields.
+    let mut payload = full_envelope_json_with_source_and_authority(
+        &hash,
+        &loader_hash,
+        Some(&loaded_source),
+        &issues,
+    );
+    // Go: nil slices serialize as `null`, not `[]` — `encoding/json` has no
+    // empty-vs-nil distinction for slices, so an empty flow field must be
+    // emitted as JSON null to stay field-compatible.
+    let null_if_empty = |v: serde_json::Value| -> serde_json::Value {
+        match &v {
+            serde_json::Value::Array(a) if a.is_empty() => serde_json::Value::Null,
+            _ => v,
+        }
+    };
     let mut flow_obj = serde_json::Map::new();
-    flow_obj.insert("labels".into(), serde_json::json!(flow.labels));
-    flow_obj.insert("flow_matrix".into(), serde_json::json!(flow.flow_matrix));
-    {
-        flow_obj.insert("dependencies".into(), serde_json::json!(flow.dependencies));
-    }
-    {
-        flow_obj.insert(
-            "critical_paths".into(),
-            serde_json::json!(flow.critical_paths),
-        );
-    }
-    {
-        flow_obj.insert(
-            "bottleneck_labels".into(),
-            serde_json::json!(flow.bottleneck_labels),
-        );
-    }
+    flow_obj.insert(
+        "labels".into(),
+        null_if_empty(serde_json::json!(flow.labels)),
+    );
+    flow_obj.insert(
+        "flow_matrix".into(),
+        null_if_empty(serde_json::json!(flow.flow_matrix)),
+    );
+    flow_obj.insert(
+        "dependencies".into(),
+        null_if_empty(serde_json::json!(flow.dependencies)),
+    );
+    flow_obj.insert(
+        "critical_paths".into(),
+        null_if_empty(serde_json::json!(flow.critical_paths)),
+    );
+    flow_obj.insert(
+        "bottleneck_labels".into(),
+        null_if_empty(serde_json::json!(flow.bottleneck_labels)),
+    );
     flow_obj.insert(
         "total_cross_label_deps".into(),
         serde_json::json!(flow.total_cross_label_deps),
@@ -19334,23 +19668,23 @@ fn build_attention_reason(s: &bv_analysis::label_health::LabelAttentionScore) ->
 }
 
 fn run_robot_label_attention() -> ExitCode {
-    let (issues, hash) = match load_issues_tracked(&go_working_dir()) {
-        Ok((issues, _)) => {
-            let h = bv_core::data_hash::compute_data_hash(&issues);
-            (issues, h)
-        }
-        Err(e) => {
-            if is_unresolved_source_error(&e.to_string()) {
-                return emit_unresolved_source(&e.to_string());
-            }
-            eprintln!("Error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    // Go runs every robot command through the scoped, provenance-carrying
+    // load (`scopeLoadedIssues`, main.go:2786) and honours `--as-of`; the
+    // tracked-file shortcut this used answered a different question.
+    let (issues, hash, _p1, _status, _g, loaded_source, loader_hash) =
+        match load_and_analyze(extract_as_of().as_deref()) {
+            Ok(x) => x,
+            Err(code) => return code,
+        };
     let cfg = bv_analysis::label_health::LabelHealthConfig::default();
     let result =
         bv_analysis::label_health::compute_label_attention_scores(&issues, &cfg, robot_now());
-    let mut payload = full_envelope_for(&hash, &issues);
+    let mut payload = full_envelope_json_with_source_and_authority(
+        &hash,
+        &loader_hash,
+        Some(&loaded_source),
+        &issues,
+    );
     // Go robot_registry.go:1793-1799 — the flag defaults to 5 (main.go:1494),
     // and a non-positive value means "unset" rather than "emit nothing", so it
     // is re-clamped to 5 before the `limit > len(Labels)` bound. The parse is
@@ -19430,12 +19764,9 @@ fn run_robot_label_attention() -> ExitCode {
 
 /// Go handleRobotImpact — file-based impact analysis.
 fn run_robot_impact(args: &[String]) -> ExitCode {
-    let files_str = args
-        .iter()
-        .position(|a| a == "--robot-impact")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let files_str = flag_value(args, "robot-impact")
+        .unwrap_or_default()
+        .to_string();
     // Go (robot_registry.go:3183-3186) splits on "," and trims each segment.
     // It does NOT drop empty ones, so `--robot-impact "a,,b"` yields three
     // entries with the middle one blank; the old filter silently turned that
@@ -19495,11 +19826,7 @@ fn run_robot_impact(args: &[String]) -> ExitCode {
 /// and the full `SnapshotDiff` — not the flat issue-list diff this handler
 /// used to emit.
 fn run_robot_diff(args: &[String]) -> ExitCode {
-    let diff_ref = args
-        .iter()
-        .position(|a| a == "--diff-since")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let diff_ref = flag_value(args, "diff-since").map(str::to_string);
     let Some(ref_str) = diff_ref else {
         eprintln!("Error: --robot-diff requires --diff-since <git-ref>");
         return ExitCode::from(2);
@@ -19555,12 +19882,9 @@ fn run_robot_diff(args: &[String]) -> ExitCode {
 
 /// Go handleRobotNotReadyLabels — filter triage by not-ready labels.
 fn run_robot_not_ready_labels(args: &[String]) -> ExitCode {
-    let labels_str = args
-        .iter()
-        .position(|a| a == "--robot-not-ready-labels")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_default();
+    let labels_str = flag_value(args, "robot-not-ready-labels")
+        .unwrap_or_default()
+        .to_string();
     let not_ready: Vec<String> = labels_str
         .split(',')
         .map(|s| s.trim().to_string())
@@ -19627,9 +19951,15 @@ fn jiff_local_now() -> String {
     // Getting this wrong is not cosmetic — the stored timestamp is what every
     // later `--check-drift` compares against.
     let offset = local_utc_offset_seconds();
-    let local = jiff::Timestamp::now()
-        .checked_add(std::time::Duration::from_secs(offset.unsigned_abs()))
-        .unwrap_or_else(|_| jiff::Timestamp::now());
+    let offset_dur = std::time::Duration::from_secs(offset.unsigned_abs());
+    // The offset is signed: west-of-UTC zones shift the wall clock BACK, and
+    // `unsigned_abs` alone used to push every zone forward.
+    let local = if offset < 0 {
+        jiff::Timestamp::now().checked_sub(offset_dur)
+    } else {
+        jiff::Timestamp::now().checked_add(offset_dur)
+    }
+    .unwrap_or_else(|_| jiff::Timestamp::now());
     let dt = local.to_zoned(jiff::tz::TimeZone::UTC).datetime();
     let zone = if offset == 0 {
         "Z".to_string()
@@ -19730,9 +20060,11 @@ fn go_rfc3339_nano_local() -> String {
     if bv_analysis::analyzer::source_date_epoch_active() {
         return go_rfc3339_nano_utc();
     }
-    jiff::Zoned::now()
-        .strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
-        .to_string()
+    // `jiff::Zoned::now()` asks jiff's `TimeZone::system()`, which resolves
+    // UTC on macOS — the export then stamped `Z` where Go's `time.Now()`
+    // carries the local offset. `jiff_local_now` reads the offset from the C
+    // library instead, the same source `time.Local` consults.
+    jiff_local_now()
 }
 
 /// Go `handleRobotImpact` — `--robot-impact <file1,file2,...>`.

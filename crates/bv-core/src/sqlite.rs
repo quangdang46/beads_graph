@@ -56,12 +56,19 @@ pub fn parse_sqlite_time(raw: &str) -> Option<String> {
     for fmt in [
         "%Y-%m-%d %H:%M:%S%.f%:z",
         "%Y-%m-%dT%H:%M:%S%.f%:z",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%dT%H:%M:%S",
     ] {
         if let Ok(dt) = jiff::civil::DateTime::strptime(fmt, raw) {
             if let Ok(ts) = dt.to_zoned(jiff::tz::TimeZone::UTC) {
-                return Some(ts.to_string());
+                // `Zoned`'s Display appends the bracketed zone
+                // (`2026-01-01T00:00:00Z[UTC]`), which `jiff::Timestamp`'s
+                // parser rejects — every consumer downstream would see the
+                // timestamp as absent and the data_hash would skew. Emit the
+                // bare instant instead.
+                return Some(ts.timestamp().to_string());
             }
         }
     }
@@ -286,4 +293,38 @@ fn load_labels_from_table(conn: &Connection, issue_id: &str) -> Vec<String> {
 
 fn parse_json_string_array(json: &str) -> Vec<String> {
     serde_json::from_str(json).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Space-separated SQLite timestamps must come back as a bare RFC3339
+    /// instant — a `Zoned` Display suffix like `[UTC]` would be rejected by
+    /// every downstream `jiff::Timestamp` parse and silently drop the time.
+    #[test]
+    fn sqlite_time_output_reparses_as_timestamp() {
+        for raw in [
+            "2026-01-02 03:04:05",
+            "2026-01-02T03:04:05",
+            "2026-01-02 03:04:05.123456789",
+            "2026-01-02T03:04:05+00:00",
+            "2026-01-02 03:04:05+02:00",
+        ] {
+            let out = parse_sqlite_time(raw).unwrap_or_else(|| panic!("{raw} parses"));
+            assert!(
+                !out.contains('['),
+                "{raw} -> {out} must not carry a bracketed zone"
+            );
+            out.parse::<jiff::Timestamp>()
+                .unwrap_or_else(|e| panic!("{raw} -> {out} must reparse as Timestamp: {e}"));
+        }
+    }
+
+    #[test]
+    fn sqlite_time_empty_and_garbage() {
+        assert_eq!(parse_sqlite_time(""), None);
+        assert_eq!(parse_sqlite_time("   "), None);
+        assert_eq!(parse_sqlite_time("not a time"), None);
+    }
 }

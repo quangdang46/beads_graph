@@ -257,17 +257,24 @@ pub fn update_blurb(content: &str) -> String {
     append_blurb(&cleaned)
 }
 
-/// Remove blurb from content (both legacy and current markers).
+/// Remove blurb from content (any versioned marker, plus legacy remnant).
 /// Order: remove marker-wrapped content first, then any legacy remnant.
+///
+/// Step 1 matches ANY `bv-agent-instructions-vN` marker — the same search
+/// [`update_blurb`] performs — not just the current v7 one. Matching only
+/// `BLURB_START_MARKER` left v3–v6 sections behind with orphaned markers, so
+/// `contains_any_blurb` stayed true and the blurb could never be removed.
 pub fn remove_blurb(content: &str) -> String {
-    // Step 1: Remove marker-wrapped content.
-    if let Some(start) = content.find(BLURB_START_MARKER) {
-        if let Some(end) = content[start..].find(BLURB_END_MARKER) {
-            let end_pos = start + end + BLURB_END_MARKER.len();
+    // Step 1: Remove marker-wrapped content (any version).
+    if let Some(marker) = content.find("bv-agent-instructions-v") {
+        // Rewind to the opening "<!--" of the start marker.
+        let section_start = content[..marker].rfind("<!--").unwrap_or(marker);
+        if let Some(end) = content[marker..].find(BLURB_END_MARKER) {
+            let end_pos = marker + end + BLURB_END_MARKER.len();
             // `trim_end`/`trim_start` ate the file's trailing newline, so
             // removing the blurb from a one-line file left it without one,
             // where Go's rewrite keeps the original bytes either side.
-            let before = content[..start].trim_end().to_string();
+            let before = content[..section_start].trim_end().to_string();
             let after = if end_pos < content.len() {
                 content[end_pos..].trim_start().to_string()
             } else {
@@ -359,6 +366,19 @@ mod tests {
         let cleaned = remove_blurb(&with_blurb);
         assert!(!cleaned.contains(BLURB_START_MARKER));
         assert!(cleaned.contains("# Project"));
+    }
+
+    /// `remove_blurb` must strip ANY versioned marker section, not just v7 —
+    /// a v3 blurb used to survive with orphaned markers, keeping
+    /// `contains_any_blurb` true forever.
+    #[test]
+    fn remove_blurb_strips_older_versions() {
+        let v3 = "# Project\n\nsome text\n\n<!-- bv-agent-instructions-v3 -->\nold instructions\n<!-- end-bv-agent-instructions -->\n\ntail\n";
+        let cleaned = remove_blurb(v3);
+        assert!(!cleaned.contains("bv-agent-instructions-v"), "{cleaned}");
+        assert!(cleaned.contains("# Project"));
+        assert!(cleaned.contains("tail"));
+        assert!(!contains_any_blurb(&cleaned));
     }
 
     #[test]

@@ -108,11 +108,13 @@ impl std::fmt::Debug for UpdateWorker {
 
 impl Drop for UpdateWorker {
     fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
-            // The install writes the running binary; never cancel it
-            // mid-flight just because the modal closed.
-            let _ = h.join();
-        }
+        // Detach, don't join: dropping the `JoinHandle` leaves the install
+        // running, matching Go where the `PerformUpdateCmd` goroutine keeps
+        // going after the modal closes. Joining here blocked process exit
+        // on a network download + binary swap (audit:
+        // `audit-tui-updatemodal-join`). The channel senders fail silently
+        // once `rx` is gone, which is fine — nobody is listening.
+        self.handle.take();
     }
 }
 

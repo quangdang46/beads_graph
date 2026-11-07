@@ -6,7 +6,6 @@
 use crate::algorithms::topo::topological_sort;
 use crate::graph::DiGraph;
 use serde::Serialize;
-use std::cmp::Reverse;
 
 /// A single critical path through the graph.
 #[derive(Debug, Clone, Serialize)]
@@ -81,16 +80,17 @@ pub fn k_critical_paths(graph: &DiGraph, k: usize) -> KPathsResult {
         }
     }
 
-    // Find k nodes with longest paths
-    // We prefer sinks (out-degree 0) but also consider other nodes
+    // Find k nodes with longest paths.
+    // Sinks (out-degree 0) are preferred as path endpoints per the doc
+    // contract; non-sinks are the fallback. Within each group, longest
+    // distance wins and the stable sort keeps node-index order on ties.
     let mut candidates: Vec<(usize, usize)> = (0..n).map(|v| (v, dist[v])).collect();
-
-    // Sort by distance descending
-    candidates.sort_by_key(|candidate| Reverse(candidate.1));
+    candidates.sort_by(|&(a, da), &(b, db)| {
+        let a_sink = graph.out_degree(a) == 0;
+        let b_sink = graph.out_degree(b) == 0;
+        b_sink.cmp(&a_sink).then_with(|| db.cmp(&da))
+    });
     candidates.truncate(k);
-
-    // Find max length
-    let max_length = candidates.first().map(|(_, d)| *d + 1).unwrap_or(0);
 
     // Reconstruct paths
     let paths: Vec<CriticalPath> = candidates
@@ -110,6 +110,10 @@ pub fn k_critical_paths(graph: &DiGraph, k: usize) -> KPathsResult {
             }
         })
         .collect();
+
+    // Maximum path length actually found — 0 when no path exists (e.g. an
+    // edgeless graph), not dist+1 of an empty candidate list.
+    let max_length = paths.iter().map(|p| p.length).max().unwrap_or(0);
 
     KPathsResult {
         paths,
@@ -232,5 +236,45 @@ mod tests {
 
         // Should return empty for cyclic graph
         assert!(result.paths.is_empty());
+    }
+
+    #[test]
+    fn test_edgeless_max_length_is_zero() {
+        // No edges: paths is empty, so max_length must be 0 — not the
+        // dist+1 = 1 an empty candidate list used to produce.
+        let mut g = DiGraph::new();
+        for i in 0..4 {
+            g.add_node(&format!("n{}", i));
+        }
+        let result = k_critical_paths(&g, 5);
+        assert!(result.paths.is_empty());
+        assert_eq!(result.max_length, 0);
+    }
+
+    #[test]
+    fn test_sink_endpoints_preferred() {
+        // Sinks: node 4 (dist 4 via 0->1->2->3->4) and node 7 (dist 2 via
+        // 5->6->7). Node 8 is a non-sink with dist 3 (11->10->9->8->4):
+        // pure distance order would pick it over sink 7 for k=2, but the
+        // documented contract prefers sinks as path endpoints.
+        let g = make_graph(&[
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (5, 6),
+            (6, 7),
+            (11, 10),
+            (10, 9),
+            (9, 8),
+            (8, 4),
+        ]);
+        let result = k_critical_paths(&g, 2);
+
+        assert_eq!(result.paths.len(), 2);
+        assert_eq!(result.paths[0].nodes, vec![0, 1, 2, 3, 4]);
+        assert_eq!(result.paths[1].nodes, vec![5, 6, 7]);
+        assert!(result.paths.iter().all(|p| *p.nodes.last().unwrap() != 8));
+        assert_eq!(result.max_length, 5);
     }
 }

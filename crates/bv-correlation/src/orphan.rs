@@ -631,7 +631,10 @@ fn custom_id_patterns() -> Vec<Regex> {
 
 /// Go `checkMessage`'s custom-pattern pass: the bead IDs a message names via a
 /// registered `--id-pattern`, taking capture group 1 when the pattern has one
-/// and the whole match otherwise.
+/// and the whole match otherwise. Go hands the *raw* group to
+/// `scoreMentionedBead` here — unlike the explicit matcher, which lowercases
+/// through `normalizeBeadID` — and the bead lookup is case-insensitive either
+/// way (see `custom_id_pattern_capture_group_one_is_the_id`).
 fn custom_id_matches(message: &str) -> Vec<String> {
     let mut out = Vec::new();
     for re in custom_id_patterns() {
@@ -779,14 +782,14 @@ pub fn detect_orphans(
             continue;
         }
         total_suspicion += candidate.suspicion_score as i64;
-        if !candidate.probable_beads.is_empty() {
-            candidate_count += 1;
-            for bead in &candidate.probable_beads {
-                by_bead
-                    .entry(bead.bead_id.clone())
-                    .or_default()
-                    .push(candidate.sha.clone());
-            }
+        candidate_count += 1;
+        for bead in &candidate.probable_beads {
+            // Short SHAs, the canonical form `filter_by_min_score` rebuilds
+            // the index with — detect and filter must emit the same payload.
+            by_bead
+                .entry(bead.bead_id.clone())
+                .or_default()
+                .push(candidate.short_sha.clone());
         }
         candidates.push(candidate);
     }

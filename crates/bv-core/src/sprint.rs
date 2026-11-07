@@ -537,16 +537,23 @@ fn velocity_minutes_per_day_for_label(
             continue;
         }
 
-        // Robust closure time: ClosedAt if available, else UpdatedAt
-        let closed_at = if let Some(closed_str) = &iss.closed_at {
-            closed_str
-                .parse::<jiff::Timestamp>()
-                .unwrap_or_else(|_| now_fallback())
-        } else {
-            iss.updated_at
-                .as_deref()
-                .and_then(|s| s.parse::<jiff::Timestamp>().ok())
-                .unwrap_or_else(now_fallback)
+        // Robust closure time: ClosedAt if it parses, else UpdatedAt. An
+        // unparseable or absent timestamp yields NO sample — the old
+        // `now_fallback` counted a malformed `closed_at` as closed "now",
+        // which inflated the 30-day velocity window. Go parses `ClosedAt`
+        // into a `time.Time` whose zero value sorts before the window and is
+        // skipped the same way, so skipping here matches.
+        let closed_at = iss
+            .closed_at
+            .as_deref()
+            .and_then(|s| s.parse::<jiff::Timestamp>().ok())
+            .or_else(|| {
+                iss.updated_at
+                    .as_deref()
+                    .and_then(|s| s.parse::<jiff::Timestamp>().ok())
+            });
+        let Some(closed_at) = closed_at else {
+            continue;
         };
 
         if closed_at < since {
@@ -656,11 +663,6 @@ fn duration_days(days: f64) -> jiff::SignedDuration {
     )
 }
 
-/// Fallback to a recent timestamp (avoids Option unwrap in velocity calc).
-fn now_fallback() -> jiff::Timestamp {
-    jiff::Timestamp::now()
-}
-
 /// Backward-compatible forecast wrapper.
 ///
 /// Returns `Some(Forecast)` for backward compatibility; use `estimate_eta_for_issue`
@@ -682,9 +684,29 @@ pub fn estimate_forecast(
         return None;
     }
 
-    let velocity = sprint.velocity_target.unwrap_or(1.0);
-    let days_needed = (remaining as f64 / velocity).ceil() as i64;
-    let eta = now + jiff::SignedDuration::from_secs(days_needed * 86400);
+    // A zero/negative/non-finite `velocity_target` makes `remaining /
+    // velocity` infinite; `ceil() as i64` then saturates to `i64::MAX` and
+    // `* 86400` overflows — a panic in debug, a wrapped bogus `eta_date` in
+    // release. Any target that cannot yield a finite ETA is treated as
+    // absent, matching the `unwrap_or(1.0)` default for a missing target.
+    let velocity = sprint
+        .velocity_target
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1.0);
+    let days_f = (remaining as f64 / velocity).ceil();
+    let days_needed = if days_f.is_finite() && days_f > 0.0 {
+        // Clamp before the i64 cast AND the `* 86400`: even a tiny positive
+        // velocity can overflow both. `checked_add` below is the last guard
+        // for the Timestamp range itself.
+        days_f.min(1e12) as i64
+    } else {
+        0
+    };
+    let eta = now
+        .checked_add(jiff::SignedDuration::from_secs(
+            days_needed.saturating_mul(86400),
+        ))
+        .unwrap_or(jiff::Timestamp::MAX);
 
     let mut factors = vec![format!("{remaining} open issues remaining")];
     if let Some(target) = sprint.velocity_target {
@@ -780,10 +802,12 @@ pub fn compute_forecast_output(
         filters.insert("label".to_string(), label.to_string());
     }
     if let Some(ids) = sprint_bead_ids {
-        // Show the sprint filter as the first matching sprint id
+        // Show the sprint filter deterministically: `HashSet::iter` order is
+        // unspecified, so `next()` could emit a different sprint id run to
+        // run. The smallest id is stable.
         filters.insert(
             "sprint".to_string(),
-            ids.iter().next().cloned().unwrap_or_default(),
+            ids.iter().min().cloned().unwrap_or_default(),
         );
     }
 
@@ -1302,11 +1326,14 @@ fn parse_git_header_line(line: &str) -> Option<(String, jiff::Timestamp)> {
     if parts.len() != 2 {
         return None;
     }
-    if parts[0].len() != 40 {
+    // `%H` is 40 hex on SHA-1 repos and 64 on SHA-256 repos; both are valid
+    // commit headers. Anything else is not a header line.
+    let sha = parts[0];
+    if !(sha.len() == 40 || sha.len() == 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let ts = parts[1].trim().parse::<jiff::Timestamp>().ok()?;
-    Some((parts[0].to_string(), ts))
+    Some((sha.to_string(), ts))
 }
 
 /// Set difference: elements in `a` not in `b`.
@@ -1327,10 +1354,18 @@ fn set_difference(a: &[String], b: &[String]) -> Vec<String> {
 // Sprint loading
 // ===========================================================================
 
-/// Load sprints from `.beads/sprints.jsonl` in the given directory.
+/// Load sprints from `sprints.jsonl` inside the resolved beads directory.
 /// Returns an empty Vec if the file doesn't exist or is empty.
+///
+/// The directory goes through [`crate::discovery::get_beads_dir`] — the same
+/// chain issue discovery uses (BEADS_DB > BEADS_DIR > `<repo>/.beads` >
+/// worktree main repo, plus `.beads/redirect`) — not a hardcoded `.beads`:
+/// a workspace reached through `BEADS_DIR`, a `redirect` file, or a git
+/// worktree otherwise reported zero sprints.
 pub fn load_sprints(dir: &Path) -> Result<Vec<Sprint>, String> {
-    let path = dir.join(".beads").join(SPRINTS_FILE);
+    let beads_dir = crate::discovery::get_beads_dir(dir)
+        .map_err(|e| format!("failed to resolve beads directory: {e}"))?;
+    let path = beads_dir.join(SPRINTS_FILE);
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -1360,6 +1395,11 @@ pub fn load_sprints(dir: &Path) -> Result<Vec<Sprint>, String> {
 mod tests {
     use super::*;
     use crate::model::{Dependency, DependencyType, Status};
+
+    /// Serializes tests that mutate the process-global BEADS_DIR/BEADS_DB
+    /// environment (`load_sprints` resolves through `get_beads_dir`, which
+    /// reads them first).
+    static SPRINT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn make_issue(id: &str, status: Status) -> Issue {
         Issue {
@@ -1411,6 +1451,9 @@ mod tests {
 
     #[test]
     fn load_sprints_returns_empty_when_file_missing() {
+        // `load_sprints` honours BEADS_DIR/BEADS_DB; hold the env lock so a
+        // concurrent env-mutating test cannot redirect this lookup.
+        let _guard = SPRINT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("bvr-sprint-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1774,6 +1817,123 @@ mod tests {
         let issues = vec![make_issue("A", Status::Closed)];
         let now = "2026-01-05T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert!(estimate_forecast(&s, &issues, now).is_none());
+    }
+
+    /// `velocity_target: 0` used to compute `remaining / 0.0 = inf`, whose
+    /// `ceil() as i64` saturated to `i64::MAX` and overflowed `* 86400` —
+    /// panic in debug, wrapped bogus `eta_date` in release. A non-positive
+    /// target now falls back to the same default a missing target gets.
+    #[test]
+    fn estimate_forecast_zero_velocity_does_not_overflow() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let s = make_sprint("s1", &["A", "B"], Some(bad));
+            let issues = vec![make_issue("A", Status::Open), make_issue("B", Status::Open)];
+            let now = "2026-01-05T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+            let f = estimate_forecast(&s, &issues, now).expect("still forecasts");
+            // 2 remaining at the 1.0/day default → 2 days out, not i64::MAX.
+            assert!(
+                f.eta_date.starts_with("2026-01-07"),
+                "{bad}: {}",
+                f.eta_date
+            );
+        }
+    }
+
+    /// A tiny positive velocity must not overflow the day→second math either.
+    #[test]
+    fn estimate_forecast_tiny_velocity_saturates_safely() {
+        let s = make_sprint("s1", &["A"], Some(1e-300));
+        let issues = vec![make_issue("A", Status::Open)];
+        let now = "2026-01-05T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let f = estimate_forecast(&s, &issues, now).expect("forecasts");
+        // Saturates at Timestamp::MAX rather than panicking or wrapping.
+        assert!(f.eta_date.starts_with("9999"), "{}", f.eta_date);
+    }
+
+    /// The `sprint` filter value must be deterministic: `HashSet` iteration
+    /// order is unspecified, so picking `iter().next()` could emit a
+    /// different id run to run.
+    #[test]
+    fn forecast_sprint_filter_picks_the_smallest_id() {
+        let mut a = make_issue("A", Status::Open);
+        a.estimated_minutes = Some(30);
+        let b = make_issue("B", Status::Open);
+        let ids: HashSet<String> = ["sprint-b".to_string(), "sprint-a".to_string()]
+            .into_iter()
+            .collect();
+        let now = "2026-01-05T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let out = compute_forecast_output(&[a, b], Some(&ids), None, 1, &BTreeMap::new(), now);
+        let filters = out.filters.expect("filters present");
+        assert_eq!(filters.get("sprint").map(String::as_str), Some("sprint-a"));
+    }
+
+    /// A malformed `closed_at` must not count as a closure "now" — it would
+    /// inflate the 30-day velocity window. Unparseable timestamps (and a
+    /// missing `updated_at` fallback) are skipped entirely.
+    #[test]
+    fn velocity_skips_unparseable_closed_at() {
+        let mut bad = make_issue("bad", Status::Closed);
+        bad.closed_at = Some("not-a-timestamp".into());
+        bad.updated_at = Some("also-not-a-timestamp".into());
+        bad.estimated_minutes = Some(6000);
+        let mut good = make_issue("good", Status::Closed);
+        good.closed_at = Some("2026-01-04T12:00:00Z".into());
+        good.estimated_minutes = Some(60);
+        let issues = vec![bad, good];
+        let since = "2025-12-06T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let (v, n) = velocity_minutes_per_day_for_label(&issues, "", since, 60);
+        assert_eq!(n, 1, "only the parseable closure counts");
+        assert!((v - 60.0 / 30.0).abs() < 1e-9);
+    }
+
+    /// SHA-256 repositories emit 64-hex `%H` headers; they must parse just
+    /// like the 40-hex SHA-1 form.
+    #[test]
+    fn parse_git_header_line_accepts_sha256() {
+        let sha256 = "a".repeat(64);
+        let line = format!("{sha256}\x002026-01-05T10:00:00Z");
+        let (sha, _) = parse_git_header_line(&line).expect("64-hex header parses");
+        assert_eq!(sha, sha256);
+        // Non-hex and wrong lengths still rejected.
+        assert!(
+            parse_git_header_line(&format!("{}\x002026-01-05T10:00:00Z", "g".repeat(64))).is_none()
+        );
+        assert!(
+            parse_git_header_line(&format!("{}\x002026-01-05T10:00:00Z", "a".repeat(63))).is_none()
+        );
+    }
+
+    /// `load_sprints` resolves the beads dir through the discovery chain, so
+    /// `BEADS_DIR` pointing at a non-`.beads`-named directory still finds
+    /// `sprints.jsonl`.
+    #[test]
+    fn load_sprints_honours_beads_dir_env() {
+        let _guard = SPRINT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bvr-sprints-env-{}", std::process::id()));
+        let beads = tmp.join("mybeads"); // deliberately NOT named .beads
+        std::fs::create_dir_all(&beads).unwrap();
+        std::fs::write(
+            beads.join("sprints.jsonl"),
+            "{\"id\":\"sp-1\",\"name\":\"Sprint 1\",\"bead_ids\":[\"A\"]}\n",
+        )
+        .unwrap();
+        let saved_dir = std::env::var_os("BEADS_DIR");
+        let saved_db = std::env::var_os("BEADS_DB");
+        std::env::set_var("BEADS_DIR", &beads);
+        std::env::remove_var("BEADS_DB");
+        let result = load_sprints(Path::new("/nonexistent-cwd"));
+        match saved_dir {
+            Some(v) => std::env::set_var("BEADS_DIR", v),
+            None => std::env::remove_var("BEADS_DIR"),
+        }
+        match saved_db {
+            Some(v) => std::env::set_var("BEADS_DB", v),
+            None => std::env::remove_var("BEADS_DB"),
+        }
+        let sprints = result.expect("load_sprints");
+        assert_eq!(sprints.len(), 1);
+        assert_eq!(sprints[0].id, "sp-1");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // -----------------------------------------------------------------------

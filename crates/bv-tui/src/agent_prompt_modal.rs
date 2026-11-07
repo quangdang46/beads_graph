@@ -126,8 +126,19 @@ pub fn render_agent_prompt(f: &mut Frame, modal: &AgentPromptModal, area: Rect) 
     // Go's `modalStyle` width is 60 (`NewAgentPromptModal`), clamped to the
     // terminal.
     let width = 60u16.min(area.width);
-    let preview_lines = get_blurb_preview().lines().count().min(PREVIEW_LINES + 1);
-    // 2 (border) + up to 7 preview rows, capped by Go's MaxHeight(8).
+    // Go's `MaxHeight(8)` caps the bordered box at 8 rows; the two border
+    // rows leave at most 6 content rows. A 7-line preview (6 content lines +
+    // the trailing `...`) would lose the ellipsis to clipping, so fold the
+    // overflow back into the `...` marker instead of dropping it.
+    const MAX_PREVIEW_ROWS: usize = 6; // 8 - 2 border rows
+    let preview_text = get_blurb_preview();
+    let mut preview_rows: Vec<&str> = preview_text.lines().collect();
+    if preview_rows.len() > MAX_PREVIEW_ROWS {
+        preview_rows.truncate(MAX_PREVIEW_ROWS - 1);
+        preview_rows.push("...");
+    }
+    let preview_lines = preview_rows.len();
+    // 2 (border) + preview rows, capped by Go's MaxHeight(8).
     let preview_height = (preview_lines as u16 + 2).clamp(3, 8);
     // inner height = height - borders(2) - padding(2), and must fit
     // body(9) + preview + bottom(4) -> height = preview + 17.
@@ -229,7 +240,7 @@ pub fn render_agent_prompt(f: &mut Frame, modal: &AgentPromptModal, area: Rect) 
             .border_style(Style::default().fg(Color::DarkGray))
             .padding(Padding::horizontal(1));
         f.render_widget(
-            Paragraph::new(get_blurb_preview()).block(preview_block),
+            Paragraph::new(preview_rows.join("\n")).block(preview_block),
             preview_area,
         );
     }

@@ -45,7 +45,16 @@ pub fn critical_path_heights(graph: &DiGraph) -> Vec<f64> {
 }
 
 /// Get nodes on the critical path (those with maximum height).
+///
+/// Returns empty for cyclic graphs: `critical_path_heights` yields all
+/// zeros there, which would otherwise make EVERY node tie at "max height".
+/// Callers that need to distinguish "no critical path" from "every node is
+/// critical" gate on the topological order themselves; this guard makes the
+/// function safe standalone.
 pub fn critical_path_nodes(graph: &DiGraph) -> Vec<usize> {
+    if topological_sort(graph).is_none() {
+        return Vec::new();
+    }
     let heights = critical_path_heights(graph);
     if heights.is_empty() {
         return Vec::new();
@@ -178,6 +187,21 @@ mod tests {
         let critical = critical_path_nodes(&g);
         // Only c has maximum height (3)
         assert_eq!(critical, vec![c]);
+    }
+
+    #[test]
+    fn test_critical_path_nodes_cyclic() {
+        // a -> b -> c -> a: all-zero heights must NOT make every node
+        // "critical" — a cyclic graph has no critical path.
+        let mut g = DiGraph::new();
+        let a = g.add_node("a");
+        let b = g.add_node("b");
+        let c = g.add_node("c");
+        g.add_edge(a, b);
+        g.add_edge(b, c);
+        g.add_edge(c, a);
+
+        assert!(critical_path_nodes(&g).is_empty());
     }
 
     #[test]

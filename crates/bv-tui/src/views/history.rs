@@ -553,6 +553,8 @@ impl HistoryState {
         self.bead_ids.clear();
 
         let Some(report) = self.report.as_ref() else {
+            // Empty list — nothing to scroll to.
+            self.scroll_offset = 0;
             return;
         };
 
@@ -614,6 +616,14 @@ impl HistoryState {
         self.histories = order.iter().map(|&i| self.histories[i].clone()).collect();
         self.bead_ids = order.iter().map(|&i| self.bead_ids[i].clone()).collect();
 
+        // The rebuild can shrink or re-sort the list; a stale `scroll_offset`
+        // past the end renders a blank pane (`start..end` is empty). Clamp it
+        // into the valid window — `filter_bead_list` resets to 0 because a
+        // search query is a fresh context, whereas an author/confidence
+        // filter should keep the user's place where possible.
+        let max_scroll = self.histories.len().saturating_sub(self.list_height());
+        self.scroll_offset = self.scroll_offset.min(max_scroll);
+
         // Restore selection, clamping the commit index (history.go:459-485).
         if !selected_id.is_empty() {
             if let Some(pos) = self.bead_ids.iter().position(|id| *id == selected_id) {
@@ -624,11 +634,13 @@ impl HistoryState {
                 } else {
                     self.selected_commit
                 };
+                self.ensure_bead_visible();
                 return;
             }
         }
         self.selected_bead = 0;
         self.selected_commit = 0;
+        self.ensure_bead_visible();
     }
 
     // -----------------------------------------------------------------

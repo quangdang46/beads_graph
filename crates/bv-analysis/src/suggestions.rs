@@ -1303,9 +1303,19 @@ fn contains_exact_issue_id(text: &str, id: &str) -> bool {
 /// Go `dependencyPrerequisiteLess` (dependency_suggest.go:307-315): a strict
 /// total order over the two issues, compared one key at a time — creation
 /// time, then priority, then id. The older issue is the prerequisite.
+///
+/// Go compares `time.Time` values, so the comparison must be chronological,
+/// not lexical: "2026-01-02T00:00:00+07:00" and "2026-01-01T18:00:00Z" are the
+/// same instant, and mixed offsets/precision make raw string order wrong.
+/// `parse_ts` failure maps to Go's zero `time.Time`, which sorts before every
+/// real instant — `Option<Timestamp>`'s `None < Some` ordering reproduces
+/// that, and two unparseable/absent stamps compare equal and fall through to
+/// priority exactly as two zero times do in Go.
 fn dependency_prerequisite_less(a: &Issue, b: &Issue) -> bool {
-    if a.created_at != b.created_at {
-        return a.created_at < b.created_at;
+    let ta = bv_core::model::parse_ts(&a.created_at);
+    let tb = bv_core::model::parse_ts(&b.created_at);
+    if ta != tb {
+        return ta < tb;
     }
     if a.priority != b.priority {
         return a.priority < b.priority;
@@ -1336,13 +1346,25 @@ fn would_create_cycle(issues: &[Issue], from_id: &str, to_id: &str) -> (bool, Ve
         neighbours.sort();
     }
 
+    /// Bound on `dfs` recursion. Go's goroutine stacks grow dynamically so the
+    /// upstream path walk has no explicit cap; Rust runs on fixed-size thread
+    /// stacks, and a dependency chain deeper than this would overflow before
+    /// finishing. 4096 levels is far beyond any realistic graph; past it the
+    /// walk reports no path (a false negative only on pathological input,
+    /// versus a hard crash without the bound).
+    const PATH_DFS_MAX_DEPTH: usize = 4096;
+
     fn dfs(
         node: &str,
         from_id: &str,
         adj: &HashMap<String, Vec<String>>,
         visited: &mut HashSet<String>,
         path: &mut Vec<String>,
+        depth: usize,
     ) -> bool {
+        if depth > PATH_DFS_MAX_DEPTH {
+            return false;
+        }
         if node == from_id {
             path.push(node.to_string());
             return true;
@@ -1354,7 +1376,7 @@ fn would_create_cycle(issues: &[Issue], from_id: &str, to_id: &str) -> (bool, Ve
         path.push(node.to_string());
         if let Some(neighbours) = adj.get(node) {
             for next in neighbours {
-                if dfs(next, from_id, adj, visited, path) {
+                if dfs(next, from_id, adj, visited, path, depth + 1) {
                     return true;
                 }
             }
@@ -1365,7 +1387,7 @@ fn would_create_cycle(issues: &[Issue], from_id: &str, to_id: &str) -> (bool, Ve
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut path: Vec<String> = Vec::new();
-    if dfs(to_id, from_id, &adj, &mut visited, &mut path) {
+    if dfs(to_id, from_id, &adj, &mut visited, &mut path, 0) {
         let mut cycle = vec![from_id.to_string()];
         cycle.extend(path);
         return (true, cycle);
@@ -2059,5 +2081,31 @@ mod tests {
     #[test]
     fn stop_words_count() {
         assert_eq!(STOP_WORDS.len(), 60);
+    }
+
+    /// Go `dependencyPrerequisiteLess` compares `time.Time` values, so the
+    /// order is chronological, not lexical: the same instant written with a
+    /// `+07:00` offset sorts equal to its `Z` spelling, and mixed offsets or
+    /// sub-second precision cannot reorder the pair the way raw strings can.
+    #[test]
+    fn prerequisite_less_compares_timestamps_chronologically() {
+        let mut a = make_issue("A-1", "", "");
+        // 2026-01-02T00:00:00+07:00 == 2026-01-01T17:00:00Z — same instant.
+        a.created_at = Some("2026-01-02T00:00:00+07:00".to_string());
+        a.priority = 0;
+        let mut b = make_issue("B-1", "", "");
+        b.created_at = Some("2026-01-01T17:00:00Z".to_string());
+        b.priority = 1;
+        // Equal instants fall through to priority: P0 before P1. A lexical
+        // string compare would rank "2026-01-02..." AFTER "2026-01-01...".
+        assert!(dependency_prerequisite_less(&a, &b));
+        assert!(!dependency_prerequisite_less(&b, &a));
+
+        // A genuinely earlier instant still wins regardless of spelling.
+        let mut older = make_issue("C-1", "", "");
+        older.created_at = Some("2026-01-01T16:59:59.5Z".to_string());
+        older.priority = 4;
+        assert!(dependency_prerequisite_less(&older, &a));
+        assert!(!dependency_prerequisite_less(&a, &older));
     }
 }

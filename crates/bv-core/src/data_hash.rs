@@ -139,6 +139,20 @@ impl<'a> HashIssue<'a> {
 /// because Go hashes `t.UTC().Format(RFC3339Nano)` unconditionally.
 const GO_ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 
+/// Chronological comparison of optional timestamp strings, mirroring Go's
+/// `time.Time.Before` on `Comment.CreatedAt`. `None` (absent or unparseable —
+/// Go would have rejected the record at decode) sorts as the zero time,
+/// i.e. before every real timestamp.
+fn cmp_comment_time(a: &Option<String>, b: &Option<String>) -> std::cmp::Ordering {
+    let parse = |v: &Option<String>| v.as_deref().and_then(|s| s.parse::<jiff::Timestamp>().ok());
+    match (parse(a), parse(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+    }
+}
+
 fn write_field(h: &mut Sha256, field: &[u8]) {
     h.update(field);
     h.update([0u8]);
@@ -184,10 +198,15 @@ fn compute_issue_content_hash(w: &mut FingerprintWriter, issue: &Issue) -> Strin
         }
     }
 
+    // Go sorts comments by (ID, CreatedAt as time.Time, IssueID, Author,
+    // Text) — cache.go:350-358. `CreatedAt` compares CHRONOLOGICALLY, so it
+    // must be parsed, not string-compared: `"...00.5Z"` vs `"...00.55Z"` and
+    // differing UTC offsets order differently as text vs as instants.
+    // Absent/unparseable sorts as the Go zero time (earliest).
     let mut comments: Vec<&crate::model::Comment> = issue.comments.iter().collect();
     comments.sort_by(|a, b| {
         a.id.cmp(&b.id)
-            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| cmp_comment_time(&a.created_at, &b.created_at))
             .then_with(|| a.issue_id.cmp(&b.issue_id))
             .then_with(|| a.author.cmp(&b.author))
             .then_with(|| a.text.cmp(&b.text))
@@ -222,7 +241,11 @@ fn compute_issue_dependency_hash(w: &mut FingerprintWriter, issue: &Issue) -> St
         .iter()
         .map(|dep| DepKey {
             issue_id: dep.issue_id.clone(),
-            depends_on: dep.depends_on_id.clone(),
+            // Go `Dependency.UnmarshalJSON` folds `depends_on`/`target_id`
+            // into `DependsOnID`, and the fingerprint hashes
+            // `dep.DependsOnID` — the effective target, not the raw
+            // canonical field (which stays "" for legacy spellings).
+            depends_on: dep.effective_depends_on().to_string(),
             dep_type: dep.r#type.as_str().to_string(),
             // Go: dep.CreatedAt.UTC().Format(RFC3339Nano) — a non-pointer time,
             // so an absent value formats as the Go zero time.
@@ -533,6 +556,51 @@ mod tests {
             compute_data_hash_refs(&borrowed_dupes),
             "duplicate IDs must still be ordered by encounter position"
         );
+    }
+
+    #[test]
+    fn legacy_dep_spellings_hash_the_folded_target() {
+        // Go `Dependency.UnmarshalJSON` folds `depends_on`/`target_id` into
+        // `DependsOnID`; the dependency fingerprint must hash the effective
+        // target for all three spellings identically.
+        let dep = |v: serde_json::Value| -> Dependency { serde_json::from_value(v).unwrap() };
+        let with_dep = |d: Dependency| {
+            let mut i = issue("A");
+            i.dependencies = vec![d];
+            i
+        };
+        let canonical = with_dep(dep(serde_json::json!({"issue_id":"A","depends_on_id":"B"})));
+        let legacy_depends_on = with_dep(dep(serde_json::json!({"issue_id":"A","depends_on":"B"})));
+        let legacy_target = with_dep(dep(serde_json::json!({"issue_id":"A","target_id":"B"})));
+        let canonical_hash = compute_data_hash(&[canonical]);
+        assert_eq!(canonical_hash, compute_data_hash(&[legacy_depends_on]));
+        assert_eq!(canonical_hash, compute_data_hash(&[legacy_target]));
+    }
+
+    #[test]
+    fn empty_dep_type_hashes_as_empty_not_blocks() {
+        // Go hashes `string(dep.Type)` verbatim: an absent/empty type is ""
+        // on the wire and must NOT be normalized to "blocks".
+        let dep_with = |t: DependencyType| Dependency {
+            issue_id: "A".into(),
+            depends_on_id: "B".into(),
+            depends_on_legacy: String::new(),
+            target_id_legacy: String::new(),
+            r#type: t,
+            created_at: None,
+            created_by: String::new(),
+        };
+        let empty = {
+            let mut i = issue("A");
+            i.dependencies = vec![dep_with(DependencyType::parse(""))];
+            i
+        };
+        let blocks = {
+            let mut i = issue("A");
+            i.dependencies = vec![dep_with(DependencyType::Blocks)];
+            i
+        };
+        assert_ne!(compute_data_hash(&[empty]), compute_data_hash(&[blocks]));
     }
 
     #[test]

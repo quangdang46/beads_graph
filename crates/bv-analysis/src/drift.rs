@@ -1,7 +1,7 @@
 //! Drift detection — port of Go `pkg/drift` (Calculator + Result + exit
 //! codes) and `pkg/baseline` snapshot format v1.
 
-use bv_core::model::{Issue, Status};
+use bv_core::model::Issue;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -498,53 +498,22 @@ fn check_staleness(
 
 /// Compute the set of issue IDs that `issue_id` would unblock if completed.
 ///
-/// An issue is considered "unblocked" by completing `issue_id` when:
-/// 1. It depends on `issue_id` via a blocking dependency type.
-/// 2. It is not already closed-like.
-/// 3. It has no other open blockers besides `issue_id`.
-///
-/// This is a simplified port of Go `Analyzer.computeUnblocks` (plan.go:85).
-fn compute_unblocks(issues: &[Issue], issue_id: &str) -> Vec<String> {
-    let by_id: BTreeMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
-
-    let Some(blocker) = by_id.get(issue_id) else {
-        return Vec::new();
-    };
-
-    // Find all non-closed issues that directly depend on this blocker.
-    let dependents: Vec<&Issue> = issues
-        .iter()
-        .filter(|i| {
-            !i.status.is_closed()
-                && i.id != issue_id
-                && i.dependencies
-                    .iter()
-                    .any(|d| d.r#type.is_blocking() && d.effective_depends_on() == blocker.id)
-        })
-        .collect();
-
-    let mut unblocks = Vec::new();
-    for dep_issue in dependents {
-        // Check if this dependent has other open blockers besides `issue_id`.
-        let still_blocked = dep_issue.dependencies.iter().any(|d| {
-            if !d.r#type.is_blocking() {
-                return false;
-            }
-            let target = d.effective_depends_on();
-            if target == issue_id {
-                return false; // The one we are completing.
-            }
-            // Check if that other blocker is still open.
-            by_id
-                .get(target)
-                .is_some_and(|other| !other.status.is_closed())
-        });
-        if !still_blocked {
-            unblocks.push(dep_issue.id.clone());
-        }
-    }
-    unblocks.sort();
-    unblocks
+/// This delegates to [`crate::triage::compute_unblocks`], the faithful port of
+/// Go `Analyzer.computeUnblocks`/`isActionableAfterCompletions`
+/// (plan.go:86-113 via readiness.go `ReadyAfter`). The previous local
+/// re-implementation diverged from Go in four ways: it counted dependents on
+/// `!is_closed()` rather than the readiness `open + not deferred +
+/// Satisfied` gate, treated a dependency on a missing target as resolved
+/// (Go's `Unknown` state withholds readiness), counted a tombstone blocker as
+/// still open (Go's `closedForReadiness` treats it as closed), and ignored
+/// the parent-child rollup entirely.
+fn compute_unblocks(
+    readiness: &crate::triage::Readiness<'_>,
+    g: &bv_graph_core::DiGraph,
+    issue_id: &str,
+    now: jiff::Timestamp,
+) -> Vec<String> {
+    crate::triage::compute_unblocks(readiness, g, issue_id, now)
 }
 
 /// The actionable issues in the order Go emits the cascade/unblock families
@@ -559,20 +528,27 @@ fn compute_unblocks(issues: &[Issue], issue_id: &str) -> Vec<String> {
 /// this iteration order is what reproduces it; a numeric sort of the alerts
 /// does not.
 ///
-/// Readiness here mirrors the existing `blocking_cascade` filter: closed and
-/// deferred issues are skipped, as is anything still carrying an open blocker
-/// (`blocker_chain::open_blockers`, which also propagates parent-child
-/// blocking). Go spells the same contract `IsCandidate(id) &&
-/// Readiness().ReadyAfter(id, now, nil)` (graph.go:2836-2842).
+/// Readiness here is Go's exact gate: `IsCandidate(id) &&
+/// Readiness().ReadyAfter(id, now, nil)` (graph.go:2836-2842). With an empty
+/// completion set `ReadyAfter` defers to `Ready`, which requires
+/// `isActionableStatus` (open|in_progress — NOT draft/pinned/hooked/review/
+/// blocked/deferred/tombstone), `!isDeferredAt(now)` (the `defer_until`
+/// gate), and `DependencyState == Satisfied` — where a blocking edge to a
+/// target absent from the source is `Unknown`, not resolved, and a
+/// parent-child parent that is itself unresolved rolls the child into
+/// `Unsatisfied`/`Unknown`. The previous filter (`!is_closed() &&
+/// != Deferred && open_blockers().is_empty()`) admitted every parked status
+/// Go withholds and ignored both `defer_until` and dangling dependency
+/// targets, so it emitted cascade/unblock alerts Go never produces — and the
+/// alert-driven exit code with them.
 fn actionable_by_id<'a>(
     issues: &'a [Issue],
-    by_id: &std::collections::HashMap<&str, &'a Issue>,
+    readiness: &crate::triage::Readiness<'_>,
+    now: jiff::Timestamp,
 ) -> Vec<&'a Issue> {
     let mut out: Vec<&Issue> = issues
         .iter()
-        .filter(|i| !i.status.is_closed() && i.status != Status::Deferred)
-        // Skip issues that have open blockers — they can't be completed yet.
-        .filter(|i| crate::blocker_chain::open_blockers(by_id, &i.id).is_empty())
+        .filter(|i| readiness.ready_after(i.id.as_str(), now, None))
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
@@ -597,14 +573,16 @@ fn check_blocking_cascade(
     let now_str = now.to_string();
 
     let by_id: BTreeMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
-    // Ancestor-epic parity (#2): inherited parent-child blocking gates this too.
-    let by_id_map: std::collections::HashMap<&str, &Issue> =
-        issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    // Go's single readiness index + issue graph back both the actionable
+    // filter and `computeUnblocks` (analyzer.GetActionableIssues /
+    // computeUnblocks, plan.go:85). Built once per check, not per issue.
+    let readiness = crate::triage::Readiness::new(issues);
+    let g = crate::analyzer::build_graph(issues);
 
     // Go appends one alert per qualifying actionable issue while walking that
     // list, so the alert order IS the iteration order.
-    for issue in actionable_by_id(issues, &by_id_map) {
-        let unblocked = compute_unblocks(issues, &issue.id);
+    for issue in actionable_by_id(issues, &readiness, now) {
+        let unblocked = compute_unblocks(&readiness, &g, &issue.id, now);
         let count = unblocked.len() as i64;
         if count == 0 {
             continue;
@@ -675,11 +653,11 @@ fn check_high_impact_unblock(
     let now_str = now.to_string();
 
     let by_id: BTreeMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
-    let by_id_map: std::collections::HashMap<&str, &Issue> =
-        issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    let readiness = crate::triage::Readiness::new(issues);
+    let g = crate::analyzer::build_graph(issues);
 
-    for issue in actionable_by_id(issues, &by_id_map) {
-        let unblocks = compute_unblocks(issues, &issue.id);
+    for issue in actionable_by_id(issues, &readiness, now) {
+        let unblocks = compute_unblocks(&readiness, &g, &issue.id, now);
         if (unblocks.len() as i64) < min_unblocks {
             continue;
         }
@@ -1731,5 +1709,134 @@ mod tests {
             json.get("downstream_priority_sum").is_none(),
             "Go omits a zero downstream_priority_sum, got {json}"
         );
+    }
+
+    // -- Actionable gate parity ---------------------------------------------
+    //
+    // Go's cascade/unblock families iterate `GetActionableIssues`, gated by
+    // `IsCandidate && Readiness().ReadyAfter(id, now, nil)` — open|in_progress
+    // status, not deferred, dependency state Satisfied. The pre-fix filter
+    // admitted every non-closed non-deferred status with no *locally-visible*
+    // open blocker, so a Draft/Pinned/Blocked/Review blocker (or one parked by
+    // `defer_until`, or one gated on a dependency target absent from the
+    // source) produced alerts Go never emits — and the wrong exit code.
+
+    /// A blocker in `status` with three open dependents — enough unblocks to
+    /// clear the info threshold when the blocker itself is actionable.
+    fn parked_blocker_issues(id: &str, status: bv_core::model::Status) -> Vec<Issue> {
+        let mut issues = vec![casc_issue(id, status, 1)];
+        for i in 0..3 {
+            let dep_id = format!("{id}-d{i}");
+            let mut dep = casc_issue(&dep_id, bv_core::model::Status::Open, 2);
+            dep.dependencies.push(casc_dep(&dep_id, id));
+            issues.push(dep);
+        }
+        issues
+    }
+
+    #[test]
+    fn parked_status_blocker_emits_no_cascade() {
+        let s = snap(10, 10, 0.1, 0, 5);
+        for status in [
+            bv_core::model::Status::Draft,
+            bv_core::model::Status::Pinned,
+            bv_core::model::Status::Hooked,
+            bv_core::model::Status::Review,
+            bv_core::model::Status::Blocked,
+            bv_core::model::Status::Deferred,
+            bv_core::model::Status::Tombstone,
+        ] {
+            let issues = parked_blocker_issues("P-1", status);
+            let r = calculate(
+                &s,
+                &s,
+                &DriftConfig::default(),
+                &[],
+                &issues,
+                jiff::Timestamp::now(),
+            );
+            assert!(
+                !r.alerts
+                    .iter()
+                    .any(|a| a.alert_type == AlertType::BlockingCascade),
+                "{status:?} is not an actionable status in Go -- no cascade alert"
+            );
+        }
+    }
+
+    #[test]
+    fn defer_until_in_future_removes_blocker_from_actionable() {
+        let s = snap(10, 10, 0.1, 0, 5);
+        let mut issues = parked_blocker_issues("P-2", bv_core::model::Status::Open);
+        // Park the blocker until far in the future: `Ready`'s
+        // `!isDeferredAt(now)` conjunct fails, so Go emits nothing.
+        issues[0].defer_until = Some("2999-01-01T00:00:00Z".to_string());
+        let r = calculate(
+            &s,
+            &s,
+            &DriftConfig::default(),
+            &[],
+            &issues,
+            jiff::Timestamp::now(),
+        );
+        assert!(!r
+            .alerts
+            .iter()
+            .any(|a| a.alert_type == AlertType::BlockingCascade));
+    }
+
+    #[test]
+    fn dangling_dependency_target_is_not_actionable() {
+        let s = snap(10, 10, 0.1, 0, 5);
+        // The blocker depends on "GHOST", which is absent from the source:
+        // readiness resolves that edge to `Unknown`, so `Ready` is false and
+        // Go never lists it among actionable issues. The old filter only
+        // counted blockers present in the issue map, so it slipped through.
+        let mut issues = parked_blocker_issues("P-3", bv_core::model::Status::Open);
+        issues[0].dependencies.push(casc_dep("P-3", "GHOST"));
+        let r = calculate(
+            &s,
+            &s,
+            &DriftConfig::default(),
+            &[],
+            &issues,
+            jiff::Timestamp::now(),
+        );
+        assert!(!r
+            .alerts
+            .iter()
+            .any(|a| a.alert_type == AlertType::BlockingCascade));
+    }
+
+    #[test]
+    fn tombstone_dependency_target_counts_as_resolved() {
+        let s = snap(10, 10, 0.1, 0, 5);
+        // Each dependent is gated on the open blocker X-1 AND a tombstoned
+        // issue T-1. Go's `closedForReadiness` treats the tombstone as
+        // satisfied, so completing X-1 unblocks all three dependents.
+        let blocker = casc_issue("X-1", bv_core::model::Status::Open, 1);
+        let tombstone = casc_issue("T-1", bv_core::model::Status::Tombstone, 1);
+        let mut issues = vec![blocker, tombstone];
+        for i in 0..3 {
+            let dep_id = format!("X-1-d{i}");
+            let mut dep = casc_issue(&dep_id, bv_core::model::Status::Open, 2);
+            dep.dependencies.push(casc_dep(&dep_id, "X-1"));
+            dep.dependencies.push(casc_dep(&dep_id, "T-1"));
+            issues.push(dep);
+        }
+        let r = calculate(
+            &s,
+            &s,
+            &DriftConfig::default(),
+            &[],
+            &issues,
+            jiff::Timestamp::now(),
+        );
+        let alert = r
+            .alerts
+            .iter()
+            .find(|a| a.alert_type == AlertType::BlockingCascade)
+            .expect("tombstone blocker must count as resolved -- X-1 unblocks 3");
+        assert_eq!(alert.unblocks_count, Some(3));
     }
 }

@@ -98,18 +98,19 @@ pub fn source_date_epoch_active() -> bool {
 /// `TopologicalOrder` when gonum's `topo.Sort` returns no error, so the gate is
 /// "the whole graph is orderable".
 ///
-/// gonum's `topo.Sort` is a DFS that errors on *any* back edge, and a self-edge
-/// is a back edge. `topological_sort_gonum` here is Tarjan-based and only
-/// rejects multi-node SCCs, so it would let a graph whose only cycle is a
-/// self-loop through and report the metric as computed where Go skips it. The
-/// scan below is what closes that gap; [`build_graph`] keeps self-loops, so
-/// they really do reach here.
+/// gonum's `topo.Sort` is Tarjan-SCC based (`sortedFrom`,
+/// graph/topo/tarjan.go): it reports `Unorderable` only for a component of
+/// size != 1. A singleton SCC carrying a self-edge is NOT an error there —
+/// the audit claim that "a self-edge is a back edge" described a DFS
+/// topological sort, which gonum does not use. `topological_sort_gonum`
+/// reproduces that exactly (it rejects only multi-node SCCs, see
+/// `gonum_tolerates_self_loop` in bv-graph-core), so a graph whose only cycle
+/// is a self-loop IS orderable for Go and Critical/Slack/TopologicalOrder are
+/// all computed. An earlier self-edge scan here marked such graphs
+/// unorderable and skipped metrics the oracle emits.
 pub fn topological_order_available(g: &DiGraph) -> bool {
     let n = g.len();
-    if topological_sort_gonum(g).map(|o| o.len() == n) != Some(true) {
-        return false;
-    }
-    !(0..n).any(|v| g.successors_slice(v).contains(&v))
+    topological_sort_gonum(g).map(|o| o.len() == n) == Some(true)
 }
 
 impl MetricStatus {
@@ -1382,40 +1383,72 @@ fn analyze_phase2_with_profile(
     let mut truncation_note = String::new();
     if config.compute_cycles {
         let t0 = Instant::now();
-        let scc = tarjan_scc(g);
-        if scc.has_cycles {
-            let cap = if config.max_cycles_to_store == 0 {
-                100
-            } else {
-                config.max_cycles_to_store
-            };
-            // Go stores one representative per cyclic component (graph_cycles.go:27-41)
-            // and keeps the pre-limit count so it can report truncation without
-            // implying every simple cycle in an SCC was enumerated.
-            let found = crate::algorithms::cycles::enumerate_cycles_with_info(g, cap);
-            profile.cycle_count = scc.cycle_count;
-            if found.truncated {
-                truncation_note = format!(
-                    "truncated to {} of {} cycle representatives",
-                    found.cycles.len(),
-                    profile.cycle_count
-                );
-            }
-            out.cycles = Some(
-                found
-                    .cycles
-                    .into_iter()
-                    .map(|c| {
-                        c.into_iter()
-                            .map(|i| g.node_id(i).unwrap_or_default().to_string())
-                            .collect()
-                    })
-                    .collect(),
-            );
+        let cap = if config.max_cycles_to_store == 0 {
+            100
         } else {
-            // An acyclic graph computed its cycles metric successfully and
-            // found none — the same `Some(empty)` the unprofiled pass reports.
-            out.cycles = Some(Vec::new());
+            config.max_cycles_to_store
+        };
+        // Go races the whole cycle pass — Tarjan SCC plus representative
+        // enumeration — against `CyclesTimeout` (graph.go:2182-2253) and
+        // reports `cyclesTimeout` when the timer wins. The previous port ran
+        // `enumerate_cycles_with_info` synchronously, so `profile.cycles_timeout`
+        // was never set and a pathological cyclic graph hung instead of
+        // reporting the timeout Go emits. `run_with_timeout` is the same
+        // thread + recv_timeout pattern every other raced metric uses; a zero
+        // `CyclesTimeout` resolves as Go's already-fired timer -> timeout.
+        let gc = std::sync::Arc::clone(g);
+        match run_with_timeout(timeout_from_ns(config.cycles_timeout_ns), move || {
+            let scc = tarjan_scc(&gc);
+            if !scc.has_cycles {
+                // Acyclic: Go still counts zero components and stores an
+                // empty (non-nil) cycle list.
+                return (scc.cycle_count, None);
+            }
+            // Go stores one representative per cyclic component
+            // (graph_cycles.go:27-41) and keeps the pre-limit count so it can
+            // report truncation without implying every simple cycle in an SCC
+            // was enumerated.
+            (
+                scc.cycle_count,
+                Some(crate::algorithms::cycles::enumerate_cycles_with_info(
+                    &gc, cap,
+                )),
+            )
+        }) {
+            Ok((cycle_count, found)) => {
+                profile.cycle_count = cycle_count;
+                match found {
+                    None => {
+                        // An acyclic graph computed its cycles metric
+                        // successfully and found none — the same
+                        // `Some(empty)` the unprofiled pass reports.
+                        out.cycles = Some(Vec::new());
+                    }
+                    Some(found) => {
+                        if found.truncated {
+                            truncation_note = format!(
+                                "truncated to {} of {} cycle representatives",
+                                found.cycles.len(),
+                                profile.cycle_count
+                            );
+                        }
+                        out.cycles = Some(
+                            found
+                                .cycles
+                                .into_iter()
+                                .map(|c| {
+                                    c.into_iter()
+                                        .map(|i| g.node_id(i).unwrap_or_default().to_string())
+                                        .collect()
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            Err(()) => {
+                profile.cycles_timeout = true;
+            }
         }
         profile.cycles = t0.elapsed();
     }
@@ -1693,11 +1726,14 @@ mod tests {
         assert_eq!(out.slack, None);
     }
 
-    /// A self-edge is a back edge for gonum's `topo.Sort`, so Go reports the
-    /// graph as unorderable even though its only SCC is a singleton — which is
-    /// the case Tarjan-based `topological_sort_gonum` cannot see.
+    /// gonum's `topo.Sort` is Tarjan-SCC based and reports `Unorderable` only
+    /// for a component of size != 1 (`sortedFrom`, graph/topo/tarjan.go), so a
+    /// graph whose only cycle is a self-loop on a singleton SCC IS orderable:
+    /// Go computes Critical/Slack/TopologicalOrder for it. (Verified against
+    /// gonum v0.17.0 source; `topo.gonum_tolerates_self_loop` pins the same
+    /// fact in bv-graph-core.)
     #[test]
-    fn self_loop_is_not_an_available_order() {
+    fn self_loop_is_an_available_order() {
         let mut g = DiGraph::new();
         g.add_node("a");
         g.add_node("b");
@@ -1705,17 +1741,41 @@ mod tests {
         let b = g.node_idx("b").unwrap();
         g.add_edge(a, b);
         g.add_edge(a, a);
-        assert!(
-            topological_sort_gonum(&g).is_some(),
-            "Tarjan sees no multi-node SCC; only the self-edge scan catches it"
-        );
-        assert!(!topological_order_available(&g));
+        assert!(topological_sort_gonum(&g).is_some());
+        assert!(topological_order_available(&g));
 
         let (status, out) =
             analyze_phase2_blocking(std::sync::Arc::new(g), &AnalysisBudget::default());
-        assert_eq!(status.slack.state, "skipped");
-        assert_eq!(status.slack.reason, CYCLE_UNAVAILABLE_REASON);
-        assert_eq!(out.slack, None);
+        assert_eq!(status.slack.state, "computed");
+        assert_eq!(status.slack.reason, "");
+        assert!(out.slack.is_some());
+    }
+
+    /// Go races the cycle pass against `CyclesTimeout` and reports
+    /// `cyclesTimeout` when the timer wins (graph.go:2182-2253). A zero budget
+    /// is Go's already-fired timer: the metric must report `timeout`, leave
+    /// `cycles` nil, and still record the component count path — not hang.
+    #[test]
+    fn cycles_metric_times_out_against_config_budget() {
+        let issues = vec![
+            issue_with_blocking_deps("a", &["b"]),
+            issue_with_blocking_deps("b", &["a"]),
+        ];
+        let g = std::sync::Arc::new(build_graph(&issues));
+
+        let mut config = full_analysis_config();
+        config.cycles_timeout_ns = 0;
+        let (out, profile) = analyze_with_profile(std::sync::Arc::clone(&g), &config);
+        assert!(profile.cycles_timeout, "zero budget must time out");
+        assert_eq!(out.status.cycles.state, "timeout");
+        assert!(out.cycles.is_none(), "timed-out metric leaves cycles nil");
+
+        // Same graph with a real budget computes normally.
+        let (out2, profile2) = analyze_with_profile(g, &full_analysis_config());
+        assert!(!profile2.cycles_timeout);
+        assert_eq!(out2.status.cycles.state, "computed");
+        assert_eq!(profile2.cycle_count, 1);
+        assert_eq!(out2.cycles.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

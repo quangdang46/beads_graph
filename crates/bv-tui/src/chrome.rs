@@ -61,7 +61,7 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, sections: &[(&str, Vec<(&str, &
         let header_area = Rect {
             x: inner.x + 1,
             y,
-            width: inner.width - 2,
+            width: inner.width.saturating_sub(2),
             height: 1,
         };
         f.render_widget(header, header_area);
@@ -78,7 +78,7 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, sections: &[(&str, Vec<(&str, &
             let line_area = Rect {
                 x: inner.x + 1,
                 y,
-                width: inner.width - 2,
+                width: inner.width.saturating_sub(2),
                 height: 1,
             };
             f.render_widget(line, line_area);
@@ -114,11 +114,12 @@ pub fn default_help_entries() -> Vec<(&'static str, &'static str)> {
         ("b", "Board view"),
         ("E", "Tree view"),
         ("D", "Tree left pane"),
-        ("g", "Graph view"),
+        ("G", "Graph view"),
         ("i", "Insights dashboard"),
         ("h", "History view"),
         ("f", "Flow matrix"),
-        ("[ / ]", "Labels / Attention"),
+        ("[", "Label dashboard"),
+        ("A", "Attention view"),
         ("!", "Alerts panel"),
         ("t/T", "Time-travel mode"),
         ("Enter", "Toggle detail pane"),
@@ -155,8 +156,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_help_has_21_entries() {
-        assert_eq!(default_help_entries().len(), 21);
+    fn default_help_has_22_entries() {
+        assert_eq!(default_help_entries().len(), 22);
     }
 
     #[test]

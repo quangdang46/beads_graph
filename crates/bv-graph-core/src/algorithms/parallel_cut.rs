@@ -6,6 +6,17 @@
 use crate::graph::DiGraph;
 use serde::Serialize;
 
+/// A node is "actionable" when it is open and every predecessor is closed —
+/// the same gate `current_actionable`/`open_nodes` use and the set Go's
+/// `generateParallelCut` iterates (advanced_insights.go:961-983).
+fn is_actionable_node(graph: &DiGraph, v: usize, closed_set: &[bool]) -> bool {
+    !closed_set.get(v).copied().unwrap_or(false)
+        && graph
+            .predecessors_slice(v)
+            .iter()
+            .all(|&p| closed_set.get(p).copied().unwrap_or(false))
+}
+
 /// A node that could increase parallelization when completed.
 #[derive(Debug, Clone, Serialize)]
 pub struct ParallelCutItem {
@@ -63,17 +74,22 @@ pub fn parallel_cut_suggestions(
         .filter(|&v| !closed_set.get(v).copied().unwrap_or(false))
         .count();
 
-    // Calculate parallel gain for each open node
+    // Calculate parallel gain for each ACTIONABLE node. Go iterates
+    // `actionable`, not every open issue (advanced_insights.go:983): the
+    // suggestion is "complete this to widen parallel work", which only makes
+    // sense for something that can be completed now.
     let mut suggestions: Vec<ParallelCutItem> = (0..n)
-        .filter(|&v| !closed_set.get(v).copied().unwrap_or(false))
+        .filter(|&v| is_actionable_node(graph, v, closed_set))
         .map(|v| {
             // Count how many dependents would become actionable if v is closed
             let new_actionable = graph
                 .successors_slice(v)
                 .iter()
                 .filter(|&&w| {
-                    // w must be open
-                    !closed_set.get(w).copied().unwrap_or(false)
+                    // w must be open and not v itself — a self-loop successor
+                    // is not a newly actionable dependent.
+                    w != v
+                        && !closed_set.get(w).copied().unwrap_or(false)
                     // All of w's other predecessors must be closed
                     && graph.predecessors_slice(w).iter()
                         .filter(|&&p| p != v)
@@ -118,13 +134,14 @@ pub fn unblock_ranking(graph: &DiGraph, closed_set: &[bool], limit: usize) -> Ve
     let n = graph.node_count();
 
     let mut ranking: Vec<(usize, usize)> = (0..n)
-        .filter(|&v| !closed_set.get(v).copied().unwrap_or(false))
+        .filter(|&v| is_actionable_node(graph, v, closed_set))
         .map(|v| {
             let unblocks = graph
                 .successors_slice(v)
                 .iter()
                 .filter(|&&w| {
-                    !closed_set.get(w).copied().unwrap_or(false)
+                    w != v
+                        && !closed_set.get(w).copied().unwrap_or(false)
                         && graph
                             .predecessors_slice(w)
                             .iter()
@@ -266,6 +283,34 @@ mod tests {
         let result = parallel_cut_suggestions(&g, &closed, 2);
 
         assert!(result.items.len() <= 2);
+    }
+
+    #[test]
+    fn test_blocked_node_not_suggested() {
+        // Regression: 0 -> 1, and 1 fans out to 2,3,4. Node 1 would have the
+        // highest parallel gain but is BLOCKED — Go generateParallelCut only
+        // iterates actionable issues, so nothing is suggested.
+        let g = make_graph(&[(0, 1), (1, 2), (1, 3), (1, 4)]);
+        let closed = vec![false; 5];
+        let result = parallel_cut_suggestions(&g, &closed, 10);
+
+        assert!(result.items.is_empty());
+        // unblock_ranking likewise only ranks actionable nodes.
+        let ranking = unblock_ranking(&g, &closed, 10);
+        assert!(!ranking.iter().any(|&(v, _)| v == 1));
+        assert_eq!(ranking, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn test_self_loop_not_counted() {
+        // A self-loop makes its node non-actionable (it blocks itself), so it
+        // can never be suggested or ranked — and even defensively the
+        // self-successor must not count as a newly actionable dependent.
+        let g = make_graph(&[(0, 0), (0, 1)]);
+        let closed = vec![false; 2];
+        let result = parallel_cut_suggestions(&g, &closed, 10);
+        assert!(result.items.is_empty());
+        assert!(unblock_ranking(&g, &closed, 10).is_empty());
     }
 
     #[test]

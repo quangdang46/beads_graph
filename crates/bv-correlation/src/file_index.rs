@@ -1009,7 +1009,13 @@ fn glob_match_inner(pattern: &[char], name: &[char]) -> bool {
         Some('[') => {
             match match_class(pattern, name) {
                 Some((consumed, matched)) => {
-                    matched && glob_match_inner(&pattern[consumed..], &name[1..])
+                    // A class consumes one name character; an empty name can
+                    // never satisfy it (this also guards the `name[1..]`
+                    // slice below — a negated class would otherwise report a
+                    // match against nothing).
+                    !name.is_empty()
+                        && matched
+                        && glob_match_inner(&pattern[consumed..], &name[1..])
                 }
                 // Unterminated class: Go treats the '[' as a literal.
                 None => {
@@ -1027,7 +1033,9 @@ fn glob_match_inner(pattern: &[char], name: &[char]) -> bool {
 /// first name character matched, or `None` when the class is unterminated.
 fn match_class(pattern: &[char], name: &[char]) -> Option<(usize, bool)> {
     let mut i = 1usize; // past '['
-    let negated = matches!(pattern.get(i), Some('^') | Some('!'));
+                        // Go `filepath.Match` negates a class only with '^'; '!' is a literal
+                        // member, so `[!b]` matches '!' or 'b' and `[^b]` matches anything but 'b'.
+    let negated = pattern.get(i) == Some(&'^');
     if negated {
         i += 1;
     }
@@ -1378,8 +1386,24 @@ mod tests {
         assert!(glob_match("src/*", "src/nested"));
         assert!(glob_match("*.rs", "a.rs"));
         assert!(glob_match("[ab].rs", "b.rs"));
-        assert!(!glob_match("[!ab].rs", "b.rs"));
+        // Go `filepath.Match` negates only with '^'; '!' is a literal member,
+        // so `[!ab]` matches '!', 'a' or 'b'.
+        assert!(glob_match("[!ab].rs", "b.rs"));
+        assert!(glob_match("[!ab].rs", "!.rs"));
+        assert!(!glob_match("[!ab].rs", "c.rs"));
+        assert!(!glob_match("[^ab].rs", "b.rs"));
+        assert!(glob_match("[^ab].rs", "c.rs"));
         assert!(glob_match("[a-c].rs", "b.rs"));
+    }
+
+    /// A character class needs a name character to consume: an empty name
+    /// must not match — and must not panic on the `name[1..]` slice.
+    #[test]
+    fn glob_class_never_matches_empty_name() {
+        assert!(!glob_match("[^a]", ""));
+        assert!(!glob_match("[!a]", ""));
+        assert!(!glob_match("[a]", ""));
+        assert!(!glob_match("a[!b]", "a"));
     }
 
     // -----------------------------------------------------------------------

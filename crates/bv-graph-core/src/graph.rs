@@ -115,11 +115,36 @@ impl DiGraph {
         self.node_index.get(id).copied()
     }
 
+    /// Out-neighbours of `node`; empty for an out-of-range index, matching
+    /// the wasm crate's `.get().map_or(&[])` accessors and the graceful
+    /// handling `reachability` callers rely on.
     pub fn successors_slice(&self, node: usize) -> &[usize] {
-        &self.adj[node]
+        self.adj.get(node).map_or(&[], |v| v.as_slice())
     }
 
+    /// In-neighbours of `node`; empty for an out-of-range index.
     pub fn predecessors_slice(&self, node: usize) -> &[usize] {
-        &self.rev_adj[node]
+        self.rev_adj.get(node).map_or(&[], |v| v.as_slice())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Out-of-range indices yield empty slices, matching the wasm crate's
+    /// `.get().map_or(&[])` accessors — reachability callers rely on this
+    /// graceful handling instead of a panic.
+    #[test]
+    fn slice_accessors_tolerate_out_of_range() {
+        let mut g = DiGraph::new();
+        let a = g.add_node("a");
+        let b = g.add_node("b");
+        g.add_edge(a, b);
+
+        assert_eq!(g.successors_slice(a), &[b]);
+        assert_eq!(g.predecessors_slice(b), &[a]);
+        assert!(g.successors_slice(99).is_empty());
+        assert!(g.predecessors_slice(99).is_empty());
     }
 }

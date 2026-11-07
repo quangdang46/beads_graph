@@ -494,16 +494,28 @@ fn run_git_batch(
 
 /// Go `forEachCommitChunk` — split a `git log --format=<header>` stream into
 /// per-commit chunks, yielding (sha, diff payload after the header line).
+///
+/// A commit header starts at a hex run — 40 chars for SHA-1 repos, 64 for
+/// SHA-256 repos — immediately followed by NUL. The run must be *exactly*
+/// the SHA width: a longer hex run is message/author text, not a header.
 fn for_each_commit_chunk(out: &[u8]) -> Vec<(String, String)> {
     let mut chunks = Vec::new();
     let mut starts: Vec<usize> = Vec::new();
-    for (i, window) in out.windows(40).enumerate() {
-        if window.iter().all(u8::is_ascii_hexdigit) {
-            let at = i + 40;
-            if out.get(at) == Some(&0) {
-                starts.push(i);
-            }
+    let mut i = 0usize;
+    while i < out.len() {
+        if !out[i].is_ascii_hexdigit() {
+            i += 1;
+            continue;
         }
+        let mut run_end = i;
+        while run_end < out.len() && out[run_end].is_ascii_hexdigit() {
+            run_end += 1;
+        }
+        let run_len = run_end - i;
+        if (run_len == 40 || run_len == 64) && out.get(run_end) == Some(&0) {
+            starts.push(i);
+        }
+        i = run_end.max(i + 1);
     }
     for (idx, &start) in starts.iter().enumerate() {
         let end = starts.get(idx + 1).copied().unwrap_or(out.len());
@@ -590,25 +602,33 @@ fn extract_new_path(path: &str) -> String {
     path.to_string()
 }
 
+/// Go's `\{[^}]* => ([^}]*)\}` → `$1` applied with `ReplaceAllString`: every
+/// `{old => new}` group in the path collapses, not just the first.
 fn replace_rename_braces(path: &str) -> String {
-    // Equivalent of Go's `\{[^}]* => ([^}]*)\}` → `$1`.
-    let Some(start) = path.find('{') else {
-        return path.to_string();
-    };
-    let Some(arrow) = path[start..].find(" => ") else {
-        return path.to_string();
-    };
+    let mut result = path.to_string();
+    while let Some(next) = replace_first_rename_brace(&result) {
+        if next == result {
+            break;
+        }
+        result = next;
+    }
+    result
+}
+
+/// Collapse the first `{old => new}` group, or return `None` when the path
+/// has no (further) complete group.
+fn replace_first_rename_brace(path: &str) -> Option<String> {
+    let start = path.find('{')?;
+    let arrow = path[start..].find(" => ")?;
     let after = start + arrow + 4;
-    let Some(close_rel) = path[after..].find('}') else {
-        return path.to_string();
-    };
+    let close_rel = path[after..].find('}')?;
     let close = after + close_rel;
-    format!(
+    Some(format!(
         "{}{}{}",
         &path[..start],
         &path[after..close],
         &path[close + 1..]
-    )
+    ))
 }
 
 /// Go `isCodeFile`.
@@ -1883,7 +1903,9 @@ pub fn assemble_report_with_feedback(
     });
 
     if !opts.bead_id.is_empty() {
-        histories.retain(|id, _| id == &opts.bead_id);
+        // Case-insensitive, matching the `bead_filter` comparison in
+        // `extract_explicit_commits` — the option is raw user input.
+        histories.retain(|id, _| id.eq_ignore_ascii_case(&opts.bead_id));
     }
 
     let commit_index = build_commit_index(&histories);
@@ -2059,6 +2081,48 @@ mod tests {
         assert_eq!(extract_new_path("pkg/{old => new}/f.go"), "pkg/new/f.go");
         assert_eq!(extract_new_path("old.go => new.go"), "new.go");
         assert_eq!(extract_new_path("plain.rs"), "plain.rs");
+    }
+
+    /// Go's `ReplaceAllString` collapses *every* `{old => new}` group, so a
+    /// numstat path carrying two brace groups still resolves to the new names.
+    #[test]
+    fn extract_new_path_collapses_every_rename_brace_group() {
+        assert_eq!(extract_new_path("{a => b}/{c => d}/f.go"), "b/d/f.go");
+        assert_eq!(
+            extract_new_path("pkg/{old => new}/sub/{x => y}/f.go"),
+            "pkg/new/sub/y/f.go"
+        );
+    }
+
+    /// `for_each_commit_chunk` accepts both SHA-1 (40-hex) and SHA-256
+    /// (64-hex) commit headers.
+    #[test]
+    fn commit_chunks_accept_sha1_and_sha256_widths() {
+        let sha1 = "a".repeat(40);
+        let sha256 = "b".repeat(64);
+        let mut out = Vec::new();
+        out.extend_from_slice(sha1.as_bytes());
+        out.push(0);
+        out.extend_from_slice(b"2026-01-01T00:00:00Z\x00a\x00e\x00msg\n+diff\n");
+        out.extend_from_slice(sha256.as_bytes());
+        out.push(0);
+        out.extend_from_slice(b"2026-01-02T00:00:00Z\x00a\x00e\x00msg\n+diff\n");
+        let chunks = for_each_commit_chunk(&out);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].0, sha1);
+        assert_eq!(chunks[1].0, sha256);
+        assert!(chunks[0].1.contains("+diff"));
+        assert!(chunks[1].1.contains("+diff"));
+    }
+
+    /// A hex run longer than the SHA width is message text, not a header.
+    #[test]
+    fn commit_chunks_reject_overlong_hex_runs() {
+        let mut out = Vec::new();
+        out.extend_from_slice("c".repeat(65).as_bytes());
+        out.push(0);
+        out.extend_from_slice(b"not a header\n");
+        assert!(for_each_commit_chunk(&out).is_empty());
     }
 
     #[test]

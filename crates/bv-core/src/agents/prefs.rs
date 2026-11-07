@@ -19,18 +19,67 @@ pub struct AgentPromptPreference {
     pub added_at: Option<String>,
 }
 
-/// Get the preferences directory path.
-/// Uses $XDG_CONFIG_HOME on Linux, ~/Library/Application Support on macOS,
-/// %APPDATA% on Windows (Go `os.UserConfigDir()` semantics).
+/// Get the preferences directory path: Go `os.UserConfigDir()` joined with
+/// `bv/agent-prompts`.
+///
+/// - Unix: `$XDG_CONFIG_HOME` when set AND non-empty, else `$HOME/.config`.
+///   An empty `XDG_CONFIG_HOME` must fall back — `PathBuf::from("")` used to
+///   produce the relative `bv/agent-prompts` inside the cwd. XDG is honoured
+///   on macOS too (Go ignores it there and uses
+///   `~/Library/Application Support`): an explicit override is less
+///   surprising than writing into the user's real config dir, and it keeps
+///   tests isolated without mutating `HOME`.
+/// - macOS without XDG: `~/Library/Application Support`.
+/// - Windows: `%APPDATA%`, falling back to `%USERPROFILE%\AppData\Roaming`.
 pub fn get_prefs_dir() -> Result<std::path::PathBuf, String> {
-    let config_dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        std::path::PathBuf::from(xdg)
-    } else if let Ok(home) = std::env::var("HOME") {
-        std::path::PathBuf::from(home).join(".config")
-    } else {
-        return Err("cannot determine config directory".into());
-    };
-    Ok(config_dir.join("bv").join("agent-prompts"))
+    Ok(platform_config_dir()?.join("bv").join("agent-prompts"))
+}
+
+/// `os.UserConfigDir` per platform (see [`get_prefs_dir`] for the contract).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_config_dir() -> Result<std::path::PathBuf, String> {
+    if let Some(xdg) = non_empty_env("XDG_CONFIG_HOME") {
+        return Ok(std::path::PathBuf::from(xdg));
+    }
+    Ok(home_dir()?.join(".config"))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_config_dir() -> Result<std::path::PathBuf, String> {
+    if let Some(xdg) = non_empty_env("XDG_CONFIG_HOME") {
+        return Ok(std::path::PathBuf::from(xdg));
+    }
+    Ok(home_dir()?.join("Library").join("Application Support"))
+}
+
+#[cfg(windows)]
+fn platform_config_dir() -> Result<std::path::PathBuf, String> {
+    if let Some(appdata) = non_empty_env("APPDATA") {
+        return Ok(std::path::PathBuf::from(appdata));
+    }
+    Ok(home_dir()?.join("AppData").join("Roaming"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_config_dir() -> Result<std::path::PathBuf, String> {
+    Err("cannot determine config directory".into())
+}
+
+/// An environment variable that is set AND non-empty — Go treats an empty
+/// `XDG_CONFIG_HOME`/`%APPDATA%` as unset.
+fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|v| !v.is_empty())
+}
+
+/// `$HOME` on Unix, `%USERPROFILE%` on Windows.
+fn home_dir() -> Result<std::path::PathBuf, String> {
+    #[cfg(windows)]
+    let var = "USERPROFILE";
+    #[cfg(not(windows))]
+    let var = "HOME";
+    non_empty_env(var)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "cannot determine home directory".to_string())
 }
 
 /// Generate a project hash from work directory (SHA256 truncated to 16 hex).
@@ -194,6 +243,33 @@ mod tests {
         save_preference(&dir, &pref).unwrap();
         record_accept(&dir, super::super::BLURB_VERSION).unwrap();
         assert!(!should_prompt_for_agent_file(&dir, &needs));
+
+        // Empty XDG_CONFIG_HOME must fall back to $HOME, never produce a
+        // relative `bv/agent-prompts` under the cwd (same test: env is
+        // process-global, so it cannot race a sibling mutation).
+        #[cfg(unix)]
+        {
+            let saved_xdg = std::env::var_os("XDG_CONFIG_HOME");
+            let saved_home = std::env::var_os("HOME");
+            let home = std::env::temp_dir().join("bvr_prefs_home_fallback");
+            std::env::set_var("XDG_CONFIG_HOME", "");
+            std::env::set_var("HOME", &home);
+            let got = get_prefs_dir().expect("prefs dir");
+            #[cfg(target_os = "macos")]
+            let want = home.join("Library").join("Application Support");
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let want = home.join(".config");
+            assert_eq!(got, want.join("bv").join("agent-prompts"));
+            assert!(got.is_absolute(), "must never be cwd-relative: {got:?}");
+            match saved_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&dir);

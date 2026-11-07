@@ -387,23 +387,27 @@ pub fn parse_relative_time(
     }
     let s = s.trim();
 
-    // Relative form: a digit run followed by one of d/w/m/y.
+    // Relative form: Go's `^(\d+)([dwmy])$` — a digit run followed by one
+    // unit letter. Splitting on `chars` (not `split_at(len - 1)`) keeps a
+    // multi-byte final character from panicking on a byte boundary, and an
+    // unknown unit simply fails the regex and falls through to the absolute
+    // formats below, exactly as Go does.
     let lowered = s.to_lowercase();
-    let bytes = lowered.as_bytes();
-    if bytes.len() >= 2 {
-        let (digits, unit) = lowered.split_at(lowered.len() - 1);
-        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+    if let Some(unit) = lowered.chars().next_back() {
+        let digits = &lowered[..lowered.len() - unit.len_utf8()];
+        if !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && matches!(unit, 'd' | 'w' | 'm' | 'y')
+        {
             // Go ignores `strconv.Atoi`'s error, so an overflowing count
             // becomes 0 and the threshold lands exactly on `now`.
             let n: i64 = digits.parse().unwrap_or(0);
             let span = match unit {
-                "d" => jiff::Span::new().days(-n),
-                "w" => jiff::Span::new().days(-n * 7),
-                "m" => jiff::Span::new().months(-n),
-                "y" => jiff::Span::new().years(-n),
-                // The regex above already proved the unit is one of dwmy, so
-                // this arm is unreachable.
-                _ => return Ok(Some(now)),
+                'd' => jiff::Span::new().days(-n),
+                'w' => jiff::Span::new().days(-n * 7),
+                'm' => jiff::Span::new().months(-n),
+                'y' => jiff::Span::new().years(-n),
+                _ => unreachable!("unit already checked against dwmy"),
             };
             // `jiff::Timestamp` refuses calendar units (days, months, years);
             // it only models elapsed time. Go's `AddDate` is calendar
@@ -519,6 +523,25 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid time format: fortnight (expected relative like '14d', '2w', '1m' or ISO date)"
+        );
+    }
+
+    #[test]
+    fn relative_time_requires_a_dwmy_unit() {
+        // Go's `^(\d+)([dwmy])$` rejects every other suffix; these must not be
+        // accepted as "now" and must not panic on a non-ASCII final character.
+        let now = jiff::Timestamp::now();
+        for bad in ["14x", "5!", "123", "14", "d", "1.5d", "12dd", "14\u{65e5}"] {
+            assert!(
+                parse_relative_time(bad, now).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        // A valid unit still parses, and absolute dates still fall through.
+        assert!(parse_relative_time("14d", now).is_ok());
+        assert_eq!(
+            parse_relative_time("2024-06-15", now).unwrap(),
+            Some(at("2024-06-15T00:00:00Z"))
         );
     }
 

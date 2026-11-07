@@ -317,14 +317,62 @@ pub struct WranglerStatus {
     pub account_id: Option<String>,
 }
 
+/// `exec.LookPath`-style PATH search, matching Go's semantics: on Unix the
+/// candidate must be a regular file with at least one execute bit set; on
+/// Windows each PATH dir is tried with every `PATHEXT` extension (plus the
+/// bare name, for extensionless shims) — the same walk `bv-core`'s `bdcli`
+/// performs for `bd`.
 fn on_path(exe: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
-    std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(exe);
-        candidate.is_file()
-    })
+    #[cfg(windows)]
+    {
+        // Windows' own default, in case PATHEXT is unset.
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        let exts: Vec<String> = pathext
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        for dir in std::env::split_paths(&path) {
+            for ext in &exts {
+                if dir.join(format!("{exe}{ext}")).is_file() {
+                    return true;
+                }
+            }
+            // A bare `gh` shim has no extension and so never matches PATHEXT.
+            if dir.join(exe).is_file() {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::split_paths(&path).any(|dir| {
+            let candidate = dir.join(exe);
+            candidate.is_file() && is_executable(&candidate)
+        })
+    }
+}
+
+/// Unix execute permission — Go `exec.LookPath` rejects a PATH hit whose
+/// mode has no execute bit, so a data file named `gh` must not count.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+// Only the Unix `on_path` branch calls this; on Windows the PATHEXT walk
+// makes it dead code.
+#[cfg(not(unix))]
+#[allow(dead_code)]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Go `CheckGHStatus` (github.go:68-101).

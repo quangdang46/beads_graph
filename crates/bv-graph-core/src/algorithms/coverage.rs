@@ -76,8 +76,14 @@ pub fn coverage_set(graph: &DiGraph, limit: usize) -> CoverageResult {
                 }
             }
 
-            // Count uncovered incoming edges (u -> v)
+            // Count uncovered incoming edges (u -> v). A self-loop (v, v)
+            // already appeared in the successor scan above — counting it
+            // again here would double-count the edge and could push
+            // coverage_ratio above 1.0.
             for &u in graph.predecessors_slice(v) {
+                if u == v {
+                    continue;
+                }
                 if !covered.contains(&(u, v)) {
                     count += 1;
                 }
@@ -95,9 +101,12 @@ pub fn coverage_set(graph: &DiGraph, limit: usize) -> CoverageResult {
                 for &w in graph.successors_slice(node) {
                     covered.insert((node, w));
                 }
-                // Mark edges as covered - incoming
+                // Mark edges as covered - incoming (self-loop already
+                // inserted by the outgoing pass; HashSet dedups anyway)
                 for &u in graph.predecessors_slice(node) {
-                    covered.insert((u, node));
+                    if u != node {
+                        covered.insert((u, node));
+                    }
                 }
 
                 selected.push(CoverageItem {
@@ -221,6 +230,19 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.edges_covered, 1);
         assert!((result.coverage_ratio - 1.0 / 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_self_loop_counted_once() {
+        // Self-loop (0, 0) appears in both successor and predecessor scans;
+        // it must be counted as ONE edge so coverage_ratio stays <= 1.0.
+        let g = make_graph(&[(0, 0)]);
+        let result = coverage_set(&g, 5);
+
+        assert_eq!(result.total_edges, 1);
+        assert_eq!(result.edges_covered, 1);
+        assert_eq!(result.coverage_ratio, 1.0);
+        assert!(result.coverage_ratio <= 1.0);
     }
 
     #[test]

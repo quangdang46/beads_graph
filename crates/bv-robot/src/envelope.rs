@@ -1,7 +1,7 @@
 //! RobotEnvelope + output encoding — port of Go `cmd/bv/main.go`
 //! envelope (lines 8177-8260) per api-freeze-v1.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const ROBOT_CONTRACT_VERSION: &str = "1.0.0";
 
@@ -63,8 +63,43 @@ pub struct RobotSourceAuthority {
     pub visible: usize,
     pub tombstones: usize,
     pub warning_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Go `Sources []RobotSourceReport `json:"sources"`` has NO omitempty:
+    /// a nil slice marshals as `"sources":null`. Go's reducer seeds the slice
+    /// with `append([]RobotSourceReport(nil), sources...)`, which stays nil
+    /// whenever the input is empty — Go therefore emits `null` for an empty
+    /// authority and never `[]`. `Vec` cannot distinguish nil from empty, but
+    /// the reducer's contract makes them equivalent (empty input ⟺ nil), so
+    /// the custom serializer emits `null` exactly when the Vec is empty.
+    #[serde(
+        default,
+        serialize_with = "serialize_sources_null_when_empty",
+        deserialize_with = "deserialize_sources_null_when_empty"
+    )]
     pub sources: Vec<RobotSourceReport>,
+    /// Go `Error string `json:"error,omitempty"`` (main.go:7267). Set by
+    /// callers on load-failure paths (main.go:2688, 3345) via
+    /// `bounded_source_message`, never inside `newRobotSourceAuthority`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+/// Serde glue for `RobotSourceAuthority::sources`: empty Vec → JSON `null`
+/// (Go's nil slice), non-empty → JSON array. See the field comment.
+fn serialize_sources_null_when_empty<S: Serializer>(
+    sources: &[RobotSourceReport],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if sources.is_empty() {
+        serializer.serialize_none()
+    } else {
+        serializer.collect_seq(sources)
+    }
+}
+
+fn deserialize_sources_null_when_empty<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<RobotSourceReport>, D::Error> {
+    Ok(Option::<Vec<RobotSourceReport>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Go `RobotScope` (cmd/bv/main.go:7418) — scoping flags in effect, plus the
@@ -168,23 +203,47 @@ impl RobotEnvelope {
     }
 }
 
-/// Go `encoding/json` HTML-escapes `<`, `>` and `&` by default;
+/// Go `encoding/json` HTML-escapes `<`, `>` and `&` by default, and also
+/// escapes U+2028/U+2029 (emitted as the UTF-8 sequences E2 80 A8 / E2 80 A9);
 /// `serde_json::to_vec` escapes none of them. Any path or label containing
 /// one of those bytes therefore hashes to a different digest than Go's, even
 /// though the emitted envelope body is escaped correctly elsewhere.
 ///
 /// `<`, `>` and `&` can only occur *inside* JSON string literals — never as
-/// JSON syntax — so rewriting the serialized bytes wholesale is exactly
-/// equivalent to escaping during serialization, and it cannot corrupt
+/// JSON syntax — and the E2 80 A8/A9 byte pairs are non-ASCII UTF-8, which
+/// JSON syntax never contains, so rewriting the serialized bytes wholesale is
+/// exactly equivalent to escaping during serialization, and it cannot corrupt
 /// structure the way a naive pre-serialization replace of the input could.
 fn go_html_escape_json(raw: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(raw.len());
-    for &b in raw {
-        match b {
-            b'<' => out.extend_from_slice(b"\\u003c"),
-            b'>' => out.extend_from_slice(b"\\u003e"),
-            b'&' => out.extend_from_slice(b"\\u0026"),
-            b => out.push(b),
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'<' => {
+                out.extend_from_slice(b"\\u003c");
+                i += 1;
+            }
+            b'>' => {
+                out.extend_from_slice(b"\\u003e");
+                i += 1;
+            }
+            b'&' => {
+                out.extend_from_slice(b"\\u0026");
+                i += 1;
+            }
+            // U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR.
+            0xE2 if raw[i..].starts_with(&[0xE2, 0x80, 0xA8]) => {
+                out.extend_from_slice(b"\\u2028");
+                i += 3;
+            }
+            0xE2 if raw[i..].starts_with(&[0xE2, 0x80, 0xA9]) => {
+                out.extend_from_slice(b"\\u2029");
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
         }
     }
     out
@@ -273,8 +332,13 @@ fn tru_path() -> Option<std::path::PathBuf> {
             if raw.is_empty() {
                 continue;
             }
-            // Go treats an explicitly configured but unusable value as a hard
-            // error rather than silently falling through to PATH.
+            // Go (toon-go `findTruCandidate`, toon.go:104-114) returns an
+            // error for an explicitly configured but unusable value rather
+            // than falling through to PATH; `Available()` then reports false
+            // and main.go downgrades `--format toon` to JSON with a warning.
+            // Returning `None` here reproduces exactly that: no PATH
+            // fallthrough, JSON downgrade — verified against toon-go
+            // v0.0.0-20260322013033-4564467a45fb.
             return is_toon_rust_binary(&resolve_candidate(raw)).then(|| raw.into());
         }
     }
@@ -379,7 +443,14 @@ pub fn encode_payload<T: Serialize>(
     // serde_json serializes struct fields in declaration order and maps in
     // insertion order only with preserve_order feature; payloads use structs,
     // so field order is stable. Compact form (no spaces) matches goldens.
-    let mut v = serde_json::to_vec(payload)?;
+    //
+    // Go emits every robot payload through `json.Encoder`/`json.Marshal`,
+    // which HTML-escape `<`, `>`, `&` and U+2028/U+2029 (golden proof:
+    // `\u003e` inside golden/medium_tree____robot_label_attention.json). The
+    // TOON path is unaffected semantically — Go feeds the same escaped JSON
+    // to `tru --encode` (toon-go `EncodeWithOptions` calls `json.Marshal`),
+    // and tru's JSON parser unescapes it identically.
+    let mut v = go_html_escape_json(&serde_json::to_vec(payload)?);
     if format == OutputFormat::Toon {
         // Fall back to the JSON bytes rather than failing the command: Go
         // degrades to JSON when `tru` is missing too (main.go:2040), and the
@@ -405,22 +476,51 @@ pub fn encode_toon(json: &[u8]) -> Result<Vec<u8>, String> {
 
     let path = tru_path().ok_or_else(|| "no toon encoder on PATH".to_string())?;
     let mut child = Command::new(&path)
+        // stderr is drained to null: `wait_with_output` reads stdout before
+        // stderr, so a chatty encoder filling a stderr pipe could deadlock
+        // the same way an undrained stdout pipe would.
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("spawning {}: {e}", path.display()))?;
 
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| "encoder stdin unavailable".to_string())?
-        .write_all(json)
-        .map_err(|e| format!("writing to {}: {e}", path.display()))?;
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            // Reap the child on this path too — dropping a `Child` without
+            // waiting leaves a zombie.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("encoder stdin unavailable".to_string());
+        }
+    };
+
+    // Write on a helper thread while `wait_with_output` drains stdout.
+    // Writing the whole document before reading (the previous shape) blocks
+    // forever once the payload exceeds the OS pipe buffer — xl `--robot-diff`
+    // payloads are ~765KB — because the child stops reading stdin as soon as
+    // its stdout pipe fills.
+    let payload = json.to_vec();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        stdin.write_all(&payload)?;
+        // Dropping stdin here closes the pipe so the encoder sees EOF.
+        Ok(())
+    });
 
     let out = child
         .wait_with_output()
         .map_err(|e| format!("running {}: {e}", path.display()))?;
+
+    // The child is always reaped by `wait_with_output` above, so no zombie
+    // leaks even when the write side failed (e.g. the encoder exited early
+    // and closed stdin — a broken pipe is reported, not hung on).
+    if let Err(e) = writer
+        .join()
+        .map_err(|_| "encoder stdin writer panicked".to_string())?
+    {
+        return Err(format!("writing to {}: {e}", path.display()));
+    }
     if !out.status.success() {
         return Err(format!("{} exited with {}", path.display(), out.status));
     }
@@ -477,6 +577,52 @@ mod tests {
         let d = s.find("data_hash").unwrap();
         assert!(g < d);
         assert!(s.ends_with("}\n"));
+    }
+
+    /// Go's `json.Encoder` HTML-escapes `<`, `>`, `&` (and U+2028/U+2029) in
+    /// emitted payloads — golden proof: `\u003e` inside
+    /// `golden/medium_tree____robot_label_attention.json`. serde_json leaves
+    /// them raw, so `encode_payload` must apply the same rewrite.
+    #[test]
+    fn json_payload_html_escapes_like_go() {
+        #[derive(Serialize)]
+        struct P {
+            note: String,
+        }
+        let bytes = encode_payload(
+            &P {
+                note: "a>b&c<d\u{2028}e\u{2029}f".into(),
+            },
+            OutputFormat::Json,
+        )
+        .unwrap();
+        let s = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            s,
+            "{\"note\":\"a\\u003eb\\u0026c\\u003cd\\u2028e\\u2029f\"}\n"
+        );
+        // And the escaped bytes must still parse back to the original string.
+        let parsed: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap();
+        assert_eq!(parsed["note"], "a>b&c<d\u{2028}e\u{2029}f");
+    }
+
+    /// Bytes that are not HTML-escapable must pass through untouched, so
+    /// ordinary payloads are byte-identical to before the fix.
+    #[test]
+    fn json_payload_without_html_bytes_is_unchanged() {
+        let bytes = encode_payload(
+            &Sample {
+                generated_at: "T".into(),
+                data_hash: "H".into(),
+                load_stats: None,
+            },
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "{\"generated_at\":\"T\",\"data_hash\":\"H\"}\n"
+        );
     }
 
     #[test]
@@ -543,6 +689,14 @@ mod hash_escaping_tests {
         assert_eq!(go_html_escape_json(raw), raw.to_vec());
     }
 
+    /// Go also escapes U+2028/U+2029 (UTF-8 E2 80 A8 / E2 80 A9) — the rewrite
+    /// must catch the multi-byte form, not just single-byte `<>&`.
+    #[test]
+    fn escaping_covers_u2028_u2029() {
+        let raw = "\"a\u{2028}b\u{2029}c\"".as_bytes().to_vec();
+        assert_eq!(go_html_escape_json(&raw), br#""a\u2028b\u2029c""#.to_vec());
+    }
+
     /// The rewrite is only sound because these bytes cannot appear as JSON
     /// syntax. Assert structure survives untouched.
     #[test]
@@ -603,8 +757,13 @@ pub fn new_source_authority(mut sources: Vec<RobotSourceReport>) -> RobotSourceA
         match source.status.as_str() {
             // A disabled source is not evidence about the workspace: it adds
             // nothing to any counter and cannot make the authority unsafe.
+            // Go still keeps it in `Sources` — the slice is seeded with every
+            // report up front (main.go:7284) and `continue` only skips the
+            // counter accumulation — so it appears on the wire and inside
+            // `authority_hash`.
             "disabled" => {
                 authority.disabled += 1;
+                authority.sources.push(source);
                 continue;
             }
             "loaded" => authority.loaded += 1,
@@ -702,6 +861,11 @@ mod source_authority_tests {
         assert_eq!(a.disabled, 1);
         assert_eq!(a.valid, 0, "disabled must not accumulate valid");
         assert_eq!(a.tombstones, 0);
+        // Go keeps the report in `Sources` (main.go:7284 seeds the slice with
+        // every input before the switch), so it reaches the wire bytes and
+        // `authority_hash` even though it adds no counters.
+        assert_eq!(a.sources.len(), 1);
+        assert_eq!(a.sources[0].status, "disabled");
         // Loaded == 0 forces the override, so claim_safe is false regardless.
         assert_eq!(a.state, "unknown");
         assert!(!a.claim_safe);
@@ -767,6 +931,54 @@ mod source_authority_tests {
         let out = bounded_source_message(&long);
         assert_eq!(out.chars().count(), 1025, "1024 runes plus the ellipsis");
         assert!(out.ends_with('…'));
+    }
+
+    /// Go's `Sources` field has no omitempty and its reducer leaves the slice
+    /// nil for empty input, so an empty authority marshals `"sources":null` —
+    /// never `[]` and never omitted (main.go:7250-7268, 7284).
+    #[test]
+    fn empty_sources_serializes_as_null_not_omitted() {
+        let a = new_source_authority(vec![]);
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("sources").is_some(), "sources key must be present");
+        assert!(
+            v["sources"].is_null(),
+            "empty sources must be null, got {v}"
+        );
+    }
+
+    /// A populated authority emits the array form, and the `error` field is
+    /// omitted while empty (Go `json:"error,omitempty"`).
+    #[test]
+    fn populated_sources_and_error_omitempty() {
+        let mut a = new_source_authority(vec![report("loaded")]);
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["sources"].as_array().unwrap().len(), 1);
+        assert!(v.get("error").is_none(), "empty error must be omitted");
+
+        a.error = bounded_source_message("load failed: disk on fire");
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["error"], "load failed: disk on fire");
+    }
+
+    /// `null` round-trips back to an empty Vec so envelopes captured from Go
+    /// (which emit `"sources":null") still deserialize.
+    #[test]
+    fn null_sources_deserializes_to_empty() {
+        let a: RobotSourceAuthority =
+            serde_json::from_str(r#"{"state":"unknown","claim_safe":false,"readiness":"provisional","loaded":0,"failed":0,"disabled":0,"valid":0,"errors":0,"skipped":0,"read_errors":0,"visible":0,"tombstones":0,"warning_count":0,"sources":null}"#)
+                .unwrap();
+        assert!(a.sources.is_empty());
+    }
+
+    /// Field order is contractual: Go declares `sources` then `error` last.
+    #[test]
+    fn authority_field_order_matches_go() {
+        let a = new_source_authority(vec![report("loaded")]);
+        let s = String::from_utf8(serde_json::to_vec(&a).unwrap()).unwrap();
+        let w = s.find("\"warning_count\"").unwrap();
+        let src = s.find("\"sources\"").unwrap();
+        assert!(w < src, "sources must follow warning_count: {s}");
     }
 
     /// The sort is part of the digest contract: discovery order must not leak

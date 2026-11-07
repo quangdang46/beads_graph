@@ -77,7 +77,14 @@ pub fn slack(graph: &DiGraph) -> Vec<f64> {
 }
 
 /// Get nodes with zero slack (on the critical path).
+///
+/// Returns empty for cyclic graphs: `slack` yields all zeros there, which
+/// would otherwise mark EVERY node as zero-slack. Mirrors the topo-order
+/// gate callers apply before trusting slack/critical-path metrics.
 pub fn zero_slack_nodes(graph: &DiGraph) -> Vec<usize> {
+    if topological_sort(graph).is_none() {
+        return Vec::new();
+    }
     let slacks = slack(graph);
     slacks
         .iter()
@@ -273,6 +280,21 @@ mod tests {
         assert!(critical.contains(&a));
         assert!(critical.contains(&b));
         assert!(critical.contains(&c));
+    }
+
+    #[test]
+    fn test_zero_slack_nodes_cyclic() {
+        // a -> b -> c -> a: all-zero slack must NOT mark every node as
+        // critical — a cyclic graph has no critical path.
+        let mut graph = DiGraph::new();
+        let a = graph.add_node("a");
+        let b = graph.add_node("b");
+        let c = graph.add_node("c");
+        graph.add_edge(a, b);
+        graph.add_edge(b, c);
+        graph.add_edge(c, a);
+
+        assert!(zero_slack_nodes(&graph).is_empty());
     }
 
     #[test]

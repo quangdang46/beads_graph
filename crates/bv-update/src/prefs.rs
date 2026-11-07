@@ -169,11 +169,18 @@ pub fn github_token() -> Option<String> {
 /// drop scheme, userinfo, port, and any query/fragment; strip IPv6 brackets.
 /// The `url` crate is not a workspace dependency, so this reproduces the two
 /// behaviours the updater actually relies on. Returns `None` for a URL with
-/// no authority component.
+/// no authority component — a schemeless input like `github.com/x` parses in
+/// Go as a bare path with an empty `Host`, so it yields no hostname either.
 pub fn url_hostname(raw: &str) -> Option<String> {
-    let after_scheme = match raw.find("://") {
-        Some(i) => &raw[i + 3..],
-        None => raw,
+    // Go `url.Parse` only populates `Host` when the input carries an
+    // authority: either a leading `//` (scheme-relative) or `scheme://`.
+    // Anything else — `github.com/x`, `mailto:a@b`, `not a url` — is a path
+    // or opaque value with `Host == ""`.
+    let after_scheme = if let Some(rest) = raw.strip_prefix("//") {
+        rest
+    } else {
+        let i = raw.find("://")?;
+        &raw[i + 3..]
     };
     let authority_end = after_scheme
         .find(['/', '?', '#'])
@@ -473,6 +480,27 @@ mod tests {
             url_hostname("https://[2001:db8::1]:443/x").as_deref(),
             Some("2001:db8::1")
         );
+        // A scheme-relative authority still counts, as in Go `url.Parse`.
+        assert_eq!(
+            url_hostname("//api.github.com/x").as_deref(),
+            Some("api.github.com")
+        );
         assert_eq!(url_hostname("https://").as_deref(), None);
+    }
+
+    #[test]
+    fn url_hostname_requires_an_authority_component() {
+        // Go `url.Parse` treats these as paths/opaque values with an empty
+        // `Host`, so `Hostname()` is "" — never a GitHub host.
+        for raw in [
+            "github.com/x",
+            "api.github.com",
+            "github.com:443/x",
+            "mailto:a@github.com",
+            "not a url at all",
+        ] {
+            assert_eq!(url_hostname(raw), None, "{raw:?} has no authority");
+            assert!(!is_github_host(raw), "{raw:?} must not be a GitHub host");
+        }
     }
 }

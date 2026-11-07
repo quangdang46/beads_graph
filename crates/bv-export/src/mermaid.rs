@@ -191,7 +191,10 @@ pub fn generate_mermaid_with_config(issues: &[Issue], config: MermaidConfig) -> 
 pub fn generate_markdown(issues: &[Issue], title: &str) -> String {
     let mut sb = String::new();
     let _ = writeln!(sb, "# {title}\n");
-    let now = jiff::Timestamp::now();
+    // Honour SOURCE_DATE_EPOCH the same way the full report writer does
+    // (`ReportOptions::generated_at`), so a pinned clock reproduces byte for
+    // byte instead of stamping the wall clock.
+    let now = report_now();
     let _ = writeln!(sb, "_Generated {}_\n", now);
 
     // Summary table.
@@ -230,8 +233,16 @@ pub fn generate_markdown(issues: &[Issue], title: &str) -> String {
 
     for i in &sorted {
         let slug = slugify(&i.id);
-        let _ = write!(sb, "\n### {} {}\n\n", i.id, sanitize_mermaid_text(&i.title));
-        let _ = writeln!(
+        // The TOC links to `#slug`; without the anchor element the jump has
+        // nowhere to land.
+        let _ = write!(
+            sb,
+            "\n<a id=\"{slug}\"></a>\n### {} {}\n\n",
+            i.id,
+            sanitize_mermaid_text(&i.title)
+        );
+        let _ =
+            writeln!(
             sb,
             "| Field | Value |\n|---|---|\n| Status | {} |\n| Priority | P{} |\n| Type | {} |{}",
             i.status.as_str(),
@@ -240,7 +251,7 @@ pub fn generate_markdown(issues: &[Issue], title: &str) -> String {
             if i.assignee.is_empty() {
                 String::new()
             } else {
-                format!("\n| Assignee | {} |", i.assignee)
+                format!("\n| Assignee | {} |", crate::markdown::table_cell(&i.assignee))
             }
         );
         if !i.description.is_empty() {
@@ -249,9 +260,25 @@ pub fn generate_markdown(issues: &[Issue], title: &str) -> String {
             sb.push('\n');
         }
         let _ = writeln!(sb, "\n[Back to top](#table-of-contents)");
-        let _ = slug;
     }
     sb
+}
+
+/// The report clock: `SOURCE_DATE_EPOCH` when the reproducible-build variable
+/// is set, the wall clock otherwise — the same rule
+/// [`crate::markdown::ReportOptions::generated_at`] applies.
+fn report_now() -> jiff::Timestamp {
+    if bv_analysis::analyzer::source_date_epoch_active() {
+        jiff::Timestamp::from_second(
+            std::env::var("SOURCE_DATE_EPOCH")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0),
+        )
+        .unwrap_or_else(|_| jiff::Timestamp::now())
+    } else {
+        jiff::Timestamp::now()
+    }
 }
 
 fn slugify(id: &str) -> String {

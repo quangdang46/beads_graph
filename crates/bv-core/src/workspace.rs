@@ -272,6 +272,14 @@ pub fn discover_repos(config: &WorkspaceConfig, root: &Path) -> Vec<RepoConfig> 
     found
 }
 
+/// Identity key for repo dedupe in [`load_all`]: the canonical path of
+/// `root.join(repo.path)`, falling back to the joined path when the directory
+/// does not exist (canonicalize fails) so literal duplicates still match.
+fn repo_key(root: &Path, repo: &RepoConfig) -> PathBuf {
+    let joined = root.join(&repo.path);
+    std::fs::canonicalize(&joined).unwrap_or(joined)
+}
+
 /// Load all enabled repos and merge issues with prefixed IDs (Go AggregateLoader.LoadAll).
 /// Returns merged issues plus per-repo results.
 pub fn load_all(
@@ -284,7 +292,18 @@ pub fn load_all(
         .filter(|r| r.is_enabled())
         .cloned()
         .collect();
-    repos.extend(discover_repos(config, root));
+    // Dedupe discovered repos against the configured ones by canonical path:
+    // a repo listed in `repos:` that discovery also finds would otherwise be
+    // loaded twice, duplicating every issue and inflating counts. Canonical
+    // paths absorb `./x`, `x/`, symlinked and case-variant spellings of the
+    // same directory; a repo that does not exist on disk falls back to its
+    // joined path so exact duplicates still collapse.
+    let mut seen: HashSet<PathBuf> = repos.iter().map(|r| repo_key(root, r)).collect();
+    for discovered in discover_repos(config, root) {
+        if seen.insert(repo_key(root, &discovered)) {
+            repos.push(discovered);
+        }
+    }
     if repos.is_empty() {
         return Err("no enabled repositories in workspace".into());
     }
@@ -649,6 +668,43 @@ mod aggregate_tests {
             defaults: None,
         };
         assert!(load_all(&config, &dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repo listed in `repos:` that discovery also finds must load once:
+    /// before dedupe it contributed its issues twice.
+    #[test]
+    fn load_all_dedupes_config_repo_against_discovery() {
+        let dir = std::env::temp_dir().join(format!("bvr_ws_dedupe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let beads = dir.join("api").join(".beads");
+        std::fs::create_dir_all(&beads).unwrap();
+        std::fs::write(
+            beads.join("issues.jsonl"),
+            "{\"id\":\"A-1\",\"title\":\"T\",\"status\":\"open\",\"priority\":1,\"issue_type\":\"task\",\"dependencies\":[]}\n",
+        )
+        .unwrap();
+        let config = WorkspaceConfig {
+            name: None,
+            repos: vec![RepoConfig {
+                name: None,
+                // `./api` vs discovered `api` — same canonical directory.
+                path: "./api".into(),
+                prefix: None,
+                beads_path: None,
+                enabled: None,
+            }],
+            discovery: Some(DiscoveryConfig {
+                enabled: true,
+                patterns: default_patterns(),
+                exclude: default_exclude(),
+                max_depth: 2,
+            }),
+            defaults: None,
+        };
+        let (issues, results) = load_all(&config, &dir).expect("load_all");
+        assert_eq!(issues.len(), 1, "repo must not load twice: {issues:?}");
+        assert_eq!(results.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

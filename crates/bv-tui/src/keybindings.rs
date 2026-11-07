@@ -84,8 +84,8 @@ pub fn build_default_registry() -> KeyRegistry {
     for (key, desc) in [
         ("j/↓", "Move down"),
         ("k/↑", "Move up"),
-        ("ctrl+d", "Page down (half-screen)"),
-        ("ctrl+u", "Page up (half-screen)"),
+        ("ctrl+d", "Page down (third-screen, Go model.go:6088)"),
+        ("ctrl+u", "Page up (third-screen, Go model.go:6099)"),
         ("enter", "Toggle detail pane"),
         ("tab", "Focus detail pane"),
         (

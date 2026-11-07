@@ -408,7 +408,10 @@ fn priority_label(priority: i32) -> String {
 
 /// Newlines become spaces, carriage returns are dropped, and pipes are escaped
 /// so a value cannot break out of the surrounding table cell.
-fn table_cell(value: &str) -> String {
+///
+/// `pub(crate)` because [`crate::mermaid::generate_markdown`] writes the same
+/// kind of table and must escape identically.
+pub(crate) fn table_cell(value: &str) -> String {
     value
         .replace('\n', " ")
         .replace('\r', "")

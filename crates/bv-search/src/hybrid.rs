@@ -72,6 +72,30 @@ pub const PRESETS: &[(&str, Weights)] = &[
     ),
 ];
 
+impl Weights {
+    /// Go `Weights.Normalize` (weights.go): scale every component by `1/sum`
+    /// in Go's field order; a zero sum returns the weights unchanged.
+    pub fn normalized(self) -> Self {
+        let sum = self.text_relevance
+            + self.pagerank
+            + self.status
+            + self.impact
+            + self.priority
+            + self.recency;
+        if sum == 0.0 {
+            return self;
+        }
+        Weights {
+            text_relevance: self.text_relevance / sum,
+            pagerank: self.pagerank / sum,
+            status: self.status / sum,
+            impact: self.impact / sum,
+            priority: self.priority / sum,
+            recency: self.recency / sum,
+        }
+    }
+}
+
 /// Get preset weights by name.
 pub fn get_preset(name: &str) -> Option<Weights> {
     PRESETS.iter().find(|(n, _)| *n == name).map(|(_, w)| *w)

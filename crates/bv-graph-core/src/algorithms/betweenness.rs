@@ -52,6 +52,12 @@ pub fn betweenness_approx(graph: &DiGraph, sample_size: usize, seed: Option<u64>
         return Vec::new();
     }
 
+    // Go clamps sampleSize to [1, n] before anything else
+    // (betweenness_approx.go:289-291) — a zero request must not reach the
+    // `n / sample_size` scale below, which would be +Inf and turn every
+    // zero partial score into NaN.
+    let sample_size = sample_size.max(1);
+
     // For small graphs or when sample size >= node count, use exact algorithm
     if sample_size >= n {
         return betweenness(graph);
@@ -341,6 +347,23 @@ mod tests {
         assert!(bc[c] >= bc[d]);
         assert_eq!(bc[a], 0.0);
         assert_eq!(bc[e], 0.0);
+    }
+
+    #[test]
+    fn test_betweenness_approx_zero_sample() {
+        // sample_size == 0 must clamp to 1 pivot (Go betweenness_approx.go:290),
+        // not produce n/0 = +Inf scaling and NaN scores.
+        let mut graph = DiGraph::new();
+        for i in 0..10 {
+            graph.add_node(&format!("n{}", i));
+        }
+        for i in 0..9 {
+            graph.add_edge(i, i + 1);
+        }
+
+        let bc = betweenness_approx(&graph, 0, Some(7));
+        assert_eq!(bc.len(), 10);
+        assert!(bc.iter().all(|s| s.is_finite()));
     }
 
     #[test]

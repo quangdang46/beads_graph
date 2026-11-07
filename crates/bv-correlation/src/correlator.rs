@@ -114,7 +114,13 @@ pub fn correlate(
     // Go `NewExplicitMatcher` reads `DefaultPatterns()` — built-ins plus
     // whatever `--id-pattern` registered (#188).
     let patterns = IdPatterns::with_custom(crate::explicit::custom_id_patterns());
-    let by_id: BTreeMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    // `find_mentions` emits `normalize_bead_id`-folded IDs, so the lookup keys
+    // fold the same way — "fixes BV-123" must still hit issue "bv-123" (and a
+    // mixed-case issue ID) instead of silently missing.
+    let by_id: BTreeMap<String, &Issue> = issues
+        .iter()
+        .map(|i| (crate::history::normalize_bead_id(&i.id), i))
+        .collect();
     let mut report: BTreeMap<String, Vec<CorrelatedCommit>> = BTreeMap::new();
 
     for commit in commits {
@@ -123,7 +129,7 @@ pub fn correlate(
         let mentioned_ids: std::collections::BTreeSet<&str> =
             mentions.iter().map(|m| m.bead_id.as_str()).collect();
         for bead_id in &mentioned_ids {
-            let Some(issue) = by_id.get(bead_id) else {
+            let Some(issue) = by_id.get(*bead_id) else {
                 continue;
             };
             let kind = mentions
@@ -153,7 +159,7 @@ pub fn correlate(
             continue;
         };
         for issue in issues {
-            if mentioned_ids.contains(issue.id.as_str()) {
+            if mentioned_ids.contains(crate::history::normalize_bead_id(&issue.id).as_str()) {
                 continue;
             }
             if issue.assignee.is_empty()

@@ -272,7 +272,12 @@ impl<'a> SqliteExporter<'a> {
             return Err(e);
         }
 
-        fs::rename(&scratch_db, &db_path).map_err(SqliteExportError::Publish)?;
+        if let Err(e) = fs::rename(&scratch_db, &db_path) {
+            // The publish failed, so the scratch tree is the only copy of the
+            // database — drop it rather than leak a `.beads-*` directory.
+            let _ = fs::remove_dir_all(&scratch);
+            return Err(SqliteExportError::Publish(e));
+        }
         let _ = fs::remove_dir_all(&scratch);
         Ok(db_path)
     }
@@ -350,7 +355,7 @@ impl<'a> SqliteExporter<'a> {
             for dep in self.deps {
                 stmt.execute(params![
                     dep.issue_id,
-                    dep.depends_on_id,
+                    dep.effective_depends_on(),
                     dep.r#type.as_str()
                 ])?;
             }
@@ -416,12 +421,13 @@ impl<'a> SqliteExporter<'a> {
             if !dep.r#type.is_blocking() {
                 continue;
             }
-            // `dep.issue_id` depends on `dep.depends_on_id`, so
-            // `depends_on_id` blocks `issue_id`.
-            if !is_active_counterpart(&dep.depends_on_id) || !is_active_counterpart(&dep.issue_id) {
+            // `dep.issue_id` depends on the dep's target, so the target
+            // blocks `issue_id`.
+            let target = dep.effective_depends_on();
+            if !is_active_counterpart(target) || !is_active_counterpart(&dep.issue_id) {
                 continue;
             }
-            *blocks_count.entry(dep.depends_on_id.as_str()).or_default() += 1;
+            *blocks_count.entry(target).or_default() += 1;
             *blocked_by_count.entry(dep.issue_id.as_str()).or_default() += 1;
         }
 
@@ -539,13 +545,21 @@ impl<'a> SqliteExporter<'a> {
             let mut deps: Vec<(String, String)> = issue
                 .dependencies
                 .iter()
-                .map(|d| (d.depends_on_id.clone(), d.r#type.as_str().to_string()))
+                .map(|d| {
+                    (
+                        d.effective_depends_on().to_string(),
+                        d.r#type.as_str().to_string(),
+                    )
+                })
                 .collect();
             // The visible slice is a filter of the same source, so a dep owned
             // by a filtered-out issue is not lost: rebuild from `self.deps`.
             for dep in self.deps {
                 if dep.issue_id == issue.id {
-                    deps.push((dep.depends_on_id.clone(), dep.r#type.as_str().to_string()));
+                    deps.push((
+                        dep.effective_depends_on().to_string(),
+                        dep.r#type.as_str().to_string(),
+                    ));
                 }
             }
             source.push(ReadinessIssue {
@@ -661,7 +675,14 @@ impl<'a> SqliteExporter<'a> {
             remove_chunk_artifacts(&chunks_dir);
         } else {
             fs::create_dir_all(&chunks_dir)?;
-            let chunk_size = self.config.chunk_size.max(1) as usize;
+            // A zero `chunk_size` would make `chunks(1)` emit one-byte files;
+            // treat it as "unset" and fall back to the default, the same way
+            // an absent config does.
+            let chunk_size = if self.config.chunk_size == 0 {
+                SqliteExportConfig::default().chunk_size
+            } else {
+                self.config.chunk_size
+            } as usize;
             let mut chunk_count = 0usize;
             for (i, chunk) in db_bytes.chunks(chunk_size).enumerate() {
                 let name = format!("{i:05}.bin");
@@ -672,7 +693,7 @@ impl<'a> SqliteExporter<'a> {
 
             config.chunked = true;
             config.chunk_count = chunk_count as i64;
-            config.chunk_size = self.config.chunk_size as i64;
+            config.chunk_size = chunk_size as i64;
             for i in 0..chunk_count {
                 let data = fs::read(chunks_dir.join(format!("{i:05}.bin")))?;
                 config.chunks.push(ChunkInfo {

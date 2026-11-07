@@ -111,10 +111,13 @@ pub fn compute_actionable(issues: &[Issue]) -> Vec<ActionableItem> {
                 })
             })
             .count();
+        // Issues this one blocks: `dependent_count` counts issues whose
+        // `Blocks` dependency points AT `issue.id`, i.e. issues waiting on
+        // this one — so this issue *blocks* them, it is not "blocked by".
         if dependent_count >= 3 {
             items.push(ActionableItem {
                 issue: issue.clone(),
-                reason: format!("Blocked by {dependent_count} issues"),
+                reason: format!("Blocks {dependent_count} issues"),
                 urgency: Urgency::Medium,
             });
             continue;

@@ -610,19 +610,32 @@ impl<'a> Readiness<'a> {
         }
         let mut states = std::collections::HashMap::new();
         let mut visiting = std::collections::BTreeSet::new();
-        self.visit(key, completed, &mut states, &mut visiting) == DepState::Satisfied
+        self.visit(key, completed, &mut states, &mut visiting, 0) == DepState::Satisfied
     }
+
+    /// Bound on `visit` recursion. Go's goroutine stacks grow dynamically, so
+    /// the upstream closure has no explicit cap; Rust runs on fixed-size
+    /// thread stacks, and a parent-child chain deeper than this would
+    /// overflow before finishing. 4096 frames is far beyond any realistic
+    /// issue hierarchy yet stays well inside a 2 MiB worker stack.
+    const VISIT_MAX_DEPTH: usize = 4096;
 
     /// Go's inner `visit` closure (readiness.go:234-261). Recursion depth is
     /// bounded by the parent-child chain; a cycle resolves to `Unknown`, which
-    /// withholds readiness rather than looping.
+    /// withholds readiness rather than looping. Hitting `VISIT_MAX_DEPTH`
+    /// also resolves to `Unknown` — conservative, matching how cycles and
+    /// missing targets withhold readiness.
     fn visit(
         &self,
         id: &'a str,
         completed: &std::collections::BTreeSet<String>,
         states: &mut std::collections::HashMap<&'a str, DepState>,
         visiting: &mut std::collections::BTreeSet<&'a str>,
+        depth: usize,
     ) -> DepState {
+        if depth > Self::VISIT_MAX_DEPTH {
+            return DepState::Unknown;
+        }
         let Some(issue) = self.issues.get(id) else {
             return DepState::Unknown;
         };
@@ -647,7 +660,10 @@ impl<'a> Readiness<'a> {
                     Some(_) => {}
                 }
             } else if *ty == bv_core::model::DependencyType::ParentChild {
-                state = combine(state, self.visit(target, completed, states, visiting));
+                state = combine(
+                    state,
+                    self.visit(target, completed, states, visiting, depth + 1),
+                );
             }
         }
         visiting.remove(id);
@@ -695,10 +711,36 @@ pub struct TriageOutput {
 }
 
 /// Parse YYYY-MM-DDTHH:MM:SS from an RFC3339 timestamp string.
+///
+/// Byte-slice indexing (`s[0..4]`) panics on inputs shorter than 10 bytes or
+/// containing multi-byte characters before the date fields; Go's
+/// `time.Parse` simply fails and the caller skips the bucket. `get` returns
+/// `None` on a non-char-boundary and the digit `parse` rejects anything that
+/// is not ASCII, so malformed input lands on `None` the same way.
 fn parse_ymd(s: &str) -> Option<(i32, u32, u32)> {
-    let y: i32 = s[0..4].parse().ok()?;
-    let m: u32 = s[5..7].parse().ok()?;
-    let d: u32 = s[8..10].parse().ok()?;
+    let b = s.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i32 = s.get(0..4)?.parse().ok()?;
+    let m: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    // Go `time.Parse` validates the calendar date, not just the digits:
+    // month 1-12 and a day that exists in that month (leap years included).
+    if !(1..=12).contains(&m) {
+        return None;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let dim = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=dim).contains(&d) {
+        return None;
+    }
     Some((y, m, d))
 }
 
@@ -1381,51 +1423,108 @@ fn build_triage_inner(
     let max_unblocks = unblocks_map.values().map(|v| v.len()).max().unwrap_or(0);
 
     /// Go `getBlockerDepthRecursive` (triage.go:1440-1470): the length of the
-    /// longest chain of open blockers above this issue. Returns -1 on a cycle, and
-    /// memoizes the result so a wide graph stays linear.
-    fn blocker_depth_recursive(
-        issue_id: &str,
-        issues: &[Issue],
-        visited: &mut std::collections::BTreeSet<String>,
+    /// longest chain of open blockers above this issue. Returns -1 on a cycle,
+    /// and memoizes the result so a wide graph stays linear.
+    ///
+    /// The open-blocker set is `Readiness::blockers` — the same authority the
+    /// unblocks map and `BlockedBy` use — NOT a raw `is_blocking` scan: it
+    /// keeps blockers absent from the source, counts `parent-child` parents
+    /// whose own state is unresolved, and treats tombstones as closed. The
+    /// earlier hand-rolled filter required the target to exist *and* be
+    /// `is_open()`, which dropped `in_progress`-adjacent states Go counts and
+    /// ignored the parent rollup entirely.
+    ///
+    /// Iterative, not recursive: this runs once per scored issue, so a deep
+    /// dependency chain would put O(chain) frames on the stack per call.
+    /// The explicit stack below reproduces the recursive semantics exactly —
+    /// `path` is the recursion's `visited` set (cycle -> -1 propagates to the
+    /// root without memoizing), `memo` caches only fully-resolved depths.
+    fn blocker_depth(
+        root: &str,
+        readiness: &Readiness<'_>,
         memo: &mut BTreeMap<String, i64>,
     ) -> i64 {
-        if let Some(val) = memo.get(issue_id) {
-            return *val;
+        struct Frame {
+            id: String,
+            blockers: Vec<String>,
+            next: usize,
+            max: i64,
         }
-        if !visited.insert(issue_id.to_string()) {
-            return -1; // cycle
+
+        if let Some(&v) = memo.get(root) {
+            return v;
         }
-        let open_blockers: Vec<String> = issues
-            .iter()
-            .find(|i| i.id == issue_id)
-            .map(|i| {
-                i.dependencies
-                    .iter()
-                    .filter(|d| d.r#type.is_blocking())
-                    .map(|d| d.effective_depends_on().to_string())
-                    .filter(|bid| {
-                        !bid.is_empty() && issues.iter().any(|o| o.id == *bid && o.status.is_open())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if open_blockers.is_empty() {
-            visited.remove(issue_id);
-            memo.insert(issue_id.to_string(), 0);
-            return 0;
-        }
-        let mut max_chain = 0i64;
-        for blocker_id in &open_blockers {
-            let depth = blocker_depth_recursive(blocker_id, issues, visited, memo);
-            if depth == -1 {
-                visited.remove(issue_id);
-                return -1;
+        // `path` mirrors the recursive `visited`: ids on the current DFS
+        // stack. The root cannot already be on it (fresh set per call).
+        let mut path: std::collections::BTreeSet<String> = Default::default();
+        path.insert(root.to_string());
+        let mut stack: Vec<Frame> = vec![Frame {
+            id: root.to_string(),
+            blockers: readiness.blockers(root),
+            next: 0,
+            max: 0,
+        }];
+        // Value returned by the innermost completed call, delivered to its
+        // caller on the next iteration — the recursion's return channel.
+        let mut ret: Option<i64> = None;
+
+        loop {
+            if let Some(v) = ret.take() {
+                let Some(top) = stack.last_mut() else {
+                    // The root frame itself resolved (or the -1 unwound past
+                    // it): this is the function's return value.
+                    return v;
+                };
+                if v == -1 {
+                    // Recursive parity: the parent drops itself from
+                    // `visited` and returns -1 WITHOUT memoizing, abandoning
+                    // its remaining children.
+                    let id = top.id.clone();
+                    stack.pop();
+                    path.remove(&id);
+                    ret = Some(-1);
+                    continue;
+                }
+                if v > top.max {
+                    top.max = v;
+                }
+                continue;
             }
-            max_chain = max_chain.max(depth);
+
+            let top = stack.last_mut().expect("stack non-empty while resolving");
+            if top.next < top.blockers.len() {
+                let child = top.blockers[top.next].clone();
+                top.next += 1;
+                // Function-entry order: memo first, then the cycle check.
+                if let Some(&m) = memo.get(&child) {
+                    ret = Some(m);
+                    continue;
+                }
+                if path.contains(&child) {
+                    ret = Some(-1);
+                    continue;
+                }
+                path.insert(child.clone());
+                stack.push(Frame {
+                    id: child.clone(),
+                    blockers: readiness.blockers(&child),
+                    next: 0,
+                    max: 0,
+                });
+            } else {
+                // All children resolved: leaf -> 0, otherwise max + 1 —
+                // matching the recursive base case and fold exactly.
+                let done = stack.pop().expect("non-empty");
+                path.remove(&done.id);
+                let val = if done.blockers.is_empty() {
+                    0
+                } else {
+                    done.max + 1
+                };
+                memo.insert(done.id, val);
+                ret = Some(val);
+            }
         }
-        visited.remove(issue_id);
-        memo.insert(issue_id.to_string(), max_chain + 1);
-        max_chain + 1
     }
 
     // 2. Compute blocker depths. Go `getBlockerDepthRecursive` (triage.go:1440)
@@ -1456,9 +1555,8 @@ fn build_triage_inner(
         if matches!(issue.status, Status::Closed | Status::Tombstone) {
             continue;
         }
-        let mut visited: std::collections::BTreeSet<String> = Default::default();
         let mut memo: BTreeMap<String, i64> = BTreeMap::new();
-        let depth = blocker_depth_recursive(&issue.id, issues, &mut visited, &mut memo);
+        let depth = blocker_depth(&issue.id, readiness, &mut memo);
         blocker_depths.insert(issue.id.clone(), depth);
     }
 
@@ -1955,5 +2053,33 @@ mod tests {
             unblocks_of("B-1").is_empty() && unblocks_of("B-2").is_empty(),
             "an issue with two open blockers is credited to neither"
         );
+    }
+
+    /// `parse_ymd` feeds the ISO-week bucketing in `compute_project_velocity`.
+    /// It used to byte-slice `s[0..4]`/`s[5..7]`/`s[8..10]`, which panics on a
+    /// short string or a multi-byte character before the date fields; Go's
+    /// `time.Parse` fails and the bucket is skipped. Every malformed shape
+    /// below must return `None`, never panic.
+    #[test]
+    fn parse_ymd_rejects_malformed_without_panicking() {
+        assert_eq!(parse_ymd("2026-08-22T14:06:52Z"), Some((2026, 8, 22)));
+        assert_eq!(parse_ymd("2026-08-22"), Some((2026, 8, 22)));
+        for bad in [
+            "",
+            "202",
+            "2026",
+            "２０２６-01-01T00:00:00Z", // multi-byte digits before the slices
+            "2026/08/22T00:00:00Z",     // wrong separators
+            "abcd-ef-gh",
+            "2026-13-01", // month out of range
+            "2026-02-30", // day does not exist
+            "2026-00-10",
+            "2026-04-31",
+        ] {
+            assert_eq!(parse_ymd(bad), None, "{bad:?} must not parse");
+        }
+        // Leap-day rules match Go time.Parse: 2024 is a leap year, 2026 is not.
+        assert_eq!(parse_ymd("2024-02-29"), Some((2024, 2, 29)));
+        assert_eq!(parse_ymd("2026-02-29"), None);
     }
 }

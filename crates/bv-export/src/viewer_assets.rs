@@ -259,7 +259,14 @@ fn collect_tree(
     for entry in walk {
         let entry = entry.map_err(|e| format!("walking {}: {e}", dir.display()))?;
         let path = entry.path();
-        if path.is_dir() {
+        // `file_type` does not follow symlinks, matching `filepath.WalkDir`:
+        // a symlinked directory is a leaf entry here, never descended into —
+        // `Path::is_dir` would follow the link and could walk outside `dir`.
+        let is_dir = entry
+            .file_type()
+            .map(|t| t.is_dir())
+            .unwrap_or_else(|_| path.is_dir());
+        if is_dir {
             collect_tree(&path, out_dir, entries)?;
             continue;
         }

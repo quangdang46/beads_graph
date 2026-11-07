@@ -134,6 +134,9 @@ pub fn issue_repo_key(id: &str, source_repo: &str) -> Option<String> {
     if let Some(key) = normalize_repo_key(source_repo) {
         return Some(key);
     }
+    // Go `ExtractRepoPrefix` (`pkg/ui/item.go:98`): try each separator in
+    // order; an invalid prefix for one separator does NOT stop the scan —
+    // the next separator type is still tried (earliest-valid semantics).
     for sep in ['-', ':', '_'] {
         if let Some(idx) = id.find(sep) {
             if idx > 0 {
@@ -145,11 +148,18 @@ pub fn issue_repo_key(id: &str, source_repo: &str) -> Option<String> {
                     return Some(prefix.to_lowercase());
                 }
             }
-            break;
         }
     }
     None
 }
+
+/// Payload of the background Time-Travel load channel:
+/// `(generation, git_ref, issues-at-ref-or-error)`.
+pub type TimeTravelLoad = (u64, String, Result<Vec<bv_core::model::Issue>, String>);
+
+/// Payload of the background cass lookup channel:
+/// `(generation, bead_id, sessions, keywords)`.
+pub type CassLookup = (u64, String, Vec<crate::cass::ScoredSession>, Vec<String>);
 
 /// Application state (Elm model).
 /// Stores computed graph metrics for rendering views.
@@ -390,6 +400,17 @@ pub struct App {
     /// Cursor over the flattened Time-Travel diff entry list
     /// (added, then removed, then changed).
     pub time_travel_cursor: usize,
+    /// Background `GitLoader::load_at` walk for Time-Travel. Go runs
+    /// `enterTimeTravelMode` synchronously inside Update; this port moves
+    /// the git subprocess off the UI thread — same std::thread +
+    /// crossbeam-channel pattern as the History walk — so a slow/hung git
+    /// can't freeze key handling. `poll_time_travel_load` drains it on the
+    /// run loop's tick. Payload: [`TimeTravelLoad`].
+    pub time_travel_rx: Option<crossbeam_channel::Receiver<TimeTravelLoad>>,
+    /// A Time-Travel load is in flight (status bar shows "loading…").
+    pub time_travel_loading: bool,
+    /// Fences stale completions, same pattern as `history_generation`.
+    pub time_travel_generation: u64,
     /// Per-label health dashboard (Go `focusLabelDashboard`), lazy-loaded
     /// on first `[` press like History (deferred analysis cost).
     pub label_health: Option<bv_analysis::label_health::LabelAnalysisResult>,
@@ -485,6 +506,17 @@ pub struct App {
     /// cass CLI availability cache
     cass_available: bool,
     cass_cache: std::collections::HashMap<String, usize>,
+    /// Go `m.cassRequest` + `cassSessionsLoadedMsg` (model.go:9582-9619):
+    /// `V` queues a background `cass::correlate` — "queues a lookup without
+    /// running external processes in Update" — instead of blocking the UI
+    /// thread for up to ~9s (3 strategies × 3s bound). `poll_cass_load`
+    /// drains the channel on the run loop's tick, like `poll_history_load`.
+    /// Payload: [`CassLookup`].
+    pub cass_lookup_rx: Option<crossbeam_channel::Receiver<CassLookup>>,
+    /// Bead id the in-flight lookup is for (Go `request.beadID`).
+    pub cass_lookup_bead: Option<String>,
+    /// Fences stale completions, same pattern as `history_generation`.
+    pub cass_lookup_generation: u64,
     /// Actionable items state (lazy-built on first `F`, like History).
     pub actionable: Option<crate::actionable::ActionableState>,
     /// Tutorial state.
@@ -600,14 +632,35 @@ fn dataset_warning_for(total: usize) -> Option<String> {
 }
 
 /// Check whether the cass CLI is on PATH (Go cass.Detector).
+///
+/// Uses `std::env::split_paths` so the PATH separator is platform-correct
+/// (`;` on Windows, `:` elsewhere) — a literal `':'` split never finds cass
+/// on Windows. Also requires the file to be executable (mode bits on Unix;
+/// `is_file` elsewhere — PATHEXT resolution is left to `Command`).
 fn cass_installed() -> bool {
-    std::env::var("PATH")
-        .map(|paths| {
-            paths
-                .split(':')
-                .any(|dir| std::path::Path::new(dir).join("cass").is_file())
-        })
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        ["cass", "cass.exe"]
+            .iter()
+            .map(|name| dir.join(name))
+            .any(|candidate| is_executable_file(&candidate))
+    })
+}
+
+/// Best-effort executability check for a PATH candidate.
+#[cfg(unix)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// Acquire the instance lock in .beads/.bv.lock (Go instance.NewLock, bv-vrvn).
@@ -985,6 +1038,9 @@ impl App {
             time_travel_result: None,
             time_travel_error: None,
             time_travel_cursor: 0,
+            time_travel_rx: None,
+            time_travel_loading: false,
+            time_travel_generation: 0,
             show_update_modal: false,
             update_modal_auto_shown: false,
             show_priority_hints: false,
@@ -1035,6 +1091,9 @@ impl App {
             cass_modal: None,
             cass_available: cass_installed(),
             cass_cache: std::collections::HashMap::new(),
+            cass_lookup_rx: None,
+            cass_lookup_bead: None,
+            cass_lookup_generation: 0,
             actionable: None,
             tutorial: Some(crate::tutorial::TutorialState::new()),
             board_mode: crate::views::board::SwimlaneMode::Status,
@@ -1126,38 +1185,78 @@ impl App {
         self.reload_from_disk();
         true
     }
-    pub fn apply_filter(&mut self) {
-        let label_filter = self.label_filter.clone();
-        let active_repo = self.active_repo.clone();
-        self.filtered_indices = (0..self.rows.len())
-            .filter(|&i| {
-                let r = &self.rows[i];
-                let mode_ok = match self.filter_mode {
-                    FilterMode::All => true,
-                    FilterMode::Open => matches!(r.status, Status::Open | Status::InProgress),
-                    FilterMode::Closed => r.status.is_closed(),
-                    FilterMode::Ready => matches!(r.status, Status::Open),
-                };
-                mode_ok
-                    && label_filter
-                        .as_ref()
-                        .is_none_or(|label| r.labels.iter().any(|l| l == label))
-                    && active_repo.as_ref().is_none_or(|repo| {
-                        self.issue_map
-                            .get(&r.id)
-                            .map(|i| &i.source_repo == repo)
-                            .unwrap_or(false)
-                    })
+    /// The status-mode + label + repo predicate shared by `apply_filter`
+    /// and `apply_search`. Go's `/` search is the bubbles list's
+    /// `FilterInput` over `m.list.Items()` — the *already filtered* set —
+    /// so search narrows within these filters rather than replacing them.
+    fn row_passes_filters(&self, row_idx: usize) -> bool {
+        let r = &self.rows[row_idx];
+        let mode_ok = match self.filter_mode {
+            FilterMode::All => true,
+            FilterMode::Open => matches!(r.status, Status::Open | Status::InProgress),
+            FilterMode::Closed => r.status.is_closed(),
+            FilterMode::Ready => matches!(r.status, Status::Open),
+        };
+        mode_ok
+            && self
+                .label_filter
+                .as_ref()
+                .is_none_or(|label| r.labels.iter().any(|l| l == label))
+            && self.active_repo.as_ref().is_none_or(|repo| {
+                self.issue_map
+                    .get(&r.id)
+                    .map(|i| &i.source_repo == repo)
+                    .unwrap_or(false)
             })
+    }
+
+    pub fn apply_filter(&mut self) {
+        self.filtered_indices = (0..self.rows.len())
+            .filter(|&i| self.row_passes_filters(i))
             .collect();
-        // Apply sort
-        if self.sort_mode == SortMode::Default {
-            self.filtered_indices.sort_by_key(|&i| {
-                (
-                    self.rows[i].priority,
-                    std::cmp::Reverse(self.rows[i].id.clone()),
-                )
-            });
+        // Apply sort. Go `sortFilteredItems` (`pkg/ui/model.go:8459`,
+        // bv-3ita): each non-default mode compares its primary key then
+        // falls through to `Issue.ID` ascending as the universal tiebreak.
+        // (`SortDefault` there is open-first/priority/created-desc/id-asc;
+        // this port's Default keeps its established `(priority,
+        // Reverse(id))` order — changing it would rebaseline every golden.)
+        match self.sort_mode {
+            SortMode::Default => {
+                self.filtered_indices.sort_by_key(|&i| {
+                    (
+                        self.rows[i].priority,
+                        std::cmp::Reverse(self.rows[i].id.clone()),
+                    )
+                });
+            }
+            _ => {
+                self.filtered_indices.sort_by(|&a, &b| {
+                    let ra = &self.rows[a];
+                    let rb = &self.rows[b];
+                    let ord = match self.sort_mode {
+                        // Oldest first.
+                        SortMode::CreatedAsc => ra.created_at.cmp(&rb.created_at),
+                        // Newest first.
+                        SortMode::CreatedDesc => rb.created_at.cmp(&ra.created_at),
+                        // P0 first.
+                        SortMode::Priority => ra.priority.cmp(&rb.priority),
+                        // Most recently updated first (Go `Issue.UpdatedAt`).
+                        SortMode::Updated => {
+                            let ua = self
+                                .issue_map
+                                .get(&ra.id)
+                                .and_then(|i| i.updated_at.as_ref());
+                            let ub = self
+                                .issue_map
+                                .get(&rb.id)
+                                .and_then(|i| i.updated_at.as_ref());
+                            ub.cmp(&ua)
+                        }
+                        SortMode::Default => unreachable!("handled above"),
+                    };
+                    ord.then_with(|| ra.id.cmp(&rb.id))
+                });
+            }
         }
         if self.cursor >= self.filtered_indices.len() {
             self.cursor = self.filtered_indices.len().saturating_sub(1);
@@ -1203,19 +1302,12 @@ impl App {
             self.session_count = *n;
             return;
         }
-        if let Ok(out) = std::process::Command::new("cass")
-            .args(["search", &id, "--robot", "--limit", "10"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            let count = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-                .ok()
-                .and_then(|v| v.get("results").and_then(|r| r.as_array()).map(|a| a.len()))
-                .unwrap_or(0);
-            self.cass_cache.insert(id, count);
-            self.session_count = count;
-        }
+        // Bounded shell-out (Go `Correlate`'s 3s context): the previous
+        // `Command::output()` here had no timeout and ran on the UI thread
+        // on every cursor move onto an uncached bead.
+        let count = crate::cass::search_sessions(&id, 10).len();
+        self.cass_cache.insert(id, count);
+        self.session_count = count;
     }
 
     fn handle_search_key(&mut self, code: KeyCode) -> bool {
@@ -1252,37 +1344,47 @@ impl App {
     /// surfaces (possibly reordered by score).
     fn apply_search(&mut self) {
         if self.search_query.is_empty() {
-            self.filtered_indices = (0..self.rows.len()).collect();
-        } else {
-            // Lowercase the needle only: `Config::DEFAULT` already folds
-            // haystack case, but folding must not be left to nucleo on the
-            // needle side — an uppercase needle char that can only match via
-            // folding (e.g. "Is" vs "issue") passes the prefilter yet trips
-            // a `debug_assert!`-style reject in the optimal matcher
-            // (nucleo-matcher 0.3.1 `fuzzy_optimal.rs`: "should have been
-            // caught by prefilter"). Pre-folding keeps matching
-            // case-insensitive without touching that path.
-            let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
-            let mut haystack_buf = Vec::new();
-            let mut needle_buf = Vec::new();
-            let folded = self.search_query.to_lowercase();
-            let needle = nucleo_matcher::Utf32Str::new(&folded, &mut needle_buf);
-            let mut scored: Vec<(u16, usize)> = Vec::new();
-            for (i, r) in self.rows.iter().enumerate() {
-                let haystack = format!("{} {}", r.id, r.title);
-                haystack_buf.clear();
-                let hay = nucleo_matcher::Utf32Str::new(&haystack, &mut haystack_buf);
-                if let Some(score) = matcher.fuzzy_match(hay, needle) {
-                    scored.push((score, i));
-                }
-            }
-            scored.sort_by(|a, b| {
-                b.0.cmp(&a.0)
-                    .then_with(|| self.rows[a.1].id.cmp(&self.rows[b.1].id))
-            });
-            let idx: Vec<usize> = scored.into_iter().map(|(_, i)| i).collect();
-            self.filtered_indices = idx;
+            // Empty query restores the filtered+sorted order (Go: clearing
+            // the filter input returns the list to its filtered items).
+            self.apply_filter();
+            self.cursor = 0;
+            return;
         }
+        // Search runs *within* the active label/repo/status filters (Go's
+        // `/` filters `m.list.Items()`, the already-filtered set) — it must
+        // not resurrect rows the user filtered out.
+        //
+        // Lowercase the needle only: `Config::DEFAULT` already folds
+        // haystack case, but folding must not be left to nucleo on the
+        // needle side — an uppercase needle char that can only match via
+        // folding (e.g. "Is" vs "issue") passes the prefilter yet trips
+        // a `debug_assert!`-style reject in the optimal matcher
+        // (nucleo-matcher 0.3.1 `fuzzy_optimal.rs`: "should have been
+        // caught by prefilter"). Pre-folding keeps matching
+        // case-insensitive without touching that path.
+        let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+        let mut haystack_buf = Vec::new();
+        let mut needle_buf = Vec::new();
+        let folded = self.search_query.to_lowercase();
+        let needle = nucleo_matcher::Utf32Str::new(&folded, &mut needle_buf);
+        let mut scored: Vec<(u16, usize)> = Vec::new();
+        for (i, r) in self.rows.iter().enumerate() {
+            if !self.row_passes_filters(i) {
+                continue;
+            }
+            let haystack = format!("{} {}", r.id, r.title);
+            haystack_buf.clear();
+            let hay = nucleo_matcher::Utf32Str::new(&haystack, &mut haystack_buf);
+            if let Some(score) = matcher.fuzzy_match(hay, needle) {
+                scored.push((score, i));
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| self.rows[a.1].id.cmp(&self.rows[b.1].id))
+        });
+        let idx: Vec<usize> = scored.into_iter().map(|(_, i)| i).collect();
+        self.filtered_indices = idx;
         self.cursor = 0;
     }
     /// Semantic search input (Ctrl+S mode): Esc clears and exits, Enter
@@ -1541,8 +1643,19 @@ impl App {
     }
 
     /// Handle mouse events (wheel scroll + click select).
+    ///
+    /// Only the List view paints the list pane / detail pane this handler
+    /// drives (`render`'s fallthrough arm). In every other view the wheel
+    /// and clicks used to mutate `cursor`/`focus_detail`/`detail_scroll`
+    /// invisibly — Go dispatches wheel events to the *focused* view's own
+    /// cursor (`model.go:4991-5058`), which this port has not implemented
+    /// per-view, so the correct minimal behavior is to ignore the mouse
+    /// outside List rather than corrupt hidden state.
     pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> bool {
         use crossterm::event::{MouseButton, MouseEventKind};
+        if self.current_view != ViewMode::List {
+            return false;
+        }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 if self.focus_detail {
@@ -1693,6 +1806,16 @@ impl App {
         self.filtered_indices
             .get(self.cursor)
             .map(|&i| &self.rows[i])
+    }
+
+    /// True when j/k/q should drive the detail pane instead of the view's
+    /// own cursor. `focus_detail` is only meaningful in the List view —
+    /// `render` paints the detail pane solely on that view's fallthrough
+    /// arm — so reads are gated here rather than trusting the flag, which
+    /// used to stay `true` across view switches and hijack j/k in Graph,
+    /// History, etc.
+    fn list_detail_focused(&self) -> bool {
+        self.focus_detail && self.current_view == ViewMode::List
     }
 
     /// Resolve a pending single-tap backtick (Go `CapsLockTracker` +
@@ -1889,13 +2012,23 @@ impl App {
         if self.current_view == ViewMode::History && self.handle_history_modal_key(code) {
             return true;
         }
+        // `focus_detail` only has meaning in the List view's split layout —
+        // the detail pane is not painted in Graph/History/etc., so a stale
+        // `true` used to hijack j/k/q into scrolling nothing. Clear it on
+        // the first keypress after leaving List; the read sites below are
+        // additionally view-gated via `list_detail_focused`.
+        if self.current_view != ViewMode::List {
+            self.focus_detail = false;
+        }
         match code {
             KeyCode::Tab => {
-                self.focus_detail = !self.focus_detail;
+                if self.current_view == ViewMode::List {
+                    self.focus_detail = !self.focus_detail;
+                }
                 true
             }
             KeyCode::Char('q') => {
-                if self.focus_detail {
+                if self.list_detail_focused() {
                     self.focus_detail = false;
                 } else {
                     self.quit_requested = true;
@@ -1924,6 +2057,7 @@ impl App {
                         | ViewMode::LabelDashboard
                         | ViewMode::Board
                         | ViewMode::Tree
+                        | ViewMode::Graph
                         | ViewMode::Insights
                         | ViewMode::Alerts
                         | ViewMode::FlowMatrix
@@ -1943,7 +2077,7 @@ impl App {
                 true
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.focus_detail {
+                if self.list_detail_focused() {
                     self.detail_scroll = self.detail_scroll.saturating_add(1);
                 } else if self.current_view == ViewMode::FlowMatrix {
                     let max = self.flow.as_ref().map(|f| f.labels.len()).unwrap_or(0);
@@ -2011,7 +2145,7 @@ impl App {
                 true
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.focus_detail {
+                if self.list_detail_focused() {
                     self.detail_scroll = self.detail_scroll.saturating_sub(1);
                 } else if self.current_view == ViewMode::FlowMatrix {
                     self.flow_cursor = self.flow_cursor.saturating_sub(1);
@@ -2466,6 +2600,19 @@ impl App {
                 self.open_cass_modal();
                 true
             }
+            KeyCode::Char(';') => {
+                // Shortcuts sidebar toggle (Go `;`/`f2` →
+                // `showShortcutsSidebar`, model.go:4058-4074, bv-3qi5).
+                // `render_sidebar` + `app.show_sidebar` already existed;
+                // only the key was missing.
+                self.show_sidebar = !self.show_sidebar;
+                self.status_msg = if self.show_sidebar {
+                    "Shortcuts sidebar: ; hide".to_string()
+                } else {
+                    String::new()
+                };
+                true
+            }
             _ => false,
         }
     }
@@ -2778,8 +2925,40 @@ impl App {
                         .to_string();
                 true
             }
+            // Go list paging (model.go:6088-6108): ctrl+d/ctrl+u move the
+            // list cursor by `height / 3` rows, clamped at both ends. The
+            // registry documents these as "Page down/up (half-screen)";
+            // Go's actual step is a third of the screen height.
+            KeyCode::Char('d') if self.current_view == ViewMode::List => {
+                self.page_list_cursor((self.height / 3).max(1) as isize);
+                true
+            }
+            KeyCode::Char('u') if self.current_view == ViewMode::List => {
+                self.page_list_cursor(-((self.height / 3).max(1) as isize));
+                true
+            }
             _ => false,
         }
+    }
+
+    /// Move the list cursor `delta` rows in *visible* order — through the
+    /// dependency tree when `left_tree_mode` is on (same row space
+    /// `move_cursor_in_tree` walks), flat `filtered_indices` otherwise.
+    /// Clamps at both ends like Go's `list.Select` bounds checks.
+    fn page_list_cursor(&mut self, delta: isize) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+        if self.left_tree_mode && !self.dep_tree_nodes.is_empty() {
+            let nodes = &self.dep_tree_nodes;
+            let current = crate::views::deptree::tree_row_for_cursor(nodes, self.cursor);
+            let target = (current as isize + delta).clamp(0, nodes.len() as isize - 1) as usize;
+            self.cursor = nodes[target].filtered_pos;
+        } else {
+            let next = self.cursor as isize + delta;
+            self.cursor = next.clamp(0, self.filtered_indices.len() as isize - 1) as usize;
+        }
+        self.update_session_count();
     }
 
     /// Export all issues to beads_report_<project>_<date>.md (Go exportToMarkdown).
@@ -2972,9 +3151,12 @@ impl App {
     }
 
     /// Open the cass session modal for the selected issue (Go
-    /// `showCassSessionModal`): requires a healthy cass CLI, correlates
-    /// with the 3s-timeout backend, shows a status message (not the modal)
-    /// when cass is missing or no sessions correlate — Go's exact strings.
+    /// `showCassSessionModal`, model.go:9582): requires a healthy cass CLI
+    /// and *queues* the lookup on a background thread — Go's comment is
+    /// explicit that Update must not run external processes. The bounded
+    /// `cass::correlate` (3s per strategy) then lands via
+    /// `poll_cass_load`, which shows the modal or Go's exact status
+    /// strings ("No correlated sessions found for …" / missing-cass).
     fn open_cass_modal(&mut self) {
         if !self.cass_available {
             self.status_msg =
@@ -2998,17 +3180,47 @@ impl App {
                 )
             })
             .unwrap_or_default();
-        let (sessions, keywords) = crate::cass::correlate(
-            &bead_id,
-            &title,
-            &description,
-            created_at.as_deref(),
-            updated_at.as_deref(),
-            closed_at.as_deref(),
-        );
+        self.cass_lookup_generation += 1;
+        let generation = self.cass_lookup_generation;
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.cass_lookup_rx = Some(rx);
+        self.cass_lookup_bead = Some(bead_id.clone());
+        self.status_msg = format!("Looking up sessions for {bead_id}…");
+        // std::thread + a bounded channel; the project bans tokio (AGENTS.md).
+        std::thread::spawn(move || {
+            let (sessions, keywords) = crate::cass::correlate(
+                &bead_id,
+                &title,
+                &description,
+                created_at.as_deref(),
+                updated_at.as_deref(),
+                closed_at.as_deref(),
+            );
+            let _ = tx.send((generation, bead_id, sessions, keywords));
+        });
+    }
+
+    /// Drain a completed background cass lookup (Go `cassSessionsLoadedMsg`
+    /// arm, model.go:2833-2861). Called from the run loop's ~500ms tick so
+    /// the subprocess work never blocks a keypress. A completion whose
+    /// generation is stale (a newer `V` superseded it) is dropped.
+    ///
+    /// Returns whether visible state changed, for the caller's redraw skip.
+    pub fn poll_cass_load(&mut self) -> bool {
+        let Some(rx) = &self.cass_lookup_rx else {
+            return false;
+        };
+        let Ok((generation, bead_id, sessions, keywords)) = rx.try_recv() else {
+            return false;
+        };
+        self.cass_lookup_rx = None;
+        self.cass_lookup_bead = None;
+        if generation != self.cass_lookup_generation {
+            return true;
+        }
         if sessions.is_empty() {
             self.status_msg = format!("No correlated sessions found for {bead_id}");
-            return;
+            return true;
         }
         let search_cmd = if keywords.is_empty() {
             format!("cass search \"{bead_id}\"")
@@ -3023,6 +3235,7 @@ impl App {
             selected: 0,
             copied_at: None,
         });
+        true
     }
 
     /// Key handling while the cass modal is open (Go
@@ -3087,10 +3300,21 @@ impl App {
     /// Anything not claimed here falls through to the guarded History arms in
     /// `handle_key`'s main `match`.
     fn handle_history_modal_key(&mut self, code: KeyCode) -> bool {
-        // `h` and `esc` close the view whatever the state is (model.go:5756),
-        // so they are checked before the `history` borrow — otherwise an
-        // unpopulated History would trap the user.
-        if matches!(code, KeyCode::Esc) {
+        // Search input and file-tree focus are checked BEFORE the `h`/`esc`
+        // exits, matching Go `handleHistoryKeys` (model.go:5483-5753): the
+        // search/file-tree blocks run first and claim every key while
+        // active; only a bare `h`/`esc` with neither active exits to the
+        // list (model.go:5756 `"h", "esc"`). The exits must yield because
+        // Go forwards *every* key to the active modal first (search `h`
+        // types a char, file-tree `h` collapses a node). Checking the
+        // predicate here also covers `history == None` (lazy load still in
+        // flight), which must still let h/Esc out instead of falling
+        // through to the quit-confirm arm.
+        let history_modal_active = self
+            .history
+            .as_ref()
+            .is_some_and(|h| h.is_search_active() || h.file_tree_has_focus());
+        if !history_modal_active && matches!(code, KeyCode::Char('h') | KeyCode::Esc) {
             self.current_view = ViewMode::List;
             return true;
         }
@@ -3494,19 +3718,62 @@ impl App {
     }
 
     /// Fetch issues at `git_ref` via the shared `GitLoader` plumbing (the
-    /// same path `--robot-diff` uses — see plan Q4) and store the diff.
-    /// Error text mirrors the robot command's
-    /// (`could not read issues at ref <ref>`).
+    /// same path `--robot-diff` uses — see plan Q4) on a background thread;
+    /// `poll_time_travel_load` applies the diff when it lands. Error text
+    /// mirrors the robot command's (`could not read issues at ref <ref>`).
+    ///
+    /// Go runs this synchronously in `Update` (`enterTimeTravelMode`,
+    /// model.go:9254); moving it to a thread is a deliberate deviation —
+    /// `git show`/`log` on a large repo can take seconds, and blocking the
+    /// event loop freezes every keypress. Same tradeoff as History.
     fn run_time_travel(&mut self, git_ref: &str) {
         let cwd = std::env::current_dir().unwrap_or_default();
-        match bv_core::discovery::GitLoader::new(&cwd).load_at(git_ref) {
-            Ok(previous) => self.apply_time_travel_result(previous, git_ref),
+        let git_ref_owned = git_ref.to_string();
+        self.time_travel_generation += 1;
+        let generation = self.time_travel_generation;
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.time_travel_rx = Some(rx);
+        self.time_travel_loading = true;
+        self.time_travel_error = None;
+        self.status_msg = format!("Time-Travel: loading issues at {git_ref}…");
+        // std::thread + a bounded channel; the project bans tokio (AGENTS.md).
+        std::thread::spawn(move || {
+            let result = bv_core::discovery::GitLoader::new(&cwd)
+                .load_at(&git_ref_owned)
+                .map_err(|e| e.to_string());
+            let _ = tx.send((generation, git_ref_owned, result));
+        });
+    }
+
+    /// Drain a completed background Time-Travel load. Called from the run
+    /// loop's ~500ms tick so the git walk never blocks a keypress. A
+    /// completion whose generation is stale is dropped. Returns whether
+    /// visible state changed, for the caller's redraw skip.
+    pub fn poll_time_travel_load(&mut self) -> bool {
+        if !self.time_travel_loading {
+            return false;
+        }
+        let Some(rx) = &self.time_travel_rx else {
+            self.time_travel_loading = false;
+            return false;
+        };
+        let Ok((generation, git_ref, result)) = rx.try_recv() else {
+            return false;
+        };
+        self.time_travel_loading = false;
+        self.time_travel_rx = None;
+        if generation != self.time_travel_generation {
+            return true;
+        }
+        match result {
+            Ok(previous) => self.apply_time_travel_result(previous, &git_ref),
             Err(_) => {
                 self.time_travel_result = None;
                 self.time_travel_error = Some(format!("could not read issues at ref {git_ref}"));
                 self.status_msg = format!("Time-Travel: could not read issues at ref {git_ref}");
             }
         }
+        true
     }
 
     /// Key handling while the Time-Travel revision prompt is open: typing
@@ -3728,7 +3995,22 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_default();
         match bv_core::discovery::load_issues_from_repo(&cwd) {
             Ok((issues, _)) => {
-                let fresh = App::new(issues);
+                // `App::new` resets session-scoped state; carry over what a
+                // reload must not clobber: terminal geometry (the next
+                // `handle_resize` may be seconds away), the resolved theme,
+                // the update notice, and the instance-lock PID.
+                let (width, height, split_view) = (self.width, self.height, self.split_view);
+                let theme = self.theme.clone();
+                let (update_tag, update_url) = (self.update_tag.clone(), self.update_url.clone());
+                let instance_pid = self.instance_pid;
+                let mut fresh = App::new(issues);
+                fresh.width = width;
+                fresh.height = height;
+                fresh.split_view = split_view;
+                fresh.theme = theme;
+                fresh.update_tag = update_tag;
+                fresh.update_url = update_url;
+                fresh.instance_pid = instance_pid;
                 *self = fresh;
                 self.status_msg = "Refreshed".to_string();
             }
@@ -5331,10 +5613,14 @@ fn startup_update_check_enabled() -> bool {
 
 /// Run the TUI event loop. Returns when user quits.
 pub fn run_tui(app: &mut App) -> io::Result<()> {
-    // Instance lock (Go bv-vrvn)
+    // Instance lock (Go bv-vrvn). Go locks `filepath.Dir(beadsPath)` — the
+    // *discovered* beads dir, not necessarily `cwd/.beads` (same discovery
+    // `refresh_watch_target` uses, so the lock lands next to the JSONL the
+    // session actually loaded).
     let beads_dir = std::env::current_dir()
         .ok()
-        .map(|d| d.join(".beads"))
+        .and_then(|cwd| bv_core::discovery::get_beads_dir(&cwd).ok())
+        .or_else(|| std::env::current_dir().ok().map(|d| d.join(".beads")))
         .unwrap_or_default();
     app.instance_pid = acquire_instance_lock(&beads_dir);
 
@@ -5601,6 +5887,12 @@ fn tui_event_loop(
             // `HistoryLoadedMsg`): drain the channel here so a slow `git log -p`
             // never blocks a keypress.
             dirty |= app.poll_history_load();
+            // Same trick for the background cass session lookup (`V` key —
+            // Go `cassSessionsLoadedMsg`): the correlate walk shells out to
+            // the cass CLI and must never block a keypress.
+            dirty |= app.poll_cass_load();
+            // Same for the background Time-Travel git walk (`t`/`T` keys).
+            dirty |= app.poll_time_travel_load();
             // Wall-clock widgets. The previous loop redrew twice a second, so a
             // badge showing "45s ago" refreshed every 500ms; redrawing once per
             // elapsed second is visually identical and costs 2x less.

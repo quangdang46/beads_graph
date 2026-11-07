@@ -107,29 +107,46 @@ fn record_type_of(line: &[u8]) -> RecordType {
 
 /// Intermediate issue shape: every field raw/tolerant, mirroring how Go's
 /// string-typed model accepts any status/type before validation.
+///
+/// Every non-`Option` field uses `de_null_default` because Go's
+/// `encoding/json` treats an explicit `null` on a non-pointer field as a
+/// no-op (the field keeps its zero value); a bare `String`/`i64` field
+/// would fail the whole record instead.
 #[derive(Deserialize)]
 struct RawIssue {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     description: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     design: String,
-    #[serde(default, rename = "acceptance_criteria")]
+    #[serde(
+        default,
+        rename = "acceptance_criteria",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     acceptance_criteria: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     notes: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     priority: i32,
-    #[serde(default, rename = "issue_type")]
+    #[serde(
+        default,
+        rename = "issue_type",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     issue_type: String,
     /// `bd` emits the assignee as `owner`; Go's JSONL and the frozen model
     /// both spell it `assignee`. Accept either — see `model::Issue::assignee`.
-    #[serde(default, alias = "owner")]
+    #[serde(
+        default,
+        alias = "owner",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     assignee: String,
     #[serde(default, rename = "estimated_minutes")]
     estimated_minutes: Option<i64>,
@@ -147,39 +164,63 @@ struct RawIssue {
     closed_at: Option<String>,
     #[serde(default, rename = "external_ref")]
     external_ref: Option<String>,
-    #[serde(default, rename = "compaction_level")]
+    #[serde(
+        default,
+        rename = "compaction_level",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     compaction_level: i64,
     #[serde(default, rename = "compacted_at")]
     compacted_at: Option<String>,
     #[serde(default, rename = "compacted_at_commit")]
     compacted_at_commit: Option<String>,
-    #[serde(default, rename = "original_size")]
+    #[serde(
+        default,
+        rename = "original_size",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     original_size: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     labels: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     dependencies: Vec<RawDependency>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     comments: Vec<crate::model::Comment>,
-    #[serde(default, rename = "source_repo")]
+    #[serde(
+        default,
+        rename = "source_repo",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     source_repo: String,
 }
 
 #[derive(Deserialize)]
 struct RawDependency {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     issue_id: String,
-    #[serde(default, rename = "depends_on_id")]
+    #[serde(
+        default,
+        rename = "depends_on_id",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     depends_on_id: String,
-    #[serde(default, rename = "depends_on")]
+    #[serde(
+        default,
+        rename = "depends_on",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     depends_on_legacy: String,
-    #[serde(default, rename = "target_id")]
+    #[serde(
+        default,
+        rename = "target_id",
+        deserialize_with = "crate::model::de_null_default"
+    )]
     target_id_legacy: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     r#type: String,
     #[serde(default)]
     created_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::de_null_default")]
     created_by: String,
 }
 
@@ -212,19 +253,29 @@ pub fn parse_issues_with_options(
         if line.last() == Some(&b'\r') {
             line = &line[..line.len() - 1];
         }
-        if line.is_empty() {
-            continue;
-        }
         if line.len() > max_capacity {
+            // Go counts an over-long line as an ERROR, not a skip: it is a
+            // dropped record and must surface in load_stats/error_rate
+            // (loader.go isPrefix branch, issue #190). Go checks this BEFORE
+            // the blank-line test, so a huge whitespace line still errors.
+            stats.errors += 1;
             warn(&format!(
                 "skipping line {line_num}: line too long (exceeds {max_capacity} bytes)"
             ));
-            // Accounted like Go: not an error, not valid — just skipped line.
+            continue;
+        }
+        // Go (`loader.go` serial loop): `bytes.TrimSpace(line)` empty ->
+        // continue silently, BEFORE the BOM strip and with no stats
+        // accounting. A whitespace-only line is formatting, not a record.
+        if is_blank_line(line) {
             continue;
         }
         if line_num == 1 {
             line = strip_bom(line);
         }
+        // A BOM-only first line strips to empty and still reaches the issue
+        // parser — Go produces the same "skipping malformed JSON" error, so
+        // no special case is needed here.
         process_line(line, line_num, &mut issues, &mut stats, &mut warn);
     }
 
@@ -254,6 +305,16 @@ pub fn parse_issues_with_options(
     Ok((issues, stats))
 }
 
+/// Go `bytes.TrimSpace(line) == 0`: blank/whitespace-only lines are skipped
+/// silently. `str::trim` covers Unicode whitespace like Go's
+/// `bytes.TrimSpace`; invalid UTF-8 falls back to ASCII whitespace.
+fn is_blank_line(line: &[u8]) -> bool {
+    match std::str::from_utf8(line) {
+        Ok(s) => s.trim().is_empty(),
+        Err(_) => line.iter().all(u8::is_ascii_whitespace),
+    }
+}
+
 fn strip_bom(line: &[u8]) -> &[u8] {
     if line.starts_with(&[0xEF, 0xBB, 0xBF]) {
         &line[3..]
@@ -279,10 +340,27 @@ fn process_line(
 
     let raw: RawIssue = match serde_json::from_slice(line) {
         Ok(r) => r,
-        Err(e) => {
-            stats.errors += 1;
-            warn(&format!("skipping malformed JSON on line {line_num}: {e}"));
-            return;
+        Err(first_err) => {
+            // Go's JSON decoder coerces invalid UTF-8 bytes to U+FFFD and
+            // still parses the record; serde_json rejects the whole line.
+            // Retry once through a lossy conversion so the record survives
+            // (with replacement chars) instead of being dropped. Non-UTF-8
+            // syntax errors still fall through to the original error.
+            let retried = if std::str::from_utf8(line).is_err() {
+                serde_json::from_str::<RawIssue>(&String::from_utf8_lossy(line)).ok()
+            } else {
+                None
+            };
+            match retried {
+                Some(r) => r,
+                None => {
+                    stats.errors += 1;
+                    warn(&format!(
+                        "skipping malformed JSON on line {line_num}: {first_err}"
+                    ));
+                    return;
+                }
+            }
         }
     };
 
@@ -330,6 +408,14 @@ impl IntoDependencyOwned for &RawDependency {
 
 impl RawIssue {
     fn into_issue_with_deps(self, deps: Vec<Dependency>) -> Result<Issue, ValidationError> {
+        // Validation order mirrors Go `Issue.Validate` (types.go:266-283):
+        // id -> title -> status -> issue_type -> timestamps.
+        if self.id.is_empty() {
+            return Err(ValidationError::MissingField("id"));
+        }
+        if self.title.is_empty() {
+            return Err(ValidationError::MissingField("title"));
+        }
         let status_trimmed = self.status.trim().to_lowercase();
         let status = match status_trimmed.as_str() {
             "open" => Status::Open,
@@ -344,11 +430,10 @@ impl RawIssue {
             "tombstone" => Status::Tombstone,
             other => return Err(ValidationError::InvalidStatus(other.to_string())),
         };
-        if self.id.is_empty() {
-            return Err(ValidationError::MissingField("id"));
-        }
-        if self.title.is_empty() {
-            return Err(ValidationError::MissingField("title"));
+        // Go `IssueType.IsValid` (types.go:337) rejects only the empty
+        // string; any non-blank custom type is valid.
+        if self.issue_type.is_empty() {
+            return Err(ValidationError::InvalidIssueType(self.issue_type.clone()));
         }
         // Go's loader validates no dependency type: `pkg/loader/loader.go:1859`
         // only interns the string. Rejecting a record here would drop the whole
@@ -494,6 +579,79 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("line too long"));
         assert_eq!(stats.valid, 0);
+    }
+
+    #[test]
+    fn explicit_nulls_behave_like_absent_fields() {
+        // Go `encoding/json`: null on a non-pointer field is a no-op.
+        let (issues, stats, warnings) = parse(
+            r#"{"id":"A-1","title":"T","status":"open","priority":null,"issue_type":"task","labels":null,"dependencies":null,"comments":null,"description":null,"compaction_level":null,"source_repo":null}"#,
+        );
+        assert_eq!(issues.len(), 1, "warnings: {warnings:?}");
+        assert_eq!(issues[0].priority, 0);
+        assert!(issues[0].labels.is_empty());
+        assert_eq!(stats.errors, 0);
+    }
+
+    #[test]
+    fn null_dependency_fields_tolerated() {
+        let (issues, stats, _) = parse(
+            r#"{"id":"A-1","title":"T","status":"open","issue_type":"task","dependencies":[{"issue_id":null,"depends_on":null,"target_id":"B-2","type":null,"created_by":null}]}"#,
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(issues[0].dependencies[0].effective_depends_on(), "B-2");
+        assert_eq!(issues[0].dependencies[0].r#type.as_str(), "");
+    }
+
+    #[test]
+    fn whitespace_only_lines_skipped_silently() {
+        let (issues, stats, warnings) = parse(
+            "   \n\t \n{\"id\":\"A\",\"title\":\"T\",\"status\":\"open\",\"issue_type\":\"task\"}",
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.valid, 1);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn overlong_line_counts_as_error() {
+        // Go loader.go isPrefix branch: a dropped over-long record is an
+        // ERROR so load_stats/error_rate surface it (issue #190).
+        let big = format!(
+            "{{\"id\":\"{}\",\"title\":\"T\",\"status\":\"open\",\"issue_type\":\"task\"}}",
+            "X".repeat(300)
+        );
+        let mut warnings = Vec::new();
+        let opts = ParseOptions {
+            buffer_size: Some(128),
+        };
+        let mut rdr = big.as_bytes();
+        let (_issues, stats) =
+            parse_issues_with_options(&mut rdr, &opts, |w| warnings.push(w.to_string())).unwrap();
+        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.valid, 0);
+    }
+
+    #[test]
+    fn missing_issue_type_rejected_like_go_validate() {
+        // Go `IssueType.IsValid` is a non-empty test; the loader's
+        // `issue.Validate()` drops records with no issue_type.
+        let (issues, stats, warnings) = parse(r#"{"id":"A","title":"T","status":"open"}"#);
+        assert!(issues.is_empty());
+        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.valid, 0);
+        assert!(warnings[0].contains("invalid issue"));
+    }
+
+    #[test]
+    fn custom_issue_type_accepted() {
+        // Go accepts ANY non-empty type (gastown "role"/"agent"/...).
+        let (issues, stats, _) =
+            parse(r#"{"id":"A","title":"T","status":"open","issue_type":"role"}"#);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(stats.errors, 0);
     }
 
     #[test]

@@ -51,13 +51,13 @@ fn add_hashed_token(vec: &mut [f32], token: &str) {
 /// Tokenize by maximal letter/digit runs (Go `hashEmbedInto`'s inline
 /// loop: `unicode.IsLetter(r) || unicode.IsDigit(r)`, everything else is a
 /// separator — same rule `bv_search::query::lexical_tokens` already uses
-/// for lexical boosting, kept as a separate free function here so this
-/// module has no dependency on `query`).
+/// for lexical boosting; the shared predicate lives in `char_class` because
+/// `char::is_alphanumeric()` also accepts Nl/No numerics Go rejects).
 fn hash_embed_tokens(text: &str) -> Vec<&str> {
     let mut tokens = Vec::new();
     let mut start: Option<usize> = None;
     for (i, c) in text.char_indices() {
-        if c.is_alphanumeric() {
+        if crate::char_class::is_letter_or_digit(c) {
             if start.is_none() {
                 start = Some(i);
             }

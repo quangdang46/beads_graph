@@ -11,6 +11,7 @@ pub mod file_impact;
 pub mod go_math;
 pub mod go_time;
 pub mod impact;
+pub mod incremental;
 pub mod label_health;
 pub mod metrics;
 pub mod scoring;

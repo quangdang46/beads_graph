@@ -945,6 +945,12 @@ pub fn go_bool_flag(args: &[String], name: &str, default: bool) -> Result<bool, 
 /// Go `isFlagActive`'s **string** arm (cmd/bv/main.go:479-481): a string flag
 /// is active only when its value survives `strings.TrimSpace`. So
 /// `--db ""` and `--db "  "` are both *inactive*.
+///
+/// `validation::Presence` answers the same question from its recorded
+/// effective values (which also respect flag-value consumption), so nothing
+/// in the binary calls this today — it stays as the tested reference for the
+/// raw-argv spelling of the rule.
+#[allow(dead_code)]
 pub fn go_string_flag_active(args: &[String], name: &str) -> bool {
     match go_string_flag_value(args, name) {
         Some(v) => !v.trim().is_empty(),
@@ -955,18 +961,24 @@ pub fn go_string_flag_active(args: &[String], name: &str) -> bool {
 /// Read `--name value` / `--name=value` out of raw argv, borrowed. Same scan
 /// as `flag_value` in main.rs; lives here so the argv-level helpers that need
 /// it do not have to reach across crate modules.
+///
+/// pflag applies each occurrence in order and every `Set` overwrites the
+/// previous value, so the LAST occurrence wins — the same rule
+/// [`go_bool_flag`] already follows. Returning the first match made
+/// `--search "" --search real` read as the empty string, which
+/// `go_string_flag_active` then reported inactive where Go sees `real`.
 pub fn go_string_flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     let long = format!("--{name}");
     let with_eq = format!("--{name}=");
+    let mut raw: Option<&'a str> = None;
     for (i, a) in args.iter().enumerate() {
         if let Some(v) = a.strip_prefix(&with_eq) {
-            return Some(v);
-        }
-        if a == &long {
-            return args.get(i + 1).map(|s| s.as_str());
+            raw = Some(v);
+        } else if a == &long {
+            raw = args.get(i + 1).map(|s| s.as_str());
         }
     }
-    None
+    raw
 }
 
 /// Whether a `--flag` consumes the following token as its value.
@@ -1760,5 +1772,33 @@ mod tests {
             Some("/tmp/a=b")
         );
         assert_eq!(go_string_flag_value(&s(&["--other", "1"]), "db"), None);
+    }
+
+    /// pflag's `Set` overwrites on every occurrence, so the LAST spelling is
+    /// the effective one — `--search "" --search real` is `real`, not the
+    /// empty string the first-match scan used to return.
+    #[test]
+    fn string_flag_value_is_last_wins() {
+        assert_eq!(
+            go_string_flag_value(&s(&["--search", "", "--search", "real"]), "search"),
+            Some("real")
+        );
+        assert_eq!(
+            go_string_flag_value(&s(&["--search=first", "--search=second"]), "search"),
+            Some("second")
+        );
+        // Mixed spellings: the later `--name value` form still wins.
+        assert_eq!(
+            go_string_flag_value(&s(&["--search=a", "--search", "b"]), "search"),
+            Some("b")
+        );
+        assert!(go_string_flag_active(
+            &s(&["--search", "", "--search", "real"]),
+            "search"
+        ));
+        assert!(!go_string_flag_active(
+            &s(&["--search", "real", "--search", ""]),
+            "search"
+        ));
     }
 }

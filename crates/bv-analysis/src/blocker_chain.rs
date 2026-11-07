@@ -6,6 +6,15 @@ use bv_core::model::{DependencyType, Issue, Status};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
+/// Go `closedForReadiness` (readiness.go:79) — `closed` + `tombstone`, NOT
+/// the narrower `Issue.IsClosed()` (which is `closed` only). A tombstoned
+/// blocker is satisfied work: it must not count as an open blocker anywhere
+/// in this module. The previous `is_closed()` checks let a tombstone keep
+/// gating its dependents.
+fn closed_for_readiness(status: Status) -> bool {
+    matches!(status, Status::Closed | Status::Tombstone)
+}
+
 /// Direct-predecessor open blockers for `id`, plus transitive parent-child
 /// propagation: an open parent-child parent counts as a blocker of its
 /// child when the parent is itself (transitively) blocked. Matches Go's
@@ -24,7 +33,7 @@ pub fn open_blockers(by_id: &HashMap<&str, &Issue>, id: &str) -> Vec<String> {
         }
         let target = dep.effective_depends_on();
         if let Some(blocker) = by_id.get(target) {
-            if !blocker.status.is_closed() {
+            if !closed_for_readiness(blocker.status) {
                 set.insert(blocker.id.clone());
             }
         }
@@ -38,7 +47,7 @@ pub fn open_blockers(by_id: &HashMap<&str, &Issue>, id: &str) -> Vec<String> {
         let Some(parent) = by_id.get(dep.depends_on_id.as_str()) else {
             continue;
         };
-        if parent.status.is_closed() {
+        if closed_for_readiness(parent.status) {
             continue;
         }
         let mut visiting = HashSet::new();
@@ -62,7 +71,7 @@ fn is_transitively_blocked(
     let Some(issue) = by_id.get(id) else {
         return false;
     };
-    if issue.status.is_closed() {
+    if closed_for_readiness(issue.status) {
         return false;
     }
     // Direct predecessor check.
@@ -71,7 +80,7 @@ fn is_transitively_blocked(
             continue;
         }
         if let Some(blocker) = by_id.get(dep.effective_depends_on()) {
-            if !blocker.status.is_closed() {
+            if !closed_for_readiness(blocker.status) {
                 return true;
             }
         }
@@ -85,7 +94,7 @@ fn is_transitively_blocked(
         let Some(parent) = by_id.get(dep.depends_on_id.as_str()) else {
             continue;
         };
-        if parent.status.is_closed() {
+        if closed_for_readiness(parent.status) {
             continue;
         }
         if is_transitively_blocked(by_id, &parent.id, visiting) {
@@ -105,7 +114,7 @@ pub fn is_actionable(by_id: &HashMap<&str, &Issue>, id: &str) -> bool {
     let Some(issue) = by_id.get(id) else {
         return false;
     };
-    if issue.status.is_closed() || issue.status == Status::Deferred {
+    if closed_for_readiness(issue.status) || issue.status == Status::Deferred {
         return false;
     }
     open_blockers(by_id, id).is_empty()
@@ -114,7 +123,7 @@ pub fn is_actionable(by_id: &HashMap<&str, &Issue>, id: &str) -> bool {
 fn count_blocked_by(by_id: &HashMap<&str, &Issue>, issue_id: &str) -> i64 {
     let mut count = 0i64;
     for issue in by_id.values() {
-        if issue.status.is_closed() {
+        if closed_for_readiness(issue.status) {
             continue;
         }
         for dep in &issue.dependencies {
@@ -195,6 +204,14 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
     let mut visited: HashSet<String> = HashSet::new();
     let mut visiting: HashSet<String> = HashSet::new();
 
+    /// Bound on `dfs` recursion. Go's goroutine stacks grow dynamically so the
+    /// upstream walk has no explicit cap; Rust runs on fixed-size thread
+    /// stacks, and an adversarially deep blocker chain would overflow before
+    /// finishing. 4096 levels is far beyond any realistic chain; past it the
+    /// walk simply stops descending (the chain shown is truncated, never
+    /// wrong about the nodes it did visit).
+    const DFS_MAX_DEPTH: i64 = 4096;
+
     fn dfs(
         by_id: &HashMap<&str, &Issue>,
         id: &str,
@@ -204,6 +221,9 @@ pub fn get_blocker_chain(issues: &[Issue], issue_id: &str) -> Option<BlockerChai
         visiting: &mut HashSet<String>,
         result: &mut BlockerChainResult,
     ) {
+        if depth > DFS_MAX_DEPTH {
+            return;
+        }
         if visiting.contains(id) {
             result.has_cycle = true;
             result.cycle_ids.push(id.to_string());
@@ -377,6 +397,44 @@ mod tests {
             !result.is_blocked,
             "closed blocker must not count as blocking"
         );
+    }
+
+    /// Go `closedForReadiness` (readiness.go:79) is `closed` + `tombstone`,
+    /// not `IsClosed()` — a tombstoned blocker is satisfied work and must not
+    /// gate its dependents.
+    #[test]
+    fn tombstone_blocker_does_not_block() {
+        let mut target = issue("A-2", Status::Open, "target");
+        target.dependencies.push(blocks("A-2", "A-1"));
+        let root = issue("A-1", Status::Tombstone, "tombstoned");
+        let issues = vec![root, target];
+        let result = get_blocker_chain(&issues, "A-2").unwrap();
+        assert!(
+            !result.is_blocked,
+            "tombstone blocker must not count as blocking"
+        );
+        let by_id = by_id_map(&issues);
+        assert!(open_blockers(&by_id, "A-2").is_empty());
+        assert!(is_actionable(&by_id, "A-2"));
+    }
+
+    /// The tombstone rule applies inside the transitive parent-child walk too:
+    /// an open parent whose only blocker is a tombstone is itself unblocked,
+    /// so it must not gate its child.
+    #[test]
+    fn tombstone_grandparent_blocker_does_not_gate_child() {
+        let mut parent = issue("EP-1", Status::Open, "parent");
+        parent.dependencies.push(blocks("EP-1", "EP-0"));
+        let grandparent = issue("EP-0", Status::Tombstone, "tombstoned");
+        let mut child = issue("TASK-1", Status::Open, "child");
+        child.dependencies.push(parent_child("TASK-1", "EP-1"));
+        let issues = vec![grandparent, parent, child];
+        let by_id = by_id_map(&issues);
+        assert!(
+            open_blockers(&by_id, "TASK-1").is_empty(),
+            "tombstoned grandparent resolves the whole chain"
+        );
+        assert!(is_actionable(&by_id, "TASK-1"));
     }
 
     /// Issue #2: a task with only a parent-child edge to a blocked epic

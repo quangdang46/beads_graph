@@ -112,36 +112,37 @@ impl BackgroundWorker {
                     break;
                 }
 
-                // Check beads file mtime (polling fallback).
+                // Check beads file mtime (polling fallback). Trigger on any
+                // transition to a *present, different* mtime — including
+                // None→Some (file (re)created after being absent) — but not
+                // on Some→None (file briefly missing mid-write; next tick
+                // sees the new mtime anyway).
                 let jsonl = beads_dir.join("issues.jsonl");
                 let current_mtime = std::fs::metadata(&jsonl).and_then(|m| m.modified()).ok();
 
-                match (&last_mtime, &current_mtime) {
-                    (Some(old), Some(new)) if old != new => {
-                        // File changed → debounce then reload.
-                        std::thread::sleep(Duration::from_millis(config.debounce_ms));
-                        match bv_core::discovery::load_issues_from_repo(
-                            beads_dir.parent().unwrap_or(&beads_dir),
-                        ) {
-                            Ok((issues, _stats)) => {
-                                let count = issues.len();
-                                let hash = bv_core::data_hash::compute_data_hash(&issues);
-                                let _ = hash;
-                                let _ = tx.send(WorkerMsg::SnapshotReady {
-                                    issue_count: count,
-                                    file_change_at: chrono_now(),
-                                    sent_at: Instant::now(),
-                                });
-                            }
-                            Err(e) => {
-                                let _ = tx.send(WorkerMsg::SnapshotError {
-                                    message: e.to_string(),
-                                    recoverable: true,
-                                });
-                            }
+                if current_mtime.is_some() && last_mtime != current_mtime {
+                    // File changed or recreated → debounce then reload.
+                    std::thread::sleep(Duration::from_millis(config.debounce_ms));
+                    match bv_core::discovery::load_issues_from_repo(
+                        beads_dir.parent().unwrap_or(&beads_dir),
+                    ) {
+                        Ok((issues, _stats)) => {
+                            let count = issues.len();
+                            let hash = bv_core::data_hash::compute_data_hash(&issues);
+                            let _ = hash;
+                            let _ = tx.send(WorkerMsg::SnapshotReady {
+                                issue_count: count,
+                                file_change_at: chrono_now(),
+                                sent_at: Instant::now(),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(WorkerMsg::SnapshotError {
+                                message: e.to_string(),
+                                recoverable: true,
+                            });
                         }
                     }
-                    _ => {}
                 }
                 last_mtime = current_mtime;
 

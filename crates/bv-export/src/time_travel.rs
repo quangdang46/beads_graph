@@ -300,8 +300,28 @@ fn sprint_start(sprint: &Sprint) -> Option<jiff::Timestamp> {
 }
 
 /// Go's `time.Time.IsZero()` against a textual field.
+///
+/// IsZero is exact: the instant `0001-01-01T00:00:00Z` and nothing else.
+/// Prefix-matching the date would also swallow `0001-01-01T00:00:01Z` (one
+/// second later, not zero) and any offset-shifted spelling.
 fn is_go_zero_time(raw: &str) -> bool {
-    raw.is_empty() || raw.starts_with("0001-01-01")
+    if raw.is_empty() {
+        return true;
+    }
+    match raw.parse::<jiff::Timestamp>() {
+        Ok(ts) => ts == go_zero_instant(),
+        // Unparseable text is not the zero time; Go's parse would already
+        // have rejected the record upstream.
+        Err(_) => false,
+    }
+}
+
+/// The instant Go's zero `time.Time` denotes, parsed once per call site —
+/// cheap enough that a `LazyLock` would be ceremony.
+fn go_zero_instant() -> jiff::Timestamp {
+    "0001-01-01T00:00:00Z"
+        .parse()
+        .expect("Go zero time is a valid RFC 3339 instant")
 }
 
 #[cfg(test)]
@@ -716,5 +736,10 @@ mod tests {
         assert!(is_go_zero_time(""));
         assert!(is_go_zero_time("0001-01-01T00:00:00Z"));
         assert!(!is_go_zero_time("2024-01-01T00:00:00Z"));
+        // Same date, different instant — IsZero is exact, not a prefix match.
+        assert!(!is_go_zero_time("0001-01-01T00:00:01Z"));
+        // ...but the same instant spelled with an offset still is zero:
+        // 01:00:00+01:00 is 00:00:00Z.
+        assert!(is_go_zero_time("0001-01-01T01:00:00+01:00"));
     }
 }

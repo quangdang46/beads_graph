@@ -86,6 +86,14 @@ pub fn calculate_confidence(match_kind: Option<MatchKind>, total_matches: usize)
 }
 
 /// Builtin bead-ID patterns mirroring Go's explicit.go set.
+///
+/// Divergence note: these patterns intentionally differ from
+/// `history::builtin_patterns` (the full history walker's set). The history
+/// port splits the action keywords into per-verb regexes and uses
+/// `beads?[-_]`; this matcher keeps Go explicit.go's combined action
+/// alternation and its own `beads[-_]` legacy form. Both feed
+/// [`crate::history::normalize_bead_id`], so the IDs they emit are
+/// interchangeable even where the match text differs.
 pub struct IdPatterns {
     /// [PREFIX-123] bracket form
     pub bracket: Regex,
@@ -144,7 +152,10 @@ pub struct IdMention {
 pub fn find_mentions(message: &str, patterns: &IdPatterns) -> Vec<IdMention> {
     let mut out = Vec::new();
 
-    // Action keywords first (highest signal).
+    // Action keywords first (highest signal). Every builtin capture goes
+    // through `normalize_bead_id`, the same fold the custom-pattern pass and
+    // `history::IdRegexes::extract` apply, so "fixes BV-123" names the same
+    // bead as "fixes bv-123".
     for cap in patterns.action.captures_iter(message) {
         if let Some(id) = cap.get(2) {
             let verb = cap.get(1).unwrap().as_str().to_lowercase();
@@ -158,7 +169,7 @@ pub fn find_mentions(message: &str, patterns: &IdPatterns) -> Vec<IdMention> {
                 MatchKind::Refs
             };
             out.push(IdMention {
-                bead_id: id.as_str().to_string(),
+                bead_id: crate::history::normalize_bead_id(id.as_str()),
                 kind,
             });
         }
@@ -167,21 +178,27 @@ pub fn find_mentions(message: &str, patterns: &IdPatterns) -> Vec<IdMention> {
     // Bracket form.
     for cap in patterns.bracket.captures_iter(message) {
         out.push(IdMention {
-            bead_id: cap[1].to_string(),
+            bead_id: crate::history::normalize_bead_id(&cap[1]),
             kind: MatchKind::Bracket,
         });
     }
 
-    // bv-N / beads-N forms.
+    // beads-N / bv-N / generic forms.
+    for cap in patterns.bead.captures_iter(message) {
+        out.push(IdMention {
+            bead_id: crate::history::normalize_bead_id(&cap[1]),
+            kind: MatchKind::Bead,
+        });
+    }
     for cap in patterns.bv.captures_iter(message) {
         out.push(IdMention {
-            bead_id: format!("bv-{}", &cap[1]),
+            bead_id: crate::history::normalize_bead_id(&format!("bv-{}", &cap[1])),
             kind: MatchKind::Bead,
         });
     }
     for cap in patterns.generic.captures_iter(message) {
         out.push(IdMention {
-            bead_id: cap[1].to_string(),
+            bead_id: crate::history::normalize_bead_id(&cap[1]),
             kind: MatchKind::Refs,
         });
     }
@@ -287,8 +304,10 @@ mod tests {
     fn finds_action_keywords() {
         let p = IdPatterns::default();
         let mentions = find_mentions("fixes BV-123 and closes AUTH-45", &p);
-        assert!(mentions.iter().any(|m| m.bead_id == "BV-123"));
-        assert!(mentions.iter().any(|m| m.bead_id == "AUTH-45"));
+        // Builtin captures are normalized like the custom-pattern pass, so
+        // case variants of the same ID collapse to one mention.
+        assert!(mentions.iter().any(|m| m.bead_id == "bv-123"));
+        assert!(mentions.iter().any(|m| m.bead_id == "auth-45"));
     }
 
     #[test]
@@ -297,8 +316,29 @@ mod tests {
         let mentions = find_mentions("[CORE-7] refactor per PROJ-42", &p);
         assert!(mentions
             .iter()
-            .any(|m| m.bead_id == "CORE-7" && m.kind == MatchKind::Bracket));
-        assert!(mentions.iter().any(|m| m.bead_id == "PROJ-42"));
+            .any(|m| m.bead_id == "core-7" && m.kind == MatchKind::Bracket));
+        assert!(mentions.iter().any(|m| m.bead_id == "proj-42"));
+    }
+
+    #[test]
+    fn finds_legacy_beads_form() {
+        let p = IdPatterns::default();
+        let mentions = find_mentions("ported from beads-123 and beads_456", &p);
+        assert!(mentions
+            .iter()
+            .any(|m| m.bead_id == "bv-123" && m.kind == MatchKind::Bead));
+        assert!(mentions
+            .iter()
+            .any(|m| m.bead_id == "bv-456" && m.kind == MatchKind::Bead));
+    }
+
+    #[test]
+    fn builtin_mentions_normalize_case() {
+        let p = IdPatterns::default();
+        let mentions = find_mentions("Fixes BV-123, see bv-123", &p);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].bead_id, "bv-123");
+        assert_eq!(mentions[0].kind, MatchKind::Fixes);
     }
 
     #[test]

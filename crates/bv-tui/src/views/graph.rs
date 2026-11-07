@@ -5,7 +5,7 @@
 //! shows PageRank, Betweenness, HITS scores. Left panel is a scrollable
 //! node list for selection.
 
-use bv_core::model::{DependencyType, Issue, Status};
+use bv_core::model::{Issue, Status};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -42,12 +42,15 @@ impl GraphData {
         for issue in &issues {
             let mut my_blockers = Vec::new();
             for dep in &issue.dependencies {
-                if dep.r#type == DependencyType::Blocks
-                    && issue_map.contains_key(&dep.depends_on_id)
-                {
-                    my_blockers.push(dep.depends_on_id.clone());
+                // `effective_depends_on` folds legacy `depends_on`/`target_id`
+                // spellings; `is_blocking` covers `blocks`,
+                // `conditional-blocks` and `waits-for` — consistent with
+                // `deptree.rs`/`detail.rs` (audit: `audit-tui-graph-legacy-deps`).
+                let target = dep.effective_depends_on();
+                if dep.r#type.is_blocking() && issue_map.contains_key(target) {
+                    my_blockers.push(target.to_string());
                     dependents
-                        .entry(dep.depends_on_id.clone())
+                        .entry(target.to_string())
                         .or_default()
                         .push(issue.id.clone());
                 }
@@ -406,8 +409,11 @@ fn render_single_metric(lines: &mut Vec<Line>, id: &str, name: &str, map: &BTree
 }
 
 /// Generate a visual bar for a metric value (0.0-1.0 mapped to filled blocks).
+/// Clamped to `[0, max_width]` — a metric above 1.0 (or below 0.0) must not
+/// overflow the bar and push the `]` off the line.
 fn metric_bar(val: f64, max_width: usize) -> String {
-    let filled = (val * max_width as f64).round() as usize;
+    // `f64::max` drops NaN to the non-NaN operand; the usize cast saturates.
+    let filled = ((val.max(0.0) * max_width as f64).round() as usize).min(max_width);
     let empty = max_width.saturating_sub(filled);
     format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
 }

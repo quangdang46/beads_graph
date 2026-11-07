@@ -44,8 +44,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// install `bd` as shims (`bd`, `bd.cmd`, `bd.ps1`) with no `bd.exe` at all
 /// — `npm install -g @beads/bd` does exactly that — and `CreateProcess` only
 /// ever appends `.exe`, so a bare `Command::new("bd")` reports "program not
-/// found" on a machine where `bd` works fine from a shell. The shim itself
-/// runs without a `cmd /c` wrapper.
+/// found" on a machine where `bd` works fine from a shell. Script shims are
+/// not directly executable, though: [`spawn_bd_export`] wraps `.cmd`/`.bat`
+/// in `cmd /c` and `.ps1` in `powershell -File` (post-CVE-2024-24576,
+/// `CreateProcess` refuses to run them bare).
 ///
 /// On Unix it always returns the bare name: there `Command` resolves through
 /// PATH itself, so there is nothing to search. **That means `Some` does not
@@ -116,50 +118,130 @@ pub fn load_issues_from_bd_export(
 /// Spawn `bd export --all`, returning raw stdout bytes.
 ///
 /// Polls rather than blocking on `wait`, so a `bd` that never exits is killed
-/// at the deadline instead of hanging the caller.
+/// at the deadline instead of hanging the caller. Both pipes are drained on
+/// reader threads for the whole wait — see [`collect_with_timeout`].
 fn run_bd_export(repo_root: &Path) -> Result<Vec<u8>, BdExportError> {
     let exe = bd_executable()
         .ok_or_else(|| BdExportError::Spawn("`bd` was not found on PATH".to_string()))?;
-    let mut child = std::process::Command::new(exe)
-        .args(["export", "--all"])
+    let mut child =
+        spawn_bd_export(&exe, repo_root).map_err(|e| BdExportError::Spawn(e.to_string()))?;
+
+    let (status, buf, err) = collect_with_timeout(&mut child, EXPORT_TIMEOUT)?;
+    if status.success() {
+        return Ok(buf);
+    }
+    let err = String::from_utf8_lossy(&err);
+    Err(BdExportError::Failed {
+        detail: (!err.trim().is_empty()).then(|| err.trim().to_string()),
+    })
+}
+
+/// Build the `bd export --all` child process.
+///
+/// On Windows the resolved executable may be a script shim (`bd.cmd`,
+/// `bd.bat`, `bd.ps1`) that `CreateProcess` cannot execute directly, so
+/// those extensions are wrapped: `.cmd`/`.bat` go through `cmd /c`, `.ps1`
+/// through `powershell -NoProfile -ExecutionPolicy Bypass -File`. Anything
+/// else (`.exe`, extensionless) spawns directly.
+fn spawn_bd_export(exe: &Path, repo_root: &Path) -> std::io::Result<std::process::Child> {
+    let args = ["export", "--all"];
+    #[cfg(windows)]
+    {
+        let ext = exe
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "cmd" | "bat" => {
+                let mut c = std::process::Command::new("cmd");
+                c.arg("/c").arg(exe).args(args);
+                return c
+                    .current_dir(repo_root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn();
+            }
+            "ps1" => {
+                let mut c = std::process::Command::new("powershell");
+                c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                    .arg(exe)
+                    .args(args);
+                return c
+                    .current_dir(repo_root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn();
+            }
+            _ => {}
+        }
+    }
+    std::process::Command::new(exe)
+        .args(args)
         .current_dir(repo_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| BdExportError::Spawn(e.to_string()))?;
+}
 
-    let deadline = Instant::now() + EXPORT_TIMEOUT;
-    loop {
+/// Read a child pipe to EOF on a helper thread, returning the bytes via the
+/// join handle. A `None` pipe (child spawned without it) yields an empty
+/// buffer immediately.
+fn drain_pipe<R>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+/// Poll `child` to exit while both pipes drain concurrently, bounded by
+/// `timeout`. Returns `(status, stdout, stderr)`.
+///
+/// The drains are the load-bearing part: `bd export` can emit far more than
+/// the OS pipe buffer (~64KB), and a child blocked writing to a full pipe
+/// never exits. Reading only after `try_wait` reports exit deadlocked every
+/// large export into the timeout; draining while polling lets the child
+/// finish. On timeout/`try_wait` error the child is killed and both drains
+/// are joined — killing closes the pipes, so the reads terminate.
+fn collect_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), BdExportError> {
+    let stdout_thread = drain_pipe(child.stdout.take());
+    let stderr_thread = drain_pipe(child.stderr.take());
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut buf = Vec::new();
-                use std::io::Read;
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut buf);
-                }
-                return if status.success() {
-                    Ok(buf)
-                } else {
-                    let mut err = String::new();
-                    if let Some(mut e) = child.stderr.take() {
-                        let _ = e.read_to_string(&mut err);
-                    }
-                    Err(BdExportError::Failed {
-                        detail: (!err.trim().is_empty()).then(|| err.trim().to_string()),
-                    })
-                };
-            }
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
                 return Err(BdExportError::Timeout {
-                    secs: EXPORT_TIMEOUT.as_secs(),
+                    secs: timeout.as_secs(),
                 });
             }
-            Err(e) => return Err(BdExportError::Spawn(e.to_string())),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(BdExportError::Spawn(e.to_string()));
+            }
         }
-    }
+    };
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok((status, stdout, stderr))
 }
 
 #[cfg(test)]
@@ -246,7 +328,7 @@ mod tests {
     #[test]
     fn bd_due_at_lands_in_due_date() {
         let line = concat!(
-            r#"{"id":"d1","title":"Dated","status":"open","priority":1,"#,
+            r#"{"id":"d1","title":"Dated","status":"open","priority":1,"issue_type":"task","#,
             r#""created_at":"2026-10-05T01:50:10Z","updated_at":"2026-10-05T01:50:10Z","#,
             r#""due_at":"2027-01-14T17:00:00Z"}"#,
             "\n"
@@ -258,6 +340,46 @@ mod tests {
             Some("2027-01-14T17:00:00Z"),
             "due_at must not be dropped"
         );
+    }
+
+    /// Regression for the pipe-buffer deadlock: a child that writes far more
+    /// than the OS pipe buffer (~64KB) must still be collected. The old
+    /// read-after-`try_wait` shape left the child blocked on a full stdout
+    /// pipe forever, so every large `bd export` burned the whole timeout.
+    #[cfg(unix)]
+    #[test]
+    fn large_stdout_does_not_deadlock() {
+        // ~220KB of stdout — several times the pipe buffer.
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "i=0; while [ $i -lt 20000 ]; do printf 'xxxxxxxxxx\\n'; i=$((i+1)); done",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let (status, stdout, stderr) =
+            collect_with_timeout(&mut child, Duration::from_secs(20)).expect("collects");
+        assert!(status.success());
+        assert!(stdout.len() > 65536, "got {} bytes", stdout.len());
+        assert!(stderr.is_empty());
+    }
+
+    /// A child that never exits is still killed at the deadline, and the
+    /// drain threads are reaped rather than left blocked on the pipes.
+    #[cfg(unix)]
+    #[test]
+    fn hung_child_is_killed_at_the_deadline() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let err = collect_with_timeout(&mut child, Duration::from_millis(300))
+            .expect_err("must time out");
+        assert!(matches!(err, BdExportError::Timeout { .. }), "{err}");
     }
 
     /// A missing `bd` must degrade, not explode — the caller falls through to

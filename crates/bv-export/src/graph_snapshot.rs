@@ -298,12 +298,13 @@ fn build_layout(opts: &GraphSnapshotOptions, stats: &GraphStats) -> LayoutResult
             if !dep.r#type.is_blocking() {
                 continue;
             }
-            if !node_ids.contains(dep.depends_on_id.as_str()) {
+            let target = dep.effective_depends_on();
+            if !node_ids.contains(target) {
                 continue;
             }
             edges.push(LayoutEdge {
                 from: issue.id.clone(),
-                to: dep.depends_on_id.clone(),
+                to: target.to_string(),
             });
         }
     }
@@ -709,12 +710,15 @@ fn render_png(layout: &LayoutResult) -> Canvas {
         let x2 = to.x;
         let y2 = to.y + to.node_h / 2.0;
         canvas.stroke_line(x1, y1, x2, y2, COLOR_EDGE, 2.0);
-        // Go's `drawArrow`: a filled triangle pointing back along the edge.
+        // Go's `drawArrow` uses the same offsets the SVG polygon does — the
+        // triangle's base sits 8px *past* the target point, so the head
+        // points back along the edge toward the source. Matching the SVG
+        // keeps the two renderings geometrically identical.
         canvas.fill_polygon(
             &[
                 (x2 as i32, y2 as i32),
-                (x2 as i32 - 8, y2 as i32 + 4),
-                (x2 as i32 - 8, y2 as i32 - 4),
+                (x2 as i32 + 8, y2 as i32 + 4),
+                (x2 as i32 + 8, y2 as i32 - 4),
             ],
             COLOR_EDGE_ARROW,
         );

@@ -350,6 +350,24 @@ pub fn installed_tracker_capabilities(tracker: &str) -> TrackerCapabilities {
 /// whole `bv` invocation, which is the failure this gate is meant to survive.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Read a child pipe to EOF on a helper thread. Both `probe_tracker` pipes
+/// must drain WHILE the child runs: a tracker that writes more than the OS
+/// pipe buffer (~64KB) to either stream blocks on the write, never exits,
+/// and is then killed at the deadline — a false
+/// "cannot establish installed tracker capabilities" for a healthy tracker.
+fn drain_child_pipe<R>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
 fn probe_tracker(executable: &Path, tracker: &str) -> TrackerCapabilities {
     let child = std::process::Command::new(executable)
         .args(["update", "--help"])
@@ -358,17 +376,16 @@ fn probe_tracker(executable: &Path, tracker: &str) -> TrackerCapabilities {
         .spawn();
     let mut out: Option<(std::process::ExitStatus, Vec<u8>)> = None;
     if let Ok(mut c) = child {
+        let stdout_thread = drain_child_pipe(c.stdout.take());
+        let stderr_thread = drain_child_pipe(c.stderr.take());
         // Poll for the deadline rather than blocking on `wait`, so a tracker
         // that never exits is killed instead of hanging bv.
         let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
         loop {
             match c.try_wait() {
                 Ok(Some(status)) => {
-                    let mut buf = Vec::new();
-                    use std::io::Read;
-                    if let Some(mut o) = c.stdout.take() {
-                        let _ = o.read_to_end(&mut buf);
-                    }
+                    let buf = stdout_thread.join().unwrap_or_default();
+                    let _ = stderr_thread.join();
                     out = Some((status, buf));
                     break;
                 }
@@ -378,8 +395,14 @@ fn probe_tracker(executable: &Path, tracker: &str) -> TrackerCapabilities {
                 Ok(None) => {
                     let _ = c.kill();
                     let _ = c.wait();
+                    // Killing closes the pipes, so both drains terminate.
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
                     break;
                 }
+                // `try_wait` error: leave the child alone (same as before)
+                // and detach the drain threads — joining could block on a
+                // still-running child.
                 Err(_) => break,
             }
         }
@@ -494,7 +517,7 @@ fn capability_cache_put(key: String, caps: &TrackerCapabilities) {
 fn lookup_path(name: &str) -> Option<PathBuf> {
     if name.contains('/') || name.contains('\\') {
         let p = Path::new(name);
-        return if p.is_file() {
+        return if is_executable(p) {
             Some(p.to_path_buf())
         } else {
             None
@@ -505,12 +528,32 @@ fn lookup_path(name: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path_var) {
         for ext in &extensions {
             let candidate = dir.join(format!("{name}{ext}"));
-            if candidate.is_file() {
+            if is_executable(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+/// Go `exec.LookPath`'s `findExecutable` check: on Unix a candidate must be
+/// executable (`mode & 0111`), not merely present — a non-executable `br` or
+/// `bd` earlier in PATH must be skipped so the capability probe does not
+/// bind a binary it can never spawn. Windows has no execute bit; `is_file`
+/// is the whole check there.
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(p) {
+        Ok(m) => !m.is_dir() && m.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+/// Windows counterpart: existence as a file is sufficient.
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.is_file()
 }
 
 /// The suffixes to try for a bare command name, most specific first.
@@ -570,6 +613,7 @@ fn executable_extensions(name: &str) -> Vec<String> {
 ///
 /// A symlink still resolves, which is the point of the function — Go
 /// resolves one so that the origin's database path points at the live file.
+#[cfg(not(windows))]
 pub fn eval_symlinks(path: &Path) -> std::io::Result<PathBuf> {
     let raw = path.to_string_lossy().into_owned();
     let mut dest: PathBuf = if path.is_absolute() {
@@ -618,6 +662,88 @@ pub fn eval_symlinks(path: &Path) -> std::io::Result<PathBuf> {
                 }
                 // A relative target is resolved against the directory the
                 // link was found in, which is where `dest` already stands.
+            }
+        }
+    }
+    Ok(dest)
+}
+
+/// Windows counterpart of [`eval_symlinks`]. `Path::components` treats both
+/// `/` and `\` as separators (Go `os.IsPathSeparator` accepts both on
+/// Windows), so `C:\a\..\b` collapses correctly where the Unix `'/'`-only
+/// string split could never see a `\` boundary — a Windows path used to keep
+/// every `..` literal and fail the metadata-declared-source comparison.
+///
+/// Component spelling is preserved exactly like the Unix walk: only symlink
+/// targets are substituted, never the on-disk casing `realpath` would return.
+#[cfg(windows)]
+pub fn eval_symlinks(path: &Path) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+
+    /// The path's anchor — drive/UNC prefix plus root (`C:\`, `\\srv\shr\`)
+    /// — or empty for a relative path.
+    fn root_of(p: &Path) -> PathBuf {
+        let mut root = PathBuf::new();
+        for c in p.components() {
+            match c {
+                Component::Prefix(_) | Component::RootDir => root.push(c.as_os_str()),
+                _ => break,
+            }
+        }
+        root
+    }
+
+    /// The walkable components of `p`: normals plus `.`/`..`, minus the
+    /// anchor `root_of` already consumed.
+    fn pending_of(p: &Path) -> Vec<std::ffi::OsString> {
+        let mut out = Vec::new();
+        for c in p.components() {
+            match c {
+                Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+                Component::ParentDir => out.push("..".into()),
+                Component::Normal(os) => out.push(os.to_os_string()),
+            }
+        }
+        out
+    }
+
+    let mut dest = if path.is_absolute() {
+        root_of(path)
+    } else {
+        std::env::current_dir()?
+    };
+    let mut pending = pending_of(path);
+    // Go bails out after 255 hops (path/filepath/symlink.go:23).
+    let mut hops = 0usize;
+    while !pending.is_empty() {
+        let component = pending.remove(0);
+        let text = component.to_string_lossy();
+        match text.as_ref() {
+            "." => {}
+            ".." => {
+                dest.pop();
+            }
+            _ => {
+                let candidate = dest.join(&component);
+                let meta = std::fs::symlink_metadata(&candidate)?;
+                if !meta.file_type().is_symlink() {
+                    dest.push(&component);
+                    continue;
+                }
+                hops += 1;
+                if hops > 255 {
+                    return Err(std::io::Error::other("too many levels of symbolic links"));
+                }
+                let target = std::fs::read_link(&candidate)?;
+                let mut expanded = pending_of(&target);
+                expanded.append(&mut pending);
+                pending = expanded;
+                if target.is_absolute() {
+                    // An absolute target restarts the walk at its own anchor.
+                    dest = root_of(&target);
+                }
+                // A relative target resolves against the directory the link
+                // was found in, which is where `dest` already stands.
             }
         }
     }
@@ -899,6 +1025,52 @@ mod tests {
     fn shell_quote_escapes_single_quotes() {
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
         assert_eq!(shell_quote("plain"), "'plain'");
+    }
+
+    /// Every argv element — including the `NAME=value` env assignments —
+    /// must reach the emitted shell string quoted, or a tracker/database
+    /// path containing a space breaks the copy-paste command.
+    #[test]
+    fn env_assignments_are_quoted_in_the_shell_string() {
+        let mut o = origin();
+        o.working_directory = "/repo dir".into();
+        o.tracker_directory = "/repo dir/.beads".into();
+        o.database = "/repo dir/.beads/beads.db".into();
+        let cmd = build_command(&o, false, &["show", "--json", "--", "abc-1"]);
+        assert!(
+            cmd.shell.contains("'BEADS_DIR=/repo dir/.beads'"),
+            "{}",
+            cmd.shell
+        );
+        assert!(
+            cmd.shell.contains("'BEADS_DB=/repo dir/.beads/beads.db'"),
+            "{}",
+            cmd.shell
+        );
+        assert!(cmd.shell.contains("cd -- '/repo dir'"), "{}", cmd.shell);
+        // argv stays raw for programmatic consumers.
+        assert!(cmd.argv.contains(&"BEADS_DIR=/repo dir/.beads".to_string()));
+    }
+
+    /// On Unix a PATH candidate without an execute bit must be skipped —
+    /// Go `exec.LookPath`'s `findExecutable` requires `mode & 0111`, and a
+    /// non-executable `br` earlier in PATH would otherwise win the lookup
+    /// and then fail the capability probe.
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_path_candidate_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("bvr-lookpath-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("plainfile");
+        std::fs::write(&plain, "x").unwrap();
+        assert!(!is_executable(&plain), "0644 file must not be executable");
+        let mut perms = std::fs::metadata(&plain).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plain, perms).unwrap();
+        assert!(is_executable(&plain));
+        assert!(!is_executable(&dir.join("missing")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

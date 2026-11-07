@@ -40,13 +40,12 @@ pub fn build_tree_nodes(issues: &[&Issue], collapsed: &HashSet<String>) -> Vec<T
 
     for issue in issues {
         for dep in &issue.dependencies {
-            if dep.r#type == DependencyType::ParentChild
-                && by_id.contains_key(dep.depends_on_id.as_str())
-            {
-                children_of
-                    .entry(dep.depends_on_id.as_str())
-                    .or_default()
-                    .push(issue);
+            // `effective_depends_on` folds the legacy `depends_on`/`target_id`
+            // spellings into the canonical field — reading `depends_on_id`
+            // raw silently dropped legacy-spelled parent-child edges.
+            let target = dep.effective_depends_on();
+            if dep.r#type == DependencyType::ParentChild && by_id.contains_key(target) {
+                children_of.entry(target).or_default().push(issue);
                 has_parent.insert(issue.id.as_str());
                 break;
             }
@@ -59,6 +58,15 @@ pub fn build_tree_nodes(issues: &[&Issue], collapsed: &HashSet<String>) -> Vec<T
         .copied()
         .collect();
     roots.sort_by(|a, b| a.id.cmp(&b.id));
+    if roots.is_empty() && !issues.is_empty() {
+        // Pure parent-child cycle: every issue has a parent, so there are no
+        // roots and the tree would render blank. Fall back to the first
+        // sorted issue — `deptree.rs` (`roots = if roots.is_empty() { vec![0] }`)
+        // does the same; the `visited` guard in `push_node` stops the cycle.
+        if let Some(first) = issues.iter().min_by(|a, b| a.id.cmp(&b.id)) {
+            roots.push(*first);
+        }
+    }
     for kids in children_of.values_mut() {
         kids.sort_by(|a, b| a.id.cmp(&b.id));
     }

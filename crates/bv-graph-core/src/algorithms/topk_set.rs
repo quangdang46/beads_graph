@@ -5,6 +5,7 @@
 //! the node with maximum marginal gain.
 
 use crate::graph::DiGraph;
+use crate::reachability::actionable_nodes;
 use crate::whatif::what_if_close;
 use serde::Serialize;
 
@@ -13,9 +14,9 @@ use serde::Serialize;
 pub struct TopKSetItem {
     /// Node index in the graph
     pub node: usize,
-    /// Marginal gain from selecting this node (transitive unblocks)
+    /// Marginal gain from selecting this node (direct newly-actionable count)
     pub marginal_gain: usize,
-    /// IDs of nodes that become actionable after this selection
+    /// Indices of nodes that become actionable after this selection
     pub unblocked_ids: Vec<usize>,
 }
 
@@ -32,9 +33,13 @@ pub struct TopKSetResult {
 
 /// Greedy submodular selection for maximum unlock.
 ///
-/// Iteratively selects nodes that maximize transitive unblocks.
-/// Each iteration simulates closing the best node and updates
-/// the closed set for the next iteration.
+/// Ports Go `generateTopKSet` (pkg/analysis/advanced_insights.go:458):
+/// each iteration re-derives the actionable set after the picks simulated
+/// so far and selects only from it, so a blocked high-fanout node can never
+/// precede its prerequisite. The gain is the DIRECT newly-actionable count
+/// (`computeMarginalUnblocksFromBefore`), not the transitive cascade, and
+/// only the selected node is marked complete — unblocked nodes stay open
+/// and become candidates in later iterations.
 ///
 /// # Arguments
 /// * `graph` - The directed dependency graph
@@ -45,8 +50,8 @@ pub struct TopKSetResult {
 /// TopKSetResult with selected items sorted by selection order.
 ///
 /// # Complexity
-/// O(n * k * n) = O(n²k) where n is node count and k is selection limit.
-/// Each iteration evaluates all open nodes using what_if_close.
+/// O(k * (n + a * (n + e))) where a is the actionable count and e the edge
+/// count — one what-if evaluation per actionable candidate per iteration.
 pub fn topk_set(graph: &DiGraph, closed_set: &[bool], k: usize) -> TopKSetResult {
     let n = graph.len();
     if n == 0 || k == 0 {
@@ -57,7 +62,7 @@ pub fn topk_set(graph: &DiGraph, closed_set: &[bool], k: usize) -> TopKSetResult
         };
     }
 
-    // Initialize working closed set
+    // Initialize working closed set (real closed set + simulated completions)
     let mut current_closed = closed_set.to_vec();
     current_closed.resize(n, false);
 
@@ -68,47 +73,68 @@ pub fn topk_set(graph: &DiGraph, closed_set: &[bool], k: usize) -> TopKSetResult
     let mut total_gain = 0;
 
     for _ in 0..k {
-        // Find node with maximum marginal gain among open nodes
+        // Go getActionableIssuesAfterCompletions(completed): the candidate
+        // pool is re-derived each step — only nodes whose blockers are all
+        // closed or already selected. Sorted by index for determinism.
+        let remaining = actionable_nodes(graph, &current_closed);
+        if remaining.is_empty() {
+            break;
+        }
+
+        // `before` = the currently-actionable set. An already-ready issue is
+        // not a new unlock (advanced_insights.go:582), so it can never
+        // appear in a candidate's unblocks.
+        let mut before = vec![false; n];
+        for &id in &remaining {
+            before[id] = true;
+        }
+
         let mut best_node: Option<usize> = None;
-        let mut best_gain = 0;
-        let mut best_unblocked: Vec<usize> = Vec::new();
+        let mut best_gain = 0usize;
+        let mut best_unblocks: Vec<usize> = Vec::new();
 
-        // Collect candidates (non-closed nodes)
-        let mut candidates: Vec<usize> = (0..n).filter(|&i| !current_closed[i]).collect();
-        // Sort for determinism when gains are equal
-        candidates.sort_unstable();
-
-        for node in candidates {
-            let result = what_if_close(graph, node, &current_closed);
-            let gain = result.transitive_unblocks;
+        for &cand in &remaining {
+            // Direct newly-actionable count only — equivalent to Go's
+            // computeMarginalUnblocksFromBefore: successors of `cand` that
+            // were blocked before and are actionable after, excluding the
+            // already-actionable `before` set. what_if_close's
+            // unblocked_ids is exactly that set (the transitive cascade in
+            // cascade_ids must NOT be used for the gain).
+            let mut unblocks = what_if_close(graph, cand, &current_closed).unblocked_ids;
+            unblocks.retain(|&w| !before[w]);
+            unblocks.sort_unstable();
+            unblocks.dedup();
+            let gain = unblocks.len();
 
             // Prefer higher gain, or lower node index for determinism
-            if gain > best_gain || (gain == best_gain && best_node.is_none()) {
+            // (Go tie-breaks on ID; index order matches ID order here).
+            let better = match best_node {
+                None => true,
+                Some(b) => gain > best_gain || (gain == best_gain && cand < b),
+            };
+            if better {
                 best_gain = gain;
-                best_node = Some(node);
-                best_unblocked = result.cascade_ids;
+                best_node = Some(cand);
+                best_unblocks = unblocks;
             }
         }
 
-        match best_node {
-            Some(node) if best_gain > 0 => {
-                selected.push(TopKSetItem {
-                    node,
-                    marginal_gain: best_gain,
-                    unblocked_ids: best_unblocked.clone(),
-                });
-                // Mark the selected node as closed
-                current_closed[node] = true;
-                // Also mark all cascade nodes as closed (they'll be completed transitively)
-                for &cascade_node in &best_unblocked {
-                    if cascade_node < n {
-                        current_closed[cascade_node] = true;
-                    }
-                }
-                total_gain += best_gain;
-            }
-            _ => break, // No more beneficial nodes
-        }
+        // Go selects the best candidate unconditionally once `remaining` is
+        // non-empty (bestGain starts at -1), even when its gain is 0.
+        let node = match best_node {
+            Some(node) => node,
+            None => break,
+        };
+        selected.push(TopKSetItem {
+            node,
+            marginal_gain: best_gain,
+            unblocked_ids: best_unblocks,
+        });
+        // Mark ONLY the selected node as complete. Go inserts just
+        // `completed[bestID]` — newly actionable nodes remain open and are
+        // re-evaluated as candidates on the next iteration.
+        current_closed[node] = true;
+        total_gain += best_gain;
     }
 
     TopKSetResult {
@@ -152,35 +178,56 @@ mod tests {
         let mut g = DiGraph::new();
         g.add_node("a");
         let result = topk_set(&g, &[false], 5);
-        // Single node with no dependents has no gain
-        assert!(result.items.is_empty());
+        // Go selects the only actionable candidate even at gain 0
+        // (bestGain starts at -1; there is no positive-gain gate).
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].node, 0);
+        assert_eq!(result.items[0].marginal_gain, 0);
         assert_eq!(result.total_gain, 0);
     }
 
     #[test]
     fn test_simple_chain() {
         // 0 -> 1 -> 2 -> 3
-        // Completing 0 unblocks 1,2,3 (gain=3)
-        // Then 1 is closed, 2,3 remain but no more gain from selecting 1
+        // Go generateTopKSet picks only ACTIONABLE nodes and counts DIRECT
+        // newly-actionable unblocks: each pick gains exactly 1.
         let g = make_graph(&[(0, 1), (1, 2), (2, 3)]);
         let result = topk_set(&g, &[false; 4], 5);
 
-        assert!(!result.items.is_empty());
-        // First selection should be 0 (highest impact)
+        assert_eq!(result.items.len(), 4);
         assert_eq!(result.items[0].node, 0);
-        assert_eq!(result.items[0].marginal_gain, 3);
+        assert_eq!(result.items[0].marginal_gain, 1);
+        assert_eq!(result.items[0].unblocked_ids, vec![1]);
+        assert_eq!(result.total_gain, 3);
+    }
+
+    #[test]
+    fn test_blocked_hub_not_picked_first() {
+        // Regression: 0 -> 1, and 1 fans out to 2,3,4. Node 1 has the
+        // highest fanout but is BLOCKED by 0 — Go only picks from the
+        // actionable set, so 0 must come first.
+        let g = make_graph(&[(0, 1), (1, 2), (1, 3), (1, 4)]);
+        let result = topk_set(&g, &[false; 5], 5);
+
+        assert_eq!(result.items[0].node, 0);
+        assert_eq!(result.items[1].node, 1);
+        assert_eq!(result.items[1].marginal_gain, 3);
+        assert_eq!(result.items[1].unblocked_ids, vec![2, 3, 4]);
     }
 
     #[test]
     fn test_fork_pattern() {
-        // Hub -> A, B, C (hub unblocks 3)
+        // Hub -> A, B, C (hub unblocks 3 directly)
         let g = make_graph(&[(0, 1), (0, 2), (0, 3)]);
         let result = topk_set(&g, &[false; 4], 5);
 
-        assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].node, 0); // Hub
         assert_eq!(result.items[0].marginal_gain, 3);
+        assert_eq!(result.items[0].unblocked_ids, vec![1, 2, 3]);
         assert_eq!(result.total_gain, 3);
+        // After the hub, the three leaves are picked with gain 0 (Go selects
+        // unconditionally while candidates remain).
+        assert_eq!(result.items.len(), 4);
     }
 
     #[test]
@@ -202,13 +249,16 @@ mod tests {
     #[test]
     fn test_submodularity() {
         // Chain: 0 -> 1 -> 2 -> 3 -> 4
-        // First selection: 0 (gain=4)
-        // After that, no more nodes with positive gain (all unblocked)
+        // Each pick directly unblocks exactly one node; Go still fills all
+        // k slots while candidates remain (last pick has gain 0).
         let g = make_graph(&[(0, 1), (1, 2), (2, 3), (3, 4)]);
         let result = topk_set(&g, &[false; 5], 5);
 
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].marginal_gain, 4);
+        assert_eq!(result.items.len(), 5);
+        assert_eq!(result.items[0].node, 0);
+        assert_eq!(result.items[0].marginal_gain, 1);
+        assert_eq!(result.items[4].marginal_gain, 0);
+        assert_eq!(result.total_gain, 4);
     }
 
     #[test]
@@ -221,7 +271,10 @@ mod tests {
 
         assert!(!result.items.is_empty());
         assert_eq!(result.items[0].node, 1);
-        assert_eq!(result.items[0].marginal_gain, 2); // 2 and 3
+        // Direct unblocks only: closing 1 makes 2 actionable (3 still waits
+        // on 2), so gain is 1 — not the transitive cascade of 2.
+        assert_eq!(result.items[0].marginal_gain, 1);
+        assert_eq!(result.items[0].unblocked_ids, vec![2]);
     }
 
     #[test]
@@ -294,8 +347,11 @@ mod tests {
         let g = make_graph(&edges);
         let result = topk_set(&g, &[false; 10], 5);
 
-        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items.len(), 5);
         assert_eq!(result.items[0].node, 0);
-        assert_eq!(result.items[0].marginal_gain, 9);
+        // Direct unblocks only: each pick in a chain unlocks exactly one node.
+        assert_eq!(result.items[0].marginal_gain, 1);
+        assert_eq!(result.items[0].unblocked_ids, vec![1]);
+        assert_eq!(result.total_gain, 5);
     }
 }

@@ -76,7 +76,11 @@ pub fn compute_time_to_impact(
 /// Go: `computeUrgency` — label weights + exponential decay (half-life 7d).
 pub fn compute_urgency(labels: &[String], created_at: Option<&str>, now: &jiff::Timestamp) -> f64 {
     let mut score = 0.0f64;
-    'outer: for label in labels {
+    // Go's inner `break` exits the KEYWORD loop only (priority.go:563-571):
+    // every label that contains an urgency keyword adds its weight, not just
+    // the first matching label overall. `break 'outer` here collapsed the
+    // whole scan to one contribution.
+    for label in labels {
         let lower = label.to_lowercase();
         for urgent in URGENCY_LABELS {
             if lower.contains(urgent) {
@@ -86,7 +90,7 @@ pub fn compute_urgency(labels: &[String], created_at: Option<&str>, now: &jiff::
                     "asap" => 0.6,
                     _ => 0.0,
                 };
-                break 'outer;
+                break;
             }
         }
     }
@@ -161,7 +165,9 @@ pub fn urgency_explanation(
     let Ok(created) = raw.parse::<jiff::Timestamp>() else {
         return reasons.join(", ");
     };
-    let days = (*now - created).total(jiff::Unit::Second).unwrap_or(0.0) / 86400.0;
+    // Same `Duration.Hours() / 24` rounding as compute_urgency above — Go
+    // derives the explanation's age from the identical expression.
+    let days = crate::go_time::duration_days(crate::go_time::duration_nanos(*now, created));
     if days >= 14.0 {
         reasons.push(format!("aging ({days:.0} days)"));
     }
@@ -308,7 +314,10 @@ fn compute_status_risk(issue: &Issue, now: &jiff::Timestamp) -> f64 {
         Status::Blocked => {
             if let Some(raw) = issue.updated_at.as_deref() {
                 if let Ok(t) = raw.parse::<jiff::Timestamp>() {
-                    let days = (*now - t).total(jiff::Unit::Second).unwrap_or(0.0) / 86400.0;
+                    // Go `now.Sub(updatedAt).Hours() / 24` (risk.go) — the
+                    // Duration.Hours() rounding path, not seconds/86400.
+                    let days =
+                        crate::go_time::duration_days(crate::go_time::duration_nanos(*now, t));
                     if days > 7.0 {
                         return 0.9;
                     }
@@ -319,7 +328,8 @@ fn compute_status_risk(issue: &Issue, now: &jiff::Timestamp) -> f64 {
         Status::InProgress => {
             if let Some(raw) = issue.updated_at.as_deref() {
                 if let Ok(t) = raw.parse::<jiff::Timestamp>() {
-                    let days = (*now - t).total(jiff::Unit::Second).unwrap_or(0.0) / 86400.0;
+                    let days =
+                        crate::go_time::duration_days(crate::go_time::duration_nanos(*now, t));
                     if days > 14.0 {
                         return 0.8;
                     } else if days > 7.0 {
@@ -334,7 +344,8 @@ fn compute_status_risk(issue: &Issue, now: &jiff::Timestamp) -> f64 {
         Status::Open => {
             if let Some(raw) = issue.created_at.as_deref() {
                 if let Ok(t) = raw.parse::<jiff::Timestamp>() {
-                    let days = (*now - t).total(jiff::Unit::Second).unwrap_or(0.0) / 86400.0;
+                    let days =
+                        crate::go_time::duration_days(crate::go_time::duration_nanos(*now, t));
                     if days > 30.0 {
                         return 0.3;
                     }
@@ -1091,6 +1102,23 @@ mod tests {
         let u2 = compute_urgency(&no_labels, Some(&ancient), &now);
         // decay approaches but never exceeds 0.5
         assert!(u2 < 0.51 && u2 > 0.45);
+    }
+
+    #[test]
+    fn urgency_sums_every_matching_label_not_just_the_first() {
+        // Go's inner `break` exits the KEYWORD loop only: each label that
+        // contains an urgency keyword contributes its weight. ["urgent",
+        // "asap"] is 0.8 + 0.6 = 1.4, capped at 1.0 — the old `break 'outer'
+        // stopped after the first matching label and scored 0.8.
+        let now = jiff::Timestamp::now();
+        let labels = vec!["urgent".to_string(), "asap".to_string()];
+        assert_eq!(compute_urgency(&labels, None, &now), 1.0);
+        // A single non-critical label keeps its own weight uncapped-by-peer.
+        let one = vec!["urgent".to_string()];
+        assert!((compute_urgency(&one, None, &now) - 0.8).abs() < 1e-12);
+        // Two sub-cap weights still sum past either alone: 0.6 + 0.8 = 1.4.
+        let two = vec!["asap".to_string(), "hotfix".to_string()];
+        assert_eq!(compute_urgency(&two, None, &now), 1.0);
     }
 
     #[test]

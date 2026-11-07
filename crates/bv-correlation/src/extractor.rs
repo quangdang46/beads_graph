@@ -291,9 +291,12 @@ fn ignorable_metadata_line(line: &str) -> bool {
 }
 
 /// Go `parseBeadJSON`: parse one committed record line. Only the fields the
-/// event evidence needs are read; `dependencies` is deserialized through
-/// `bv_core::model::Dependency` so the legacy `depends_on` / `target_id`
-/// target spellings fold the same way they do everywhere else.
+/// event evidence needs are read; `dependencies` folds the legacy
+/// `depends_on` / `target_id` target spellings into `depends_on_id` the same
+/// way `bv_core::model::Dependency::effective_depends_on` does (Go
+/// `Dependency.UnmarshalJSON`), while `type` is kept as the raw string the
+/// record carried — Go's `DependencyType` is a plain string, so an absent
+/// type stays `""` rather than normalizing to `"blocks"`.
 pub fn parse_bead_json(json_str: &str) -> Option<BeadSnapshot> {
     #[derive(serde::Deserialize)]
     struct Partial {
@@ -304,7 +307,32 @@ pub fn parse_bead_json(json_str: &str) -> Option<BeadSnapshot> {
         #[serde(default)]
         title: String,
         #[serde(default)]
-        dependencies: Vec<bv_core::model::Dependency>,
+        dependencies: Vec<RawDependency>,
+    }
+    /// The dependency edge as written in the committed record. Serde field
+    /// names mirror `bv_core::model::Dependency` so the same legacy spellings
+    /// are accepted; the fold order matches `effective_depends_on`.
+    #[derive(serde::Deserialize)]
+    struct RawDependency {
+        #[serde(default, rename = "depends_on_id")]
+        depends_on_id: String,
+        #[serde(default, rename = "depends_on")]
+        depends_on: String,
+        #[serde(default, rename = "target_id")]
+        target_id: String,
+        #[serde(default, rename = "type")]
+        dep_type: String,
+    }
+    impl RawDependency {
+        fn effective_depends_on(&self) -> &str {
+            if !self.depends_on_id.is_empty() {
+                &self.depends_on_id
+            } else if !self.depends_on.is_empty() {
+                &self.depends_on
+            } else {
+                &self.target_id
+            }
+        }
     }
     let p: Partial = serde_json::from_str(json_str).ok()?;
     if p.id.is_empty() {
@@ -317,8 +345,8 @@ pub fn parse_bead_json(json_str: &str) -> Option<BeadSnapshot> {
         p.dependencies
             .into_iter()
             .map(|d| HistoricalDependency {
-                depends_on_id: d.depends_on_id,
-                dep_type: d.r#type.as_str().to_string(),
+                depends_on_id: d.effective_depends_on().to_string(),
+                dep_type: d.dep_type,
             })
             .collect()
     };
@@ -606,6 +634,38 @@ mod tests {
                 depends_on_id: "X-1".to_string(),
                 dep_type: "blocks".to_string(),
             }]
+        );
+    }
+
+    /// Legacy `depends_on` / `target_id` spellings fold into `depends_on_id`
+    /// (Go `Dependency.UnmarshalJSON`), and an absent `type` stays `""` —
+    /// Go's `DependencyType` is a plain string, not normalized to "blocks".
+    #[test]
+    fn legacy_dependency_spellings_fold_and_untyped_stays_empty() {
+        let snap = parse_bead_json(
+            r#"{"id":"X-1","status":"open","dependencies":[
+                {"depends_on":"X-2"},
+                {"target_id":"X-3","type":"related"},
+                {"depends_on_id":"X-4","type":""}
+            ]}"#,
+        )
+        .expect("snapshot");
+        assert_eq!(
+            snap.dependencies,
+            vec![
+                HistoricalDependency {
+                    depends_on_id: "X-2".to_string(),
+                    dep_type: String::new(),
+                },
+                HistoricalDependency {
+                    depends_on_id: "X-3".to_string(),
+                    dep_type: "related".to_string(),
+                },
+                HistoricalDependency {
+                    depends_on_id: "X-4".to_string(),
+                    dep_type: String::new(),
+                },
+            ]
         );
     }
 

@@ -3,9 +3,13 @@
 
 use ratatui::style::Color;
 
-/// Render a progress bar as text.
+/// Render a progress bar as text. `progress` is clamped to `[0, 1]` —
+/// out-of-range input must not overflow the filled segment past `width`
+/// (audit: `audit-tui-progressbar-clamp`).
 pub fn progress_bar(progress: f64, width: usize) -> String {
-    let filled = (progress * width as f64).round() as usize;
+    // `f64::max` maps NaN to the non-NaN operand; the usize cast saturates,
+    // and `.min(width)` caps the top end.
+    let filled = ((progress.max(0.0) * width as f64).round() as usize).min(width);
     let empty = width.saturating_sub(filled);
     format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
 }

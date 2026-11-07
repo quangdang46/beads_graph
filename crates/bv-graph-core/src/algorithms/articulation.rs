@@ -123,10 +123,17 @@ fn build_undirected_neighbors(graph: &DiGraph) -> Vec<Vec<usize>> {
         }
     }
 
-    // Convert to Vec<Vec> for faster iteration
+    // Convert to Vec<Vec> for faster iteration. Sort each list: HashSet
+    // iteration order is randomized, and DFS discovery order determines
+    // the order `bridges` (and any tie-broken output) is emitted in —
+    // unsorted neighbours make results nondeterministic run to run.
     neighbors
         .into_iter()
-        .map(|s| s.into_iter().collect())
+        .map(|s| {
+            let mut v: Vec<usize> = s.into_iter().collect();
+            v.sort_unstable();
+            v
+        })
         .collect()
 }
 
@@ -341,7 +348,33 @@ mod tests {
         graph.add_edge(b, c);
 
         let br = bridges(&graph);
-        assert_eq!(br.len(), 2);
+        // DFS unwinds deepest-first: (b,c) is reported before (a,b). The
+        // exact order is pinned because neighbour order is now sorted.
+        assert_eq!(br, vec![(b, c), (a, b)]);
+    }
+
+    /// Bridges are emitted in DFS finish order, which depends on neighbour
+    /// iteration order. The undirected adjacency is built through HashSets,
+    /// so without an explicit sort the output order was nondeterministic.
+    /// Sorted neighbours make it stable.
+    #[test]
+    fn test_bridges_deterministic_order() {
+        // 0-1 plus triangle 1-2-3-1, with edges inserted in an order that
+        // cannot be relied on (HashSet iteration is randomized).
+        let mut graph = DiGraph::new();
+        for i in 0..4 {
+            graph.add_node(&format!("n{}", i));
+        }
+        graph.add_edge(2, 3);
+        graph.add_edge(0, 1);
+        graph.add_edge(3, 1); // undirected 1-3
+        graph.add_edge(1, 2);
+        graph.add_edge(3, 2); // duplicate of 2-3, deduped
+
+        let br = bridges(&graph);
+        // (1,3) and (2,3) are inside the triangle — not bridges. Only the
+        // pendant edge (0,1) is, and it must be reported exactly once.
+        assert_eq!(br, vec![(0, 1)]);
     }
 
     #[test]

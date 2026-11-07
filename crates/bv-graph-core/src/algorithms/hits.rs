@@ -82,6 +82,17 @@ pub fn hits(graph: &DiGraph, config: &HITSConfig) -> HITSResult {
     let mut delta_hub = vec![0.0_f64; n];
     let mut iterations = 0;
 
+    // Zero-cap convention shared with pagerank/eigenvector (`for _ in
+    // 0..max_iterations`): a cap of 0 means ZERO iterations and returns the
+    // initial vectors — the loop below would otherwise always run once.
+    if config.max_iterations == 0 {
+        return HITSResult {
+            hubs,
+            authorities: auth,
+            iterations: 0,
+        };
+    }
+
     loop {
         iterations += 1;
 
@@ -231,6 +242,25 @@ mod tests {
         let result = hits_default(&graph);
         assert_eq!(result.hubs.len(), 1);
         assert_eq!(result.authorities.len(), 1);
+    }
+
+    #[test]
+    fn test_hits_zero_max_iterations() {
+        // max_iterations = 0 must run zero iterations (pagerank/eigenvector
+        // `0..max` convention), returning the initial all-ones vectors.
+        let mut graph = DiGraph::new();
+        let a = graph.add_node("a");
+        let b = graph.add_node("b");
+        graph.add_edge(a, b);
+
+        let config = HITSConfig {
+            tolerance: 1e-3,
+            max_iterations: 0,
+        };
+        let result = hits(&graph, &config);
+        assert_eq!(result.iterations, 0);
+        assert!(result.hubs.iter().all(|&v| v == 1.0));
+        assert!(result.authorities.iter().all(|&v| v == 1.0));
     }
 
     #[test]

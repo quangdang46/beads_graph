@@ -4,6 +4,7 @@
 //! subgraph from dirty nodes and update only affected metrics.
 
 use bv_graph_core::DiGraph;
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Tracks which issues changed since last analysis.

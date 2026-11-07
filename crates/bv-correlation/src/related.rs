@@ -425,9 +425,11 @@ fn find_dependency_cluster(
 /// Go `findConcurrent` — beads active in the same time window as the target.
 ///
 /// The target's window is widened by [`RelatedWorkOptions::concurrency_window`]
-/// on both sides; a candidate qualifies when its window overlaps the widened
-/// one. Relevance is 30 for any overlap, plus up to 50 scaled by how much of
-/// the target's own span the overlap covers.
+/// on both sides for the *qualification* test; a candidate qualifies when its
+/// window overlaps the widened one. The overlap itself — the relevance bonus
+/// and the "N days of overlapping activity" reason — is measured against the
+/// target's own `[start, end]` span, so slack-region activity cannot inflate
+/// the score past what real concurrency earns.
 fn find_concurrent(
     report: &HistoryReport,
     target_id: &str,
@@ -462,7 +464,13 @@ fn find_concurrent(
         if bead_start > window_end || bead_end < window_start {
             continue;
         }
-        let overlap_duration = bead_end.min(window_end) - bead_start.max(window_start);
+        // Overlap is measured against the target's real span, not the widened
+        // qualification window — a candidate touching only the slack earns
+        // the flat 30, never the scaled bonus.
+        let target_start_ns = target_start.as_nanosecond();
+        let target_end_ns = target_end.as_nanosecond();
+        let overlap_duration =
+            (bead_end.min(target_end_ns) - bead_start.max(target_start_ns)).max(0);
 
         let mut relevance = 30;
         if target_duration > 0 {
@@ -956,6 +964,55 @@ mod tests {
             "{:?}",
             over_100.concurrent
         );
+    }
+
+    /// A candidate touching only the ±concurrency_window slack qualifies as
+    /// concurrent but must not earn the scaled overlap bonus: relevance is
+    /// measured against the target's own `[start, end]` span.
+    #[test]
+    fn concurrent_bonus_ignores_slack_only_overlap() {
+        let mut histories = BTreeMap::new();
+        histories.insert(
+            "bd-1".into(),
+            history(
+                "bd-1",
+                "target",
+                "open",
+                Some("2026-01-10T00:00:00Z"),
+                None,
+                vec![commit("aaaaaaaa1", "2026-01-11T00:00:00Z", &["src/a.rs"])],
+            ),
+        );
+        // Closed 2026-01-05, five days before the target's start — inside the
+        // default 7-day slack, outside the target's real window.
+        histories.insert(
+            "bd-slack".into(),
+            history(
+                "bd-slack",
+                "slack neighbour",
+                "closed",
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-01-05T00:00:00Z"),
+                vec![commit("bbbbbbbb1", "2026-01-02T00:00:00Z", &["other/z.rs"])],
+            ),
+        );
+        let report = report(histories);
+        let mut opts = default_related_work_options();
+        opts.include_closed = true;
+        let result = find_related_work_at(
+            &report,
+            "bd-1",
+            &opts,
+            "2026-01-20T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        let concurrent = RelatedWorkResult::category(&result.concurrent);
+        let slack = concurrent
+            .iter()
+            .find(|b| b.bead_id == "bd-slack")
+            .expect("slack-only neighbour still qualifies");
+        assert_eq!(slack.relevance, 30, "{slack:?}");
+        assert_eq!(slack.reason, "Active in same time window");
     }
 
     #[test]

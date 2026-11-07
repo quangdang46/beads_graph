@@ -101,11 +101,20 @@ impl AnalysisCache {
         }
         let key = cache_key(data_hash16, config_hash16);
         // LRU bound: evict least-recently-accessed when over capacity.
+        // `min_by_key` over a HashMap resolves `last_access` ties by
+        // iteration order, which is randomized per process — two entries
+        // touched in the same `Instant` tick (or a test that never touches)
+        // evicted a different key on every run. Tie-break on the key so the
+        // victim is deterministic.
         if self.entries.len() >= MAX_ENTRIES && !self.entries.contains_key(&key) {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, r)| r.last_access)
+                .min_by(|x, y| {
+                    x.1.last_access
+                        .cmp(&y.1.last_access)
+                        .then_with(|| x.0.cmp(y.0))
+                })
                 .map(|(k, _)| k.clone());
             if let Some(k) = oldest {
                 self.entries.remove(&k);
@@ -170,6 +179,34 @@ mod tests {
         assert_eq!(c.entries.len(), MAX_ENTRIES);
         assert!(c.get(&key16(0), "cfg").is_none());
         assert!(c.get(&key16(11), "cfg").is_some());
+    }
+
+    /// `min_by_key` over a HashMap resolves `last_access` ties by iteration
+    /// order, which Rust randomizes per process — the same put sequence could
+    /// evict a different key on every run. The tie-break on the key makes the
+    /// victim deterministic: the lexicographically smallest key goes first.
+    #[test]
+    fn lru_eviction_tie_breaks_on_key_deterministically() {
+        let mut c = AnalysisCache::new();
+        // Fill to capacity with IDENTICAL last_access instants.
+        let t = Instant::now();
+        for i in 0..MAX_ENTRIES {
+            let k = key16(i as u8);
+            c.entries.insert(
+                cache_key(&k, "cfg"),
+                CacheRecord {
+                    payload: vec![i as u8],
+                    created_at: t,
+                    last_access: t,
+                },
+            );
+        }
+        c.put("ffff", "cfg", vec![9]);
+        assert_eq!(c.entries.len(), MAX_ENTRIES);
+        // key16(0) is the lexicographically smallest data-hash -> evicted.
+        assert!(!c.entries.contains_key(&cache_key(&key16(0), "cfg")));
+        assert!(c.entries.contains_key(&cache_key(&key16(1), "cfg")));
+        assert!(c.entries.contains_key(&cache_key("ffff", "cfg")));
     }
 
     #[test]

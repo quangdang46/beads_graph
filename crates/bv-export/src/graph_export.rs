@@ -89,7 +89,10 @@ pub fn generate_adjacency(
     let mut edges = Vec::new();
     for i in sorted(issues) {
         let mut deps: Vec<_> = i.dependencies.iter().collect();
-        deps.sort_by(|a, b| a.depends_on_id.cmp(&b.depends_on_id));
+        // Sort by the resolved target, the same value the edge emits —
+        // sorting on the raw `depends_on_id` would order legacy deps by an
+        // empty string.
+        deps.sort_by(|a, b| a.effective_depends_on().cmp(b.effective_depends_on()));
         for dep in deps {
             let target = dep.effective_depends_on();
             if !ids.contains(&target.to_string()) {
@@ -143,7 +146,8 @@ pub fn generate_dot(
     sb.push('\n');
     for i in sorted(issues) {
         let mut deps: Vec<_> = i.dependencies.iter().collect();
-        deps.sort_by(|a, b| a.depends_on_id.cmp(&b.depends_on_id));
+        // Sort by the resolved target, the same value the edge emits.
+        deps.sort_by(|a, b| a.effective_depends_on().cmp(b.effective_depends_on()));
         for dep in deps {
             let target = dep.effective_depends_on();
             if !ids.contains(&target.to_string()) {

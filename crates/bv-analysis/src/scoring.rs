@@ -243,9 +243,18 @@ pub const TRIAGE_QUICK_WIN_WEIGHT: f64 = 0.15;
 /// unblocks threshold for the unblock boost.
 pub const TRIAGE_UNBLOCK_THRESHOLD: usize = 5;
 
-/// QuickWin sub-score (Go triage.go ~899): unblock .4 + simplicity .4 + prio .2.
+/// QuickWin sub-score (Go triage.go ~899 `buildQuickWins`):
+/// `log2(unblocks+1)*.4 + simplicity*.4 + priorityBonus*.2`.
+///
+/// NOTE: currently uncalled — the live quick-win ranking is
+/// `triage::compute_row_triage`, which implements the same Go function. This
+/// copy had drifted from it in two places (an extra `.min(1.0)` cap on the
+/// unblock term Go does not apply, and a three-tier priority bonus); it is
+/// aligned here so the two can never disagree if a caller is added.
 pub fn quickwin_score(unblocks: usize, blocker_ratio_norm: f64, priority: i32) -> f64 {
-    let unblock_impact = (unblocks as f64 + 1.0).log2().min(1.0);
+    // `go_log2`, not `f64::log2` — same bit-exact log Go's math.Log2 emits,
+    // matching `compute_row_triage`.
+    let unblock_impact = crate::go_math::go_log2(unblocks as f64 + 1.0);
     let simplicity = if blocker_ratio_norm < 0.2 {
         1.0
     } else if blocker_ratio_norm < 0.4 {
@@ -253,11 +262,8 @@ pub fn quickwin_score(unblocks: usize, blocker_ratio_norm: f64, priority: i32) -
     } else {
         0.0
     };
-    let prio_bonus = match priority {
-        0 | 1 => 1.0,
-        2 => 0.5,
-        _ => 0.0,
-    };
+    // triage.rs `compute_row_triage`: P0/P1 get the bonus, everything else 0.
+    let prio_bonus = if priority <= 1 { 0.5 } else { 0.0 };
     (unblock_impact * 0.4) + (simplicity * 0.4) + (prio_bonus * 0.2)
 }
 
@@ -402,12 +408,15 @@ mod tests {
 
     #[test]
     fn quickwin_formula_matches_go() {
-        // log2(unblocks+1)*.4 with unblocks=0 -> 0; simplicity=1; prio P0 -> 1.0
-        // qw = 0*.4 + 1*.4 + 1*.2 = 0.6
+        // Matches `triage::compute_row_triage`'s live formula: log2(unblocks+1)
+        // uncapped, simplicity by blocker ratio, P<=1 priority bonus of 0.5.
+        // unblocks=0 -> log2(1)=0; simplicity=1 (ratio 0.1); P0 bonus 0.5:
+        // qw = 0*.4 + 1*.4 + 0.5*.2 = 0.5
         let qw = quickwin_score(0, 0.1, 0);
-        assert!(close(qw, 0.6));
-        // unblocks=15 -> log2(16)=4 capped at 1 → 0.4 + 0.5*0.4 + 0 = 0.6
+        assert!(close(qw, 0.5));
+        // unblocks=15 -> log2(16)=4 (uncapped) -> 1.6; simplicity=0.5 (0.3);
+        // P3 bonus 0 -> 1.6 + 0.2 = 1.8
         let qw2 = quickwin_score(15, 0.3, 3);
-        assert!(close(qw2, 0.6));
+        assert!(close(qw2, 1.8));
     }
 }

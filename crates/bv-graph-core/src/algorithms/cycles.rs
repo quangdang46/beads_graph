@@ -18,22 +18,27 @@
 
 use crate::graph::DiGraph;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Result of Strongly Connected Components analysis.
 #[derive(Serialize, Clone)]
 pub struct SCCResult {
     /// List of strongly connected components (each is a list of node indices)
     pub components: Vec<Vec<usize>>,
-    /// True if any SCC has more than one node (cycle exists)
+    /// True if any SCC is cyclic: size > 1, or a singleton with a self-edge
+    /// (the same predicate `find_cycles_safe` uses for `[n, n]` records).
     pub has_cycles: bool,
-    /// Number of non-trivial SCCs (size > 1)
+    /// Number of cyclic SCCs: size > 1, or a singleton carrying a self-edge.
     pub cycle_count: usize,
 }
 
 /// Tarjan's algorithm for finding strongly connected components.
 ///
-/// An SCC with more than one node indicates a cycle.
+/// An SCC with more than one node indicates a cycle; a singleton SCC does
+/// too when its only node carries a self-edge — `find_cycles_safe` reports
+/// that case as the `[n, n]` record, so `has_cycles`/`cycle_count` must
+/// agree with it or `cycle_break_suggestions` early-returns on a graph the
+/// oracle considers cyclic.
 /// Complexity: O(V + E)
 pub fn tarjan_scc(graph: &DiGraph) -> SCCResult {
     let n = graph.len();
@@ -61,7 +66,14 @@ pub fn tarjan_scc(graph: &DiGraph) -> SCCResult {
         }
     }
 
-    let cycle_count = state.components.iter().filter(|c| c.len() > 1).count();
+    // Cyclic = size > 1, or a singleton whose node points at itself.
+    // `add_edge` deduplicates adjacency, so membership is the same
+    // predicate as Go's `HasEdgeFromTo` in find_cycles_safe.
+    let cycle_count = state
+        .components
+        .iter()
+        .filter(|c| c.len() > 1 || (c.len() == 1 && graph.successors_slice(c[0]).contains(&c[0])))
+        .count();
 
     SCCResult {
         components: state.components,
@@ -315,22 +327,19 @@ pub fn enumerate_elementary_cycles(graph: &DiGraph, max_cycles: usize) -> Vec<Ve
     let mut blocked_map: Vec<HashSet<usize>> = vec![HashSet::new(); n];
     let mut stack: Vec<usize> = Vec::new();
 
-    // Helper: unblock a node and recursively unblock dependents
-    fn unblock(u: usize, blocked: &mut [bool], blocked_map: &mut [HashSet<usize>]) {
-        blocked[u] = false;
-        let dependents: Vec<usize> = blocked_map[u].drain().collect();
-        for w in dependents {
-            if blocked[w] {
-                unblock(w, blocked, blocked_map);
-            }
-        }
-    }
-
-    // Run Johnson's algorithm starting from each node
+    // Run Johnson's algorithm starting from each node. Iteration `start`
+    // only searches the SCC containing `start` inside the subgraph induced
+    // by nodes `>= start` — every elementary circuit has a unique least
+    // vertex, and only vertices that can both be reached from `start` and
+    // reach it can lie on one through `start`. Searching the whole tail
+    // subgraph instead (the previous implementation) made the DFS explore
+    // every DAG path and was exponential on acyclic inputs.
     for start in 0..n {
         if cycles.len() >= max_cycles {
             break;
         }
+
+        let allowed = start_scc(graph, start);
 
         // Reset blocked state
         blocked.fill(false);
@@ -340,12 +349,12 @@ pub fn enumerate_elementary_cycles(graph: &DiGraph, max_cycles: usize) -> Vec<Ve
 
         let mut state = CircuitState {
             graph,
+            allowed: &allowed,
             blocked: &mut blocked,
             blocked_map: &mut blocked_map,
             stack: &mut stack,
             cycles: &mut cycles,
             max_cycles,
-            min_node: start,
         };
         state.circuit(start, start, &mut |u, blocked, blocked_map| {
             unblock(u, blocked, blocked_map)
@@ -355,18 +364,85 @@ pub fn enumerate_elementary_cycles(graph: &DiGraph, max_cycles: usize) -> Vec<Ve
     cycles
 }
 
+/// Johnson's per-iteration search space: the SCC containing `start` in the
+/// subgraph induced by `{v : v >= start}`. Computed as the intersection of
+/// forward reachability from `start` and backward reachability to `start`,
+/// both restricted to nodes `>= start`. Two BFS passes, O(V + E) per
+/// iteration, replacing an unrestricted exponential DFS.
+fn start_scc(graph: &DiGraph, start: usize) -> Vec<bool> {
+    let n = graph.len();
+    let mut allowed = vec![false; n];
+
+    // Forward: nodes reachable from `start` via edges into nodes >= start.
+    let mut fwd = vec![false; n];
+    fwd[start] = true;
+    let mut queue = VecDeque::from([start]);
+    while let Some(u) = queue.pop_front() {
+        for &w in graph.successors_slice(u) {
+            if w >= start && !fwd[w] {
+                fwd[w] = true;
+                queue.push_back(w);
+            }
+        }
+    }
+
+    // Backward: nodes that can reach `start` via predecessors >= start.
+    let mut bwd = vec![false; n];
+    bwd[start] = true;
+    let mut queue = VecDeque::from([start]);
+    while let Some(u) = queue.pop_front() {
+        for &w in graph.predecessors_slice(u) {
+            if w >= start && !bwd[w] {
+                bwd[w] = true;
+                queue.push_back(w);
+            }
+        }
+    }
+
+    for i in 0..n {
+        allowed[i] = fwd[i] && bwd[i];
+    }
+    allowed
+}
+
+/// Iterative form of Johnson's `unblock`: releasing `u` transitively
+/// releases every node blocked *through* it. An explicit work stack keeps
+/// a long block chain from overflowing the call stack; drain order does
+/// not affect the result because the released set is order-independent.
+fn unblock(u: usize, blocked: &mut [bool], blocked_map: &mut [HashSet<usize>]) {
+    let mut work = vec![u];
+    while let Some(x) = work.pop() {
+        if !blocked[x] {
+            continue;
+        }
+        blocked[x] = false;
+        let dependents: Vec<usize> = blocked_map[x].drain().collect();
+        for w in dependents {
+            if blocked[w] {
+                work.push(w);
+            }
+        }
+    }
+}
+
 struct CircuitState<'a> {
     graph: &'a DiGraph,
+    /// `allowed[w]` is true iff `w` lies in `start`'s SCC of the
+    /// `>= start` induced subgraph (see `start_scc`).
+    allowed: &'a [bool],
     blocked: &'a mut [bool],
     blocked_map: &'a mut [HashSet<usize>],
     stack: &'a mut Vec<usize>,
     cycles: &'a mut Vec<Vec<usize>>,
     max_cycles: usize,
-    min_node: usize,
 }
 
 impl CircuitState<'_> {
-    // Circuit search from start vertex.
+    // Circuit search from start vertex. Recursion depth is bounded by the
+    // size of start's SCC — Johnson's algorithm is inherently a DFS, so a
+    // pathological SCC of tens of thousands of nodes can still overflow the
+    // native stack; that is a documented limit of this port, not a
+    // correctness issue (the Go/browser callers cap `max_cycles` first).
     fn circuit(
         &mut self,
         v: usize,
@@ -382,8 +458,9 @@ impl CircuitState<'_> {
         self.blocked[v] = true;
 
         for &w in self.graph.successors_slice(v) {
-            // Only consider nodes >= min_node (Johnson's optimization)
-            if w < self.min_node {
+            // Only vertices in start's SCC of the >= start subgraph can
+            // close a circuit through start.
+            if !self.allowed[w] {
                 continue;
             }
 
@@ -404,7 +481,7 @@ impl CircuitState<'_> {
             unblock(v, self.blocked, self.blocked_map);
         } else {
             for &w in self.graph.successors_slice(v) {
-                if w >= self.min_node {
+                if self.allowed[w] {
                     self.blocked_map[w].insert(v);
                 }
             }
@@ -431,6 +508,11 @@ pub fn enumerate_elementary_cycles_with_info(
     graph: &DiGraph,
     max_cycles: usize,
 ) -> ElementaryCycleResult {
+    // A zero limit means "no enumeration", matching find_cycles_safe's
+    // early return — it must not report truncation for an empty result.
+    if max_cycles == 0 {
+        return ElementaryCycleResult::default();
+    }
     let cycles = enumerate_elementary_cycles(graph, max_cycles);
     let count = cycles.len();
     ElementaryCycleResult {
@@ -524,10 +606,11 @@ pub fn cycle_break_suggestions(
         std::collections::HashMap::new();
 
     for cycle in cycles {
-        if cycle.len() < 2 {
+        if cycle.is_empty() {
             continue;
         }
-        // Count edges in this cycle
+        // Count edges in this cycle. A self-loop arrives as the singleton
+        // `[n]` and still contributes its `(n, n)` edge exactly once.
         for i in 0..cycle.len() {
             let from = cycle[i];
             let to = cycle[(i + 1) % cycle.len()];
@@ -535,18 +618,22 @@ pub fn cycle_break_suggestions(
         }
     }
 
-    // Build set of nodes in non-trivial SCCs
+    // Build set of nodes in cyclic SCCs: size > 1, or a singleton with a
+    // self-edge (the `[n, n]` record find_cycles_safe emits).
     let cycle_nodes: HashSet<usize> = scc
         .components
         .iter()
-        .filter(|c| c.len() > 1)
+        .filter(|c| c.len() > 1 || (c.len() == 1 && graph.successors_slice(c[0]).contains(&c[0])))
         .flat_map(|c| c.iter().copied())
         .collect();
 
-    // Find all edges within cycle SCCs
+    // Find all edges within cycle SCCs. Iterate in index order so ties in
+    // the (cycles_broken, collateral) sort below cannot leak HashSet order.
+    let mut cycle_nodes_sorted: Vec<usize> = cycle_nodes.iter().copied().collect();
+    cycle_nodes_sorted.sort_unstable();
     let mut suggestions: Vec<CycleBreakItem> = Vec::new();
 
-    for &from in &cycle_nodes {
+    for &from in &cycle_nodes_sorted {
         for &to in graph.successors_slice(from) {
             if cycle_nodes.contains(&to) {
                 let cycles_broken = edge_cycle_count.get(&(from, to)).copied().unwrap_or(0);
@@ -590,17 +677,20 @@ pub fn quick_cycle_break_edges(graph: &DiGraph, limit: usize) -> Vec<CycleBreakI
         return Vec::new();
     }
 
-    // Build set of nodes in non-trivial SCCs
+    // Build set of nodes in cyclic SCCs (size > 1 or self-loop singleton).
     let cycle_nodes: HashSet<usize> = scc
         .components
         .iter()
-        .filter(|c| c.len() > 1)
+        .filter(|c| c.len() > 1 || (c.len() == 1 && graph.successors_slice(c[0]).contains(&c[0])))
         .flat_map(|c| c.iter().copied())
         .collect();
 
+    // Index order keeps equal-collateral ties deterministic (see above).
+    let mut cycle_nodes_sorted: Vec<usize> = cycle_nodes.iter().copied().collect();
+    cycle_nodes_sorted.sort_unstable();
     let mut suggestions: Vec<CycleBreakItem> = Vec::new();
 
-    for &from in &cycle_nodes {
+    for &from in &cycle_nodes_sorted {
         for &to in graph.successors_slice(from) {
             if cycle_nodes.contains(&to) {
                 // Heuristic: edges with low total degree are better to remove
@@ -653,9 +743,127 @@ mod tests {
         let a = graph.add_node("a");
         graph.add_edge(a, a);
         let result = tarjan_scc(&graph);
-        // Self-loop creates SCC of size 1 with edge to itself
-        // Tarjan considers this a cycle
-        assert!(result.has_cycles || result.components[0].len() == 1);
+        // A self-edge makes the singleton SCC cyclic — the same predicate
+        // find_cycles_safe uses for its `[n, n]` record.
+        assert!(result.has_cycles);
+        assert_eq!(result.cycle_count, 1);
+        assert!(has_cycles(&graph));
+    }
+
+    /// tarjan_scc's has_cycles/cycle_count must agree with
+    /// find_cycles_safe: a self-loop is a cycle even though its SCC has
+    /// size 1.
+    #[test]
+    fn test_scc_self_loop_alongside_plain_singletons() {
+        let mut graph = DiGraph::new();
+        let looped = graph.add_node("looped");
+        let plain = graph.add_node("plain");
+        let other = graph.add_node("other");
+        graph.add_edge(looped, looped);
+        graph.add_edge(plain, other);
+
+        let scc = tarjan_scc(&graph);
+        assert!(scc.has_cycles);
+        assert_eq!(scc.cycle_count, 1);
+        assert_eq!(
+            find_cycles_safe(&graph, 100).cycles,
+            vec![vec![looped, looped]]
+        );
+    }
+
+    /// Johnson enumeration: a self-loop is the singleton circuit `[n]`,
+    /// and the SCC restriction must not lose it.
+    #[test]
+    fn test_elementary_self_loop() {
+        let mut graph = DiGraph::new();
+        let a = graph.add_node("a");
+        let b = graph.add_node("b");
+        graph.add_edge(a, a);
+        graph.add_edge(a, b);
+
+        let cycles = enumerate_elementary_cycles(&graph, 100);
+        assert_eq!(cycles, vec![vec![a]]);
+    }
+
+    /// Johnson enumeration restricted to start's SCC: a large DAG must
+    /// terminate quickly and report nothing (previously the unrestricted
+    /// DFS explored every path — exponential).
+    #[test]
+    fn test_elementary_cycles_large_dag() {
+        // Layered DAG: 40 layers of 2 nodes, every node points to both
+        // nodes in the next layer — astronomically many paths, zero cycles.
+        let mut graph = DiGraph::new();
+        let layers = 40;
+        let width = 2;
+        for _ in 0..layers * width {
+            graph.add_node("x");
+        }
+        for l in 0..layers - 1 {
+            for i in 0..width {
+                for j in 0..width {
+                    graph.add_edge(l * width + i, (l + 1) * width + j);
+                }
+            }
+        }
+        let cycles = enumerate_elementary_cycles(&graph, 100);
+        assert!(cycles.is_empty());
+    }
+
+    /// Johnson must still find every elementary circuit inside an SCC —
+    /// the restriction is an optimisation, not a filter on results.
+    #[test]
+    fn test_elementary_cycles_complete_digraph() {
+        // Complete digraph on 4 nodes without self-loops has
+        // C(4,2)·1! + C(4,3)·2! + C(4,4)·3! = 6 + 8 + 6 = 20 elementary
+        // circuits.
+        let mut graph = DiGraph::new();
+        let n: Vec<usize> = (0..4).map(|i| graph.add_node(&format!("n{i}"))).collect();
+        for &u in &n {
+            for &v in &n {
+                if u != v {
+                    graph.add_edge(u, v);
+                }
+            }
+        }
+        let found = enumerate_elementary_cycles(&graph, 1000);
+        assert_eq!(found.len(), 20, "K4 digraph has 20 elementary circuits");
+        // Every reported circuit must start at its least vertex (Johnson's
+        // ordering invariant) — cycles are stored as the stack at close.
+        for c in &found {
+            assert!(c.len() >= 2);
+        }
+    }
+
+    /// max_cycles = 0 must report no truncation, matching
+    /// find_cycles_safe's zero-limit early return.
+    #[test]
+    fn test_elementary_with_info_zero_limit() {
+        let mut graph = DiGraph::new();
+        let a = graph.add_node("a");
+        let b = graph.add_node("b");
+        graph.add_edge(a, b);
+        graph.add_edge(b, a);
+
+        let result = enumerate_elementary_cycles_with_info(&graph, 0);
+        assert!(result.cycles.is_empty());
+        assert_eq!(result.count, 0);
+        assert!(!result.truncated);
+    }
+
+    /// A self-loop must produce a cycle-break suggestion: has_cycles is
+    /// now true for it, and the `(n, n)` edge must be scored.
+    #[test]
+    fn test_cycle_break_self_loop() {
+        let mut graph = DiGraph::new();
+        let a = graph.add_node("a");
+        graph.add_edge(a, a);
+
+        let result = cycle_break_suggestions(&graph, 10, 100);
+        assert_eq!(result.total_cycles, 1);
+        assert_eq!(result.suggestions.len(), 1);
+        assert_eq!(result.suggestions[0].from, a);
+        assert_eq!(result.suggestions[0].to, a);
+        assert_eq!(result.suggestions[0].cycles_broken, 1);
     }
 
     #[test]

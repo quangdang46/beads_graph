@@ -1,8 +1,8 @@
 //! Validation — modifier-requires + exclusive-primary checks.
 //! Port of Go validateModifierFlags / validateExclusivePrimaryCommands.
 
-use crate::flags::{FlagKind, MODIFIER_FLAGS, MODIFIER_REQUIRES, ROBOT_PRIMARIES};
-use std::collections::HashSet;
+use crate::flags::{FlagKind, MODIFIER_REQUIRES};
+use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ValidationError {
@@ -70,54 +70,109 @@ pub fn validate_flag_arguments(args: &[String]) -> Option<ValidationError> {
     None
 }
 
-/// Which flags are present in the parsed invocation. Owns its strings —
-/// no leaks; lifetimes are self-contained.
+/// Which flags are active in the parsed invocation, answered the way Go's
+/// `isFlagActive` (cmd/bv/main.go:471-486) answers it — NOT by token
+/// presence.
+///
+/// `values` records the effective raw value of every flag token, pflag-style:
+/// `--name=value` and `--name value` both land here, a bare bool records
+/// `"true"` (pflag's `NoOptDefVal`), a value-taking flag consumes the next
+/// argv element unconditionally, and a later occurrence overwrites an earlier
+/// one. [`Presence::has`] then applies Go's per-kind rule to that value:
+///
+/// - **bool** — active iff the last parsed value is `true`, so
+///   `--flag=false` is present-but-INACTIVE (this is how Go turns off a
+///   default-true flag such as `--pages-include-history`).
+/// - **string** (`Str`/`StringArray`) — active iff
+///   `strings.TrimSpace(value) != ""`, so `--db ""` and `--db "  "` are both
+///   inactive.
+/// - **every other kind** — active on presence; Go's parse pass has already
+///   rejected unparseable values before validation runs.
+///
+/// Recording values during the scan (rather than re-scanning raw argv per
+/// query, the way `argv::go_bool_flag` does) is what keeps a flag's VALUE
+/// from being mistaken for a flag: `--export-md --robot-triage` feeds
+/// `--robot-triage` to `--export-md` as its value in pflag, so `robot-triage`
+/// is NOT active — a raw token scan would report it active.
 pub struct Presence {
-    present: HashSet<String>,
+    values: HashMap<String, String>,
 }
 
 impl Presence {
-    /// Build the set of flags the caller actually passed.
+    /// Build the active-flag view of the caller's argv.
     ///
     /// Only tokens that are a REGISTERED flag name count, and a value-taking
-    /// flag's value is skipped. Go's `isFlagActive` (main.go:471-480) looks
-    /// the name up in the `FlagSet` and ignores anything it does not find, so
+    /// flag's value is skipped — Go's `isFlagActive` looks the name up in the
+    /// `FlagSet` and ignores anything it does not find, so
     /// `--schema-command robot-capabilities` leaves only `schema-command`
     /// active. Inserting every token made the VALUE look like a second primary
     /// command, and `--robot-schema --schema-command robot-capabilities`
     /// failed with "only one primary command allowed" where the oracle emits
     /// the schema.
+    ///
+    /// `--` ends flag parsing exactly as it does for pflag: everything after
+    /// it is positional and can never activate a flag.
     pub fn from_args(args: &[String]) -> Self {
-        let mut present = HashSet::new();
-        let mut skip_next = false;
-        for (i, arg) in args.iter().enumerate() {
-            if skip_next {
-                skip_next = false;
-                continue;
+        let mut values: HashMap<String, String> = HashMap::new();
+        let mut i = 0;
+        while i < args.len() {
+            let arg = &args[i];
+            if arg == "--" {
+                break;
             }
             let Some(rest) = arg.strip_prefix("--") else {
+                i += 1;
                 continue;
             };
-            // `--name=value` carries its own value; `--name value` consumes
-            // the next token when the flag is registered and takes one.
             match rest.split_once('=') {
-                Some((name, _)) => {
-                    present.insert(name.to_string());
+                Some((name, v)) => {
+                    values.insert(name.to_string(), v.to_string());
                 }
-                None => {
-                    present.insert(rest.to_string());
-                    if takes_value(rest) {
-                        skip_next = true;
+                None => match crate::flags::flag_kind(rest) {
+                    // A bool never consumes the next token; a bare switch is
+                    // pflag's implicit `=true`.
+                    Some(FlagKind::Bool) => {
+                        values.insert(rest.to_string(), "true".to_string());
                     }
-                }
+                    // Every other registered kind consumes the following
+                    // element unconditionally — even one that looks like a
+                    // flag — which is how `--export-md --format json` ends
+                    // with `json` as a positional "unknown command".
+                    Some(_) => {
+                        if let Some(v) = args.get(i + 1) {
+                            values.insert(rest.to_string(), v.clone());
+                            i += 1;
+                        }
+                        // A trailing value-flag with nothing to consume is a
+                        // parse error `go_flag_parse_error` reports before
+                        // validation; recording nothing keeps it inactive.
+                    }
+                    // Unknown names consume nothing. Go's parse rejects them
+                    // before validation, but keeping the token preserves the
+                    // old presence behaviour for names outside the registry.
+                    None => {
+                        values.insert(rest.to_string(), String::new());
+                    }
+                },
             }
-            let _ = i;
+            i += 1;
         }
-        Presence { present }
+        Presence { values }
     }
 
+    /// Whether `flag` is ACTIVE in the Go `isFlagActive` sense — see the type
+    /// docs for the per-kind rules. This is the only accessor; every caller
+    /// (`validate_*`, the `main` dispatch arms, `run_agents_commands`) wants
+    /// exactly this answer.
     pub fn has(&self, flag: &str) -> bool {
-        self.present.contains(flag)
+        let Some(raw) = self.values.get(flag) else {
+            return false;
+        };
+        match crate::flags::flag_kind(flag) {
+            Some(FlagKind::Bool) => crate::argv::go_parse_bool(raw).unwrap_or(false),
+            _ if crate::flags::flag_is_string(flag) => !raw.trim().is_empty(),
+            _ => true,
+        }
     }
 }
 
@@ -138,18 +193,16 @@ fn format_required(required: &[&str]) -> String {
 }
 
 /// Validate modifier-requires rules. Returns the first violation, if any.
-/// `args` is the raw argv when the caller has it.
 ///
-/// Go's rule for a REQUIRED flag is `isFlagActive` (main.go:196-207), and for
-/// a string flag that is `strings.TrimSpace(v) != ""`. `Presence` only records
-/// that the token appeared, so `--diff-since ""` satisfies a
-/// `("robot-diff", &["diff-since"])` rule here while Go rejects the pair as
-/// "not active". Several rows in the table require a *string* flag —
-/// `diff-since`, `search`, `export`, `export-md`, `graph-root` — so this is not
-/// hypothetical.
+/// Go's rule for BOTH sides of a rule is `isFlagActive` (main.go:196-207):
+/// the modifier must be active, and at least one required flag must be
+/// active. [`Presence::has`] now answers that question directly — bool flags
+/// need a truthy last value and string flags need a TrimSpace-surviving value
+/// — so `--brief=false` no longer triggers the `brief` row and `--diff-since
+/// ""` no longer satisfies the `robot-diff` row, matching the oracle.
 ///
-/// When `args` is available, string requirements are re-checked with
-/// [`crate::argv::go_string_flag_active`], which is Go's TrimSpace test.
+/// `args` is retained for signature compatibility with the `main` call site;
+/// [`Presence`] already captured everything it needs at construction.
 ///
 /// Singular return, not a list: `validateModifierFlags` builds the message
 /// inside its loop and `return`s on the first broken rule
@@ -159,18 +212,10 @@ fn format_required(required: &[&str]) -> String {
 /// reconcile.
 pub fn validate_modifier_requires_with(
     present: &Presence,
-    args: Option<&[String]>,
+    _args: Option<&[String]>,
 ) -> Option<ValidationError> {
-    let requirement_active = |r: &&str| -> bool {
-        if let Some(a) = args {
-            if crate::flags::flag_is_string(r) && !crate::argv::go_string_flag_active(a, r) {
-                return false;
-            }
-        }
-        present.has(r)
-    };
     for (modifier, required) in MODIFIER_REQUIRES {
-        if present.has(modifier) && !required.iter().any(requirement_active) {
+        if present.has(modifier) && !required.iter().any(|r| present.has(r)) {
             let rendered = format_required(required);
             return Some(ValidationError::MissingRequirement {
                 modifier: (*modifier).to_string(),
@@ -201,28 +246,6 @@ pub fn validate_modifier_requires_with(
 /// main.go:1903-1906, and every stage exits on its own. Folding two stages
 /// into one call made the later message print even when an earlier stage had
 /// already rejected the run.
-/// Whether a registered flag consumes the following token as its value.
-/// Unknown names are assumed to take none, which matches Go looking the flag
-/// up and finding nothing.
-fn takes_value(name: &str) -> bool {
-    ROBOT_PRIMARIES
-        .iter()
-        .chain(MODIFIER_FLAGS.iter())
-        .find(|f| f.name == name)
-        .is_some_and(|f| {
-            matches!(
-                f.kind,
-                FlagKind::Str
-                    | FlagKind::Int
-                    | FlagKind::Float
-                    | FlagKind::Float64
-                    | FlagKind::PercentOrFraction
-                    | FlagKind::StringArray
-            )
-        })
-}
-
-/// Go's `validateExclusivePrimaryCommands` (cmd/bv/main.go:351-366).
 ///
 /// Go counts ACTIVE GROUPS, not active flags: every group in
 /// `primaryRobotCommandGroups` that has an active flag contributes one entry
@@ -413,5 +436,81 @@ mod tests {
 
         assert!(check(&["bvr", "--export-pages", "out", "--watch-export"]).is_empty());
         assert!(check(&["bvr", "--export-pages", "out", "--as-of", "HEAD"]).is_empty());
+    }
+
+    /// Go's `isFlagActive` bool arm: `--flag=false` parses fine but is NOT
+    /// active, so it can neither satisfy a requirement nor claim a primary
+    /// group. Token-presence counting got both directions wrong.
+    #[test]
+    fn bool_flag_false_is_inactive() {
+        // `--robot-triage=false` must not count toward the triage group, so
+        // pairing it with `--robot-next` is ONE active group, not two.
+        assert!(check(&["bvr", "--robot-triage=false", "--robot-next"]).is_empty());
+        // `--check-drift=false` does not satisfy `--robot-drift`'s requirement.
+        assert!(!check(&["bvr", "--robot-drift", "--check-drift=false"]).is_empty());
+        assert!(check(&["bvr", "--robot-drift", "--check-drift"]).is_empty());
+        // `--brief=false` is not an active modifier, so no requires-rule fires.
+        assert!(check(&["bvr", "--robot-triage", "--brief=false"]).is_empty());
+        // `--watch-export=false` does not conflict with `--as-of`.
+        assert!(check(&[
+            "bvr",
+            "--export-pages",
+            "out",
+            "--watch-export=false",
+            "--as-of",
+            "HEAD"
+        ])
+        .is_empty());
+    }
+
+    /// String flags are active only when the value survives TrimSpace, and
+    /// the LAST occurrence wins (pflag `Set` overwrites).
+    #[test]
+    fn string_flag_active_needs_nonblank_last_value() {
+        // `--diff-since ""` is present but inactive: robot-diff still fails.
+        assert!(!check(&["bvr", "--robot-diff", "--diff-since", ""]).is_empty());
+        // `--as-of ""` is inactive, so the watch-export pair does not fire.
+        assert!(check(&[
+            "bvr",
+            "--export-pages",
+            "out",
+            "--watch-export",
+            "--as-of",
+            ""
+        ])
+        .is_empty());
+        // A blank LAST occurrence beats an earlier real value.
+        assert!(!check(&[
+            "bvr",
+            "--robot-diff",
+            "--diff-since",
+            "HEAD~1",
+            "--diff-since",
+            ""
+        ])
+        .is_empty());
+        // ...and a real LAST occurrence beats an earlier blank one — the
+        // first-match scan used to reject this exact shape.
+        assert!(check(&[
+            "bvr",
+            "--robot-diff",
+            "--diff-since",
+            "",
+            "--diff-since",
+            "HEAD~1"
+        ])
+        .is_empty());
+        // Value-carrying primaries follow the same string rule:
+        // `--robot-related ""` is inactive and claims no primary group.
+        assert!(check(&["bvr", "--robot-related", "", "--robot-triage"]).is_empty());
+        assert!(check(&["bvr", "--robot-related", "bv-123", "--robot-triage"]).len() == 1);
+    }
+
+    /// A flag's VALUE is never itself a flag: pflag feeds the next token to
+    /// the value-taking flag unconditionally, so `--export-md
+    /// --robot-triage` leaves `robot-triage` inactive.
+    #[test]
+    fn flag_value_is_not_a_flag() {
+        assert!(check(&["bvr", "--export-md", "--robot-triage"]).is_empty());
     }
 }

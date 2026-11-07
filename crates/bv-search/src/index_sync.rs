@@ -38,11 +38,22 @@ pub fn default_index_path(project_dir: &std::path::Path, dim: usize) -> std::pat
 }
 
 /// Load an existing index or start fresh (Go `LoadOrNewVectorIndex`).
-/// Returns `(index, loaded_from_disk)`. Corrupt files are renamed aside to
-/// `<path>.corrupt-<unix_nanos>` and rebuilt empty; dim mismatches are
-/// treated the same as corruption.
+/// Returns `(index, loaded_from_disk)`. Go's rule is `os.IsNotExist(err)`:
+/// a missing file starts fresh silently, while *every* other load failure —
+/// decode/validation AND I/O — is treated as corruption: the file is renamed
+/// aside to `<path>.corrupt-<unix_nanos>` and rebuilt empty (dim mismatches
+/// are synthesized into the same path). Go propagates the load error only
+/// when the backup rename itself fails; this signature cannot return an
+/// error (callers are fixed), so a failed rename still yields a fresh index.
+///
+/// The not-found case is detected by probing the path rather than matching
+/// `VectorIndex::load`'s error text, which is OS/locale dependent.
 pub fn load_or_new(path: &std::path::Path, dim: usize) -> (VectorIndex, bool) {
     let dim = if dim == 0 { DEFAULT_DIM } else { dim };
+    let missing = matches!(
+        std::fs::metadata(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    );
     match VectorIndex::load(path) {
         Ok(idx) if idx.dim == dim => (idx, true),
         Ok(idx) => {
@@ -51,9 +62,7 @@ pub fn load_or_new(path: &std::path::Path, dim: usize) -> (VectorIndex, bool) {
             let _ = idx;
             (VectorIndex::new(dim), false)
         }
-        Err(e) if e.contains("No such file") || e.contains("not found") => {
-            (VectorIndex::new(dim), false)
-        }
+        Err(_) if missing => (VectorIndex::new(dim), false),
         Err(_) => {
             backup_corrupt(path);
             (VectorIndex::new(dim), false)

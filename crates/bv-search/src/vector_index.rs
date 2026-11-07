@@ -291,6 +291,13 @@ impl VectorIndex {
                     self.dim
                 ));
             }
+            // Go's Save does not re-validate components (it trusts Upsert /
+            // the sync staging checks), but `entries_replace` is an
+            // unvalidated bulk swap: without this guard a NaN/inf vector
+            // would be persisted and then rejected by `decode`'s
+            // `validate_finite` on the next load, bricking the index.
+            validate_finite(&entry.vector)
+                .map_err(|e| format!("invalid vector for {id:?}: {e}"))?;
             encoded_size += 2 + id.len() as i64 + 32 + self.dim as i64 * 4;
             if encoded_size > MAX_VECTOR_FILE_SIZE {
                 return Err(format!(
@@ -321,25 +328,39 @@ impl VectorIndex {
         }
         // Atomic write: temp file in the same dir + rename.
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+        // Go uses `os.CreateTemp(dir, "bvvi-*.tmp")`, whose random suffix
+        // cannot collide; a bare timestamp can (coarse clocks, two saves in
+        // the same tick). pid + nanos + a process-local counter gives the
+        // same uniqueness guarantee without pulling in `rand`.
         let tmp = match dir {
             Some(d) => tempfile_in(d)?,
             None => tempfile_in(std::env::temp_dir())?,
         };
-        std::fs::write(&tmp, &buf).map_err(|e| format!("write temp index: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename index: {e}"))?;
+        // Go `defer`s `os.Remove(tmpPath)`: a failed write or rename must
+        // not leak the temp file.
+        if let Err(e) = std::fs::write(&tmp, &buf) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("write temp index: {e}"));
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("rename index: {e}"));
+        }
         Ok(())
     }
 }
 
-/// Temp file path helper without a new dependency (pid + nanos uniqueness).
+/// Temp file path helper without a new dependency (pid + nanos + counter
+/// uniqueness — mirrors `os.CreateTemp`'s collision-free suffix).
 fn tempfile_in(dir: impl AsRef<std::path::Path>) -> Result<std::path::PathBuf, String> {
-    let name = format!(
-        "bvvi-{}.tmp",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!("bvvi-{}-{}-{}.tmp", std::process::id(), nanos, seq);
     Ok(dir.as_ref().join(name))
 }
 
@@ -464,5 +485,25 @@ mod tests {
         assert!(idx.upsert("", [0u8; 32], vec![1.0, 0.0]).is_err());
         assert!(idx.upsert("X", [0u8; 32], vec![1.0]).is_err());
         assert!(idx.upsert("X", [0u8; 32], vec![f32::NAN, 0.0]).is_err());
+    }
+
+    /// `entries_replace` is the one unvalidated bulk swap; `save` must not
+    /// persist a vector that `decode` would reject on the next load.
+    #[test]
+    fn save_rejects_nonfinite_entries_from_entries_replace() {
+        let mut idx = VectorIndex::new(2);
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            "X".to_string(),
+            VectorEntry {
+                content_hash: [0u8; 32],
+                vector: vec![f32::NAN, 0.0],
+            },
+        );
+        idx.entries_replace(entries);
+        let dir = unique_test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(idx.save(&dir.join("index.bvvi")).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

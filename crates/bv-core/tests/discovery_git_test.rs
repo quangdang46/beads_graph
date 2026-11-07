@@ -108,10 +108,11 @@ fn git_loader_load_at_sees_committed_snapshot_diff() {
             msg,
         ]);
     };
-    // Rev 1: issue A open.
+    // Rev 1: issue A open. `issue_type` is required — Go `Issue.Validate`
+    // rejects a record without one.
     std::fs::write(
         beads.join("issues.jsonl"),
-        "{\"id\":\"A\",\"title\":\"alpha\",\"status\":\"open\"}\n",
+        "{\"id\":\"A\",\"title\":\"alpha\",\"status\":\"open\",\"issue_type\":\"task\"}\n",
     )
     .unwrap();
     git(&["init", "-q"]);
@@ -119,7 +120,7 @@ fn git_loader_load_at_sees_committed_snapshot_diff() {
     // Rev 2 (== HEAD): A closed, B new.
     std::fs::write(
         beads.join("issues.jsonl"),
-        "{\"id\":\"A\",\"title\":\"alpha\",\"status\":\"closed\"}\n{\"id\":\"B\",\"title\":\"beta\",\"status\":\"open\"}\n",
+        "{\"id\":\"A\",\"title\":\"alpha\",\"status\":\"closed\",\"issue_type\":\"task\"}\n{\"id\":\"B\",\"title\":\"beta\",\"status\":\"open\",\"issue_type\":\"task\"}\n",
     )
     .unwrap();
     commit("two");

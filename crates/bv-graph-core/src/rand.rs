@@ -60,16 +60,20 @@ impl GoRand {
     fn seed(&mut self, seed: i64) {
         self.tap = 0;
         self.feed = RNG_LEN - RNG_TAP;
-        // Go narrows to int32, takes the value modulo int32max, maps
-        // negatives back into range, and substitutes a constant for zero.
-        let mut seed = seed as i32 % INT32_MAX;
+        // Go rng.go Seed: `seed = seed % int32max` is computed in int64 on
+        // the full seed BEFORE narrowing to int32 — truncating to i32 first
+        // would corrupt seeds outside the int32 range or whose low 32 bits
+        // differ from the true remainder. Negatives are then mapped back
+        // into range and zero is substituted with a constant.
+        let int32max = i64::from(INT32_MAX);
+        let mut seed = seed % int32max;
         if seed < 0 {
-            seed = seed.wrapping_add(INT32_MAX);
+            seed += int32max;
         }
         if seed == 0 {
             seed = 89482311;
         }
-        let mut x = seed;
+        let mut x = seed as i32;
         for i in -20i32..RNG_LEN as i32 {
             x = seedrand(x);
             if i >= 0 {
@@ -206,6 +210,29 @@ mod tests {
     #[test]
     fn different_seeds_diverge() {
         assert_ne!(sample_indices(2500, 200, 1), sample_indices(2500, 200, 2));
+    }
+
+    /// Go `rngSource.Seed` reduces the int64 seed with `seed % int32max`
+    /// BEFORE narrowing to int32. The old port truncated to i32 first, so
+    /// seeds outside int32 range (or whose low 32 bits alias a different
+    /// remainder) produced a different stream. Reference values below were
+    /// captured from Go 1.26.4 `rand.New(rand.NewSource(seed)).Intn(1000)`.
+    #[test]
+    fn large_and_negative_seeds_match_go() {
+        let draw = |seed: i64| -> Vec<i32> {
+            let mut r = GoRand::new(seed);
+            (0..10).map(|_| r.intn(1000)).collect()
+        };
+        assert_eq!(
+            draw((1i64 << 40) + 12345),
+            vec![162, 554, 381, 8, 246, 422, 381, 479, 571, 421]
+        );
+        assert_eq!(
+            draw(-(1i64 << 40) - 7),
+            vec![602, 40, 933, 51, 351, 53, 72, 437, 857, 380]
+        );
+        // Sanity: the small-seed stream is unchanged.
+        assert_eq!(draw(1), vec![81, 887, 847, 59, 81, 318, 425, 540, 456, 300]);
     }
 
     /// Int31n's power-of-two shortcut and its rejection path must both work.

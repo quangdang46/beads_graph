@@ -107,23 +107,32 @@ fn read_beads_redirect(beads_dir: &Path) -> Result<Option<PathBuf>, DiscoveryErr
 }
 
 /// Go: `followBeadsRedirect` — follow the chain with loop/depth guards.
+///
+/// The `.beads`/`_beads` name check applies to redirect TARGETS only, never
+/// to the seed directory itself: `BEADS_DIR=/data/mybeads` is a legitimate
+/// input even though its basename is not `.beads`. Only a directory reached
+/// *through* a `redirect` file must carry the beads name.
 fn follow_beads_redirect(beads_dir: &Path) -> Result<PathBuf, DiscoveryError> {
     let mut current = beads_dir.to_path_buf();
+    let mut is_seed = true;
     for depth in 0..=MAX_REDIRECT_DEPTH {
         if depth == MAX_REDIRECT_DEPTH {
             return Err(DiscoveryError::RedirectDepth(MAX_REDIRECT_DEPTH));
         }
-        // Target validity: must be named .beads or _beads and be a dir.
-        let valid_name = current
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n == ".beads" || n == "_beads")
-            .unwrap_or(false);
-        if current.exists() && !valid_name {
-            return Err(DiscoveryError::RedirectBadTarget(
-                current.display().to_string(),
-            ));
+        if !is_seed {
+            // Target validity: must be named .beads or _beads and be a dir.
+            let valid_name = current
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == ".beads" || n == "_beads")
+                .unwrap_or(false);
+            if current.exists() && !valid_name {
+                return Err(DiscoveryError::RedirectBadTarget(
+                    current.display().to_string(),
+                ));
+            }
         }
+        is_seed = false;
         match read_beads_redirect(&current)? {
             Some(next) => {
                 if next == current {
@@ -278,9 +287,17 @@ pub fn find_jsonl_path_with_warnings(
             )));
         }
     };
+    // Go `os.ReadDir` returns entries sorted by filename; `std::fs::read_dir`
+    // order is arbitrary. The sort has to happen BEFORE the filter loop so
+    // the merge-artifact warnings emit in the same order Go prints them, and
+    // so the "first non-empty candidate" fallback below is deterministic.
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
     let mut candidates: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
+    for name in names {
         if !name.ends_with(".jsonl") {
             continue;
         }
@@ -297,7 +314,7 @@ pub fn find_jsonl_path_with_warnings(
             ));
             continue;
         }
-        candidates.push(entry.file_name().to_string_lossy().to_string());
+        candidates.push(name);
     }
     if candidates.is_empty() {
         return Ok(None);
@@ -345,14 +362,29 @@ pub fn load_issues_from_repo(
     // inventing, which the oracle never emits.
     let jsonl = find_jsonl_path_with_warnings(&beads_dir, |_| {})?;
     if let Some(jsonl) = jsonl {
-        if let Ok(raw) = std::fs::read_to_string(&jsonl) {
-            let mut rdr = raw.as_bytes();
-            if let Ok(parsed) =
-                parse_issues_with_options(&mut rdr, &ParseOptions::default(), |_| {})
-            {
-                return Ok(parsed);
-            }
-        }
+        // The discovered JSONL is the declared live source: Go's
+        // `LoadIssues` reads it and surfaces a read failure instead of
+        // silently falling back to a stale `beads.db`. Read as BYTES, not
+        // `read_to_string` — Go scans raw lines and tolerates invalid UTF-8
+        // per record, which `parse_issues_with_options` already mirrors.
+        let raw = std::fs::read(&jsonl).map_err(|e| {
+            DiscoveryError::BeadsDirectory(format!(
+                "failed to read beads JSONL: {}",
+                go_path_error("open", &jsonl.to_string_lossy(), &e)
+            ))
+        })?;
+        let mut rdr = raw.as_slice();
+        // A file that parses to zero issues is still the answer — Go has no
+        // SQLite fallback on this path at all, so an empty-but-valid export
+        // must not resurrect stale db rows either.
+        return parse_issues_with_options(&mut rdr, &ParseOptions::default(), |_| {}).map_err(
+            |e| {
+                DiscoveryError::BeadsDirectory(format!(
+                    "failed to parse beads JSONL {}: {e}",
+                    jsonl.display()
+                ))
+            },
+        );
     }
 
     // A Dolt-backed `bd` workspace only materialises the JSONL on an explicit

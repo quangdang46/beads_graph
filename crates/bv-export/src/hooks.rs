@@ -735,7 +735,17 @@ impl Executor {
         // the *actual* key spelling keeps Windows' case-insensitive
         // environment working — and then everything the hook should see is
         // set explicitly on top.
-        let parent: Vec<(String, String)> = std::env::vars().collect();
+        // `env::vars()` panics on a non-UTF-8 value; `vars_os` plus a lossy
+        // conversion keeps the hook runnable, matching Go where `os.Environ`
+        // strings are arbitrary bytes.
+        let parent: Vec<(String, String)> = std::env::vars_os()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
         let child = child_environment(&parent, &self.context, &hook.env);
         for (key, _) in &parent {
             if is_sensitive_env_key(key) {
@@ -743,7 +753,12 @@ impl Executor {
             }
         }
         for (key, value) in &child {
-            cmd.env(key, value);
+            // `Command::env` panics on an empty key, a key containing `=` or
+            // NUL, or a NUL in the value. Hook `env:` keys come from YAML and
+            // can be any of those; skip them rather than crash the export.
+            if valid_env_key(key) && !value.contains('\0') {
+                cmd.env(key, value);
+            }
         }
 
         cmd.stdin(Stdio::null());
@@ -1019,8 +1034,12 @@ pub fn expand_env(value: &str, env: &[OsString]) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'$' || i + 1 >= bytes.len() {
-            out.push(bytes[i] as char);
-            i += 1;
+            // Push the whole UTF-8 character, not `bytes[i] as char` — the
+            // latter turns every byte of a multibyte sequence into a
+            // separate mojibake character.
+            let ch = value[i..].chars().next().expect("i is in bounds");
+            out.push(ch);
+            i += ch.len_utf8();
             continue;
         }
         let (name, consumed) = shell_name(&value[i + 1..]);
@@ -1078,17 +1097,36 @@ fn lookup_env(name: &str, env: &[OsString]) -> String {
 
 /// Go `truncate` (`executor.go:273-284`) — three dots, unlike the `…` used by
 /// `pkg/export/markdown.go:955`.
+///
+/// Go measures the limit in **bytes** (`len(s)`), not runes, so a multibyte
+/// string is cut earlier than a char count would suggest. The cut is still
+/// snapped back to a UTF-8 boundary: Go can emit invalid UTF-8 here, Rust's
+/// `String` cannot, and a boundary snap is the closest faithful rendering.
 fn truncate(s: &str, max: usize) -> String {
-    let runes: Vec<char> = s.chars().collect();
-    if runes.len() <= max {
+    if s.len() <= max {
         return s.to_string();
     }
     if max <= 3 {
-        return runes[..max].iter().collect();
+        return floor_char_boundary(s, max).to_string();
     }
-    let mut out: String = runes[..max - 3].iter().collect();
+    let mut out = floor_char_boundary(s, max - 3).to_string();
     out.push_str("...");
     out
+}
+
+/// The longest prefix of `s` of at most `end` bytes that ends on a char
+/// boundary.
+fn floor_char_boundary(s: &str, mut end: usize) -> &str {
+    end = end.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// A key `Command::env`/`env_remove` accepts: non-empty, no `=`, no NUL.
+fn valid_env_key(key: &str) -> bool {
+    !key.is_empty() && !key.contains('=') && !key.contains('\0')
 }
 
 /// Go `time.Duration.Round(time.Millisecond)` (`executor.go:259`). Go rounds

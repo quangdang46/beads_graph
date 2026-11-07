@@ -7,39 +7,55 @@
 
 use serde::{Deserialize, Serialize};
 
-// /// Serialize a timestamp the way Go marshals a `time.Time`: UTC, RFC3339 with
+/// Go's zero `time.Time` as marshaled by a non-pointer field — emitted for
+/// absent timestamps on fields Go declares WITHOUT `omitempty`
+/// (`Issue.CreatedAt`/`UpdatedAt`, `Dependency.CreatedAt`,
+/// `Comment.CreatedAt`). Pointer fields (`due_date`, `closed_at`, …) carry
+/// `omitempty` and are skipped before this is reached.
+const GO_ZERO_TIME_TEXT: &str = "0001-01-01T00:00:00Z";
+
+/// The text Go `encoding/json` produces for a `time.Time` field: absent
+/// (zero) -> `"0001-01-01T00:00:00Z"`, otherwise UTC RFC3339Nano. jiff's
+/// `Timestamp` Display already trims fractional trailing zeros, matching
+/// Go's `RFC3339Nano`; unparseable input passes through so a malformed
+/// record stays visible instead of vanishing.
+fn go_time_text(v: &Option<String>) -> String {
+    match v {
+        None => GO_ZERO_TIME_TEXT.to_string(),
+        Some(raw) => match raw.parse::<jiff::Timestamp>() {
+            Ok(ts) => ts.to_string(),
+            Err(_) => raw.clone(),
+        },
+    }
+}
+
+/// Serialize a timestamp the way Go marshals a `time.Time`: UTC, RFC3339 with
 /// trailing zeros trimmed from the fractional part. The loader stores the raw
 /// source text, so values like `...206355500Z` would otherwise pass through
 /// where Go emits `...2063555Z`.
+///
+/// `None` serializes as the Go zero time — NOT `null` — because every field
+/// using this helper corresponds to a non-pointer `time.Time` in Go, which
+/// always marshals (absent -> `"0001-01-01T00:00:00Z"`). Fields where Go uses
+/// `*time.Time` + `omitempty` must combine this with
+/// `skip_serializing_if = "Option::is_none"` so `None` never reaches it.
 pub fn serialize_go_time<S: serde::Serializer>(
     v: &Option<String>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
-    match v {
-        None => s.serialize_none(),
-        Some(raw) => match raw.parse::<jiff::Timestamp>() {
-            Ok(ts) => {
-                let text = ts.to_string();
-                // jiff already appends the "Z"; only the fractional part
-                // needs Go's trailing-zero trim.
-                let out = match text.find('.') {
-                    Some(dot) => {
-                        let frac = text[dot + 1..].trim_end_matches('0');
-                        if frac.is_empty() {
-                            text[..dot].to_string()
-                        } else {
-                            format!("{}.{}", &text[..dot], frac)
-                        }
-                    }
-                    None => text,
-                };
-                s.serialize_str(&out)
-            }
-            // Unparseable input is passed through rather than dropped, so a
-            // malformed record stays visible instead of vanishing.
-            Err(_) => s.serialize_str(raw),
-        },
-    }
+    s.serialize_str(&go_time_text(v))
+}
+
+/// serde `deserialize_with` helper mirroring Go `encoding/json` semantics:
+/// an explicit JSON `null` on a non-pointer field is a no-op (the field keeps
+/// its zero value), so it deserializes to `T::default()` instead of failing
+/// the whole record the way a bare `String`/`i64` field would.
+pub(crate) fn de_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 /// Issue status. Exactly the 10 values Go recognizes (`model.Status.IsValid`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,17 +143,29 @@ impl Status {
 /// The variant costs `Copy`, which is why the issue recorded the change as
 /// touching ~20 call sites. The methods below take `self` by reference and
 /// return borrowed strings, so the common path is unaffected.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DependencyType {
-    #[default]
     Blocks,
     ConditionalBlocks,
     WaitsFor,
     Related,
     ParentChild,
     DiscoveredFrom,
-    /// A relationship type `br` defines and this build does not know.
+    /// A relationship type `br` defines and this build does not know —
+    /// INCLUDING the empty string, which Go stores verbatim
+    /// (`Dependency.Type` is a plain string; `""` unmarshals to `""`, not
+    /// `"blocks"`). `Other("")` is what makes `as_str()` emit `""` so the
+    /// v0.25.0 dependency fingerprint hashes the same bytes as Go's
+    /// `string(dep.Type)`.
     Other(String),
+}
+
+impl Default for DependencyType {
+    /// Absent `type` in JSON decodes to Go's zero string `""`, which must
+    /// round-trip as `""` — not `"blocks"`.
+    fn default() -> Self {
+        DependencyType::Other(String::new())
+    }
 }
 
 impl DependencyType {
@@ -156,21 +184,30 @@ impl DependencyType {
 
     /// Go `DependencyType.IsBlocking` (pkg/model/types.go:439): `""`, `blocks`,
     /// `conditional-blocks` and `waits-for` all block. `""` reaches here as
-    /// [`DependencyType::Blocks`] because [`DependencyType::parse`] maps it.
+    /// [`DependencyType::Other`] carrying an empty string because
+    /// [`DependencyType::parse`] preserves it verbatim — Go hashes and
+    /// round-trips the raw string, so it must not be rewritten to `"blocks"`.
     ///
     /// The two typed conditional relationships are blocking even though their
     /// names do not say so — they gate readiness exactly like `blocks` does.
     pub fn is_blocking(&self) -> bool {
-        matches!(
-            self,
-            DependencyType::Blocks | DependencyType::ConditionalBlocks | DependencyType::WaitsFor
-        )
+        match self {
+            DependencyType::Blocks
+            | DependencyType::ConditionalBlocks
+            | DependencyType::WaitsFor => true,
+            // Go: `d == ""` is blocking (legacy untyped deps).
+            DependencyType::Other(raw) => raw.is_empty(),
+            _ => false,
+        }
     }
 
-    /// Parse from raw JSONL string; "" maps to Blocks (legacy default).
+    /// Parse from raw JSONL string, preserving the wire form verbatim.
+    /// `""` stays `Other("")`: Go's `Dependency.Type` is a plain string and
+    /// the v0.25.0 fingerprint hashes `string(dep.Type)` — an empty type
+    /// hashes as `""`, while `IsBlocking` still treats it as blocking.
     pub fn parse(raw: &str) -> Self {
         match raw {
-            "" | "blocks" => DependencyType::Blocks,
+            "blocks" => DependencyType::Blocks,
             "conditional-blocks" => DependencyType::ConditionalBlocks,
             "waits-for" => DependencyType::WaitsFor,
             "related" => DependencyType::Related,
@@ -218,33 +255,51 @@ impl<'de> Deserialize<'de> for DependencyType {
 /// A relationship between issues.
 ///
 /// Deser accepts `depends_on_id` (canonical), plus legacy `depends_on`
-/// and `target_id` fallbacks — mirrors Go `Dependency.UnmarshalJSON`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// and `target_id` fallbacks — mirrors Go `Dependency.UnmarshalJSON`,
+/// which folds all three into `DependsOnID`. The legacy spellings are kept
+/// for `effective_depends_on()` reads but are NEVER serialized: Go's
+/// `Dependency` struct has no such fields, so marshal emits only the
+/// canonical `depends_on_id` key.
+#[derive(Debug, Clone, Deserialize)]
 pub struct Dependency {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_default")]
     pub issue_id: String,
-    #[serde(default, rename = "depends_on_id")]
+    #[serde(
+        default,
+        rename = "depends_on_id",
+        deserialize_with = "de_null_default"
+    )]
     pub depends_on_id: String,
     /// Legacy field name; folded into `depends_on_id` when canonical absent.
-    #[serde(
-        default,
-        rename = "depends_on",
-        skip_serializing_if = "String::is_empty"
-    )]
+    #[serde(default, rename = "depends_on", deserialize_with = "de_null_default")]
     pub depends_on_legacy: String,
     /// Legacy field name; folded into `depends_on_id` when others absent.
-    #[serde(
-        default,
-        rename = "target_id",
-        skip_serializing_if = "String::is_empty"
-    )]
+    #[serde(default, rename = "target_id", deserialize_with = "de_null_default")]
     pub target_id_legacy: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_default")]
     pub r#type: DependencyType,
-    #[serde(default, serialize_with = "serialize_go_time")]
-    pub created_at: Option<String>,
     #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default, deserialize_with = "de_null_default")]
     pub created_by: String,
+}
+
+impl Serialize for Dependency {
+    /// Go marshals `Dependency` with no `omitempty`: all five keys are always
+    /// present in struct order (`issue_id`, `depends_on_id`, `type`,
+    /// `created_at`, `created_by`), the folded target is emitted under
+    /// `depends_on_id` only, and a zero `CreatedAt` emits the Go zero-time
+    /// string rather than `null`.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("Dependency", 5)?;
+        st.serialize_field("issue_id", &self.issue_id)?;
+        st.serialize_field("depends_on_id", self.effective_depends_on())?;
+        st.serialize_field("type", &self.r#type)?;
+        st.serialize_field("created_at", &go_time_text(&self.created_at))?;
+        st.serialize_field("created_by", &self.created_by)?;
+        st.end()
+    }
 }
 
 impl Dependency {
@@ -276,6 +331,9 @@ pub struct Comment {
     pub issue_id: String,
     pub author: String,
     pub text: String,
+    /// Go `Comment.CreatedAt` is a non-pointer `time.Time` with no
+    /// `omitempty`: absent marshals as `"0001-01-01T00:00:00Z"`, not `null`.
+    #[serde(serialize_with = "serialize_go_time")]
     pub created_at: Option<String>,
 }
 
@@ -285,11 +343,11 @@ impl<'de> Deserialize<'de> for Comment {
         struct Raw {
             #[serde(default, rename = "id")]
             id: Option<serde_json::Value>,
-            #[serde(default, alias = "issueId")]
+            #[serde(default, alias = "issueId", deserialize_with = "de_null_default")]
             issue_id: String,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "de_null_default")]
             author: String,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "de_null_default")]
             text: String,
             #[serde(default)]
             created_at: Option<String>,
@@ -402,6 +460,11 @@ impl Issue {
         if self.title.is_empty() {
             return Err(ValidationError::MissingField("title"));
         }
+        // Go `IssueType.IsValid` is a non-empty test (types.go:337) — any
+        // non-blank custom type is valid, but "" is rejected.
+        if self.issue_type.is_empty() {
+            return Err(ValidationError::InvalidIssueType(String::new()));
+        }
         // updated_at < created_at rejection (loader feeds these to load_stats)
         if let (Some(c), Some(u)) = (&self.created_at, &self.updated_at) {
             if let (Ok(c), Ok(u)) = (c.parse::<jiff::Timestamp>(), u.parse::<jiff::Timestamp>()) {
@@ -421,17 +484,30 @@ impl Issue {
 pub struct Sprint {
     pub id: String,
     pub name: String,
-    #[serde(default)]
+    /// Go `Sprint.StartDate`/`EndDate` are `time.Time` with `omitzero`:
+    /// absent is omitted entirely, never `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_date: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_date: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bead_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velocity_target: Option<f64>,
-    #[serde(default, serialize_with = "serialize_go_time")]
+    /// Go `Sprint.CreatedAt`/`UpdatedAt` use `omitzero` — absent is omitted,
+    /// so `None` must be skipped before `serialize_go_time` can emit the
+    /// zero-time string reserved for non-omitempty fields.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_go_time"
+    )]
     pub created_at: Option<String>,
-    #[serde(default, serialize_with = "serialize_go_time")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_go_time"
+    )]
     pub updated_at: Option<String>,
 }
 
@@ -460,7 +536,13 @@ pub struct Forecast {
     pub confidence: f64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub factors: Vec<String>,
-    #[serde(default, serialize_with = "serialize_go_time")]
+    /// Go `Forecast.CreatedAt` is `time.Time` with `omitzero` — absent is
+    /// omitted, not `null` or the zero-time string.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_go_time"
+    )]
     pub created_at: Option<String>,
 }
 
@@ -479,6 +561,8 @@ pub enum ValidationError {
     MissingField(&'static str),
     #[error("invalid status: {0}")]
     InvalidStatus(String),
+    #[error("invalid issue type: {0}")]
+    InvalidIssueType(String),
     #[error("invalid dependency type")]
     InvalidDependencyType,
     #[error("updated_at cannot be before created_at")]
@@ -595,6 +679,96 @@ mod tests {
         issue.created_at = Some("2026-01-05T00:00:00Z".into());
         issue.updated_at = Some("2026-01-01T00:00:00Z".into());
         assert_eq!(issue.validate(), Err(ValidationError::InvertedTimestamps));
+    }
+
+    #[test]
+    fn validate_rejects_empty_issue_type() {
+        // Go `IssueType.IsValid` is `t != ""` — the loader's Validate drops
+        // records with no issue_type.
+        let mut issue = minimal_issue();
+        issue.issue_type = String::new();
+        assert_eq!(
+            issue.validate(),
+            Err(ValidationError::InvalidIssueType(String::new()))
+        );
+        // Any non-empty custom type is valid (gastown "role"/"agent"/...).
+        issue.issue_type = "role".into();
+        assert!(issue.validate().is_ok());
+    }
+
+    #[test]
+    fn absent_issue_timestamps_emit_go_zero_time_not_null() {
+        // Go `Issue.CreatedAt`/`UpdatedAt` are non-pointer `time.Time` with
+        // no `omitempty`: absent marshals as "0001-01-01T00:00:00Z".
+        let json = serde_json::to_value(minimal_issue()).unwrap();
+        assert_eq!(json["created_at"], "0001-01-01T00:00:00Z");
+        assert_eq!(json["updated_at"], "0001-01-01T00:00:00Z");
+        // Pointer + omitempty fields stay absent entirely.
+        assert!(json.get("due_date").is_none());
+        assert!(json.get("defer_until").is_none());
+        assert!(json.get("closed_at").is_none());
+        assert!(json.get("compacted_at").is_none());
+    }
+
+    #[test]
+    fn dependency_serializes_go_folded_shape() {
+        // Legacy `depends_on` folds into canonical `depends_on_id` on input
+        // and is NEVER re-emitted — Go's Dependency has no such field.
+        let d: Dependency =
+            serde_json::from_value(serde_json::json!({"issue_id":"A","depends_on":"B"})).unwrap();
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["issue_id"], "A");
+        assert_eq!(v["depends_on_id"], "B");
+        assert!(v.get("depends_on").is_none());
+        assert!(v.get("target_id").is_none());
+        // Go marshals all five keys with no omitempty: absent type -> "",
+        // absent created_at -> the Go zero time, created_by -> "".
+        assert_eq!(v["type"], "");
+        assert_eq!(v["created_at"], "0001-01-01T00:00:00Z");
+        assert_eq!(v["created_by"], "");
+    }
+
+    #[test]
+    fn comment_absent_created_at_emits_go_zero_time() {
+        // Go `Comment.CreatedAt` is a non-pointer `time.Time`.
+        let c = Comment {
+            id: "1".into(),
+            issue_id: "A".into(),
+            author: "x".into(),
+            text: "t".into(),
+            created_at: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["created_at"], "0001-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn sprint_and_forecast_absent_times_are_omitted() {
+        // Go declares these `time.Time` fields with `omitzero` — absent is
+        // omitted, NOT null and NOT the zero-time string.
+        let s = Sprint {
+            id: "s".into(),
+            name: "n".into(),
+            start_date: None,
+            end_date: None,
+            bead_ids: vec![],
+            velocity_target: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        for key in ["start_date", "end_date", "created_at", "updated_at"] {
+            assert!(v.get(key).is_none(), "{key} must be omitted, got {v}");
+        }
+        let f = Forecast {
+            bead_id: "b".into(),
+            eta_date: "2026-01-01".into(),
+            confidence: 0.5,
+            factors: vec![],
+            created_at: None,
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert!(v.get("created_at").is_none());
     }
 
     fn minimal_issue() -> Issue {
@@ -730,10 +904,15 @@ mod dependency_type_parity_tests {
         assert!(!t.is_blocking());
     }
 
-    /// The legacy empty type still blocks, via the `Blocks` default.
+    /// The legacy empty type is preserved verbatim — Go's `Dependency.Type`
+    /// is a plain string and the fingerprint hashes `string(dep.Type)`, so
+    /// `""` must NOT be rewritten to `"blocks"`. It still blocks via
+    /// `IsBlocking`'s `d == ""` arm.
     #[test]
-    fn empty_type_defaults_to_blocks() {
-        assert_eq!(DependencyType::parse(""), DependencyType::Blocks);
-        assert!(DependencyType::parse("").is_blocking());
+    fn empty_type_stays_empty_but_blocks() {
+        let t = DependencyType::parse("");
+        assert_eq!(t, DependencyType::Other(String::new()));
+        assert_eq!(t.as_str(), "");
+        assert!(t.is_blocking());
     }
 }

@@ -241,11 +241,9 @@ pub fn generate_interactive_graph_html(
     let mut blocks_map: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for issue in &opts.issues {
         for dep in &issue.dependencies {
-            if issue_ids.contains(dep.depends_on_id.as_str()) && dep.r#type.is_blocking() {
-                blocks_map
-                    .entry(dep.depends_on_id.as_str())
-                    .or_default()
-                    .push(issue.id.clone());
+            let target = dep.effective_depends_on();
+            if issue_ids.contains(target) && dep.r#type.is_blocking() {
+                blocks_map.entry(target).or_default().push(issue.id.clone());
             }
         }
     }
@@ -265,8 +263,8 @@ pub fn generate_interactive_graph_html(
         let blocked_by: Vec<String> = issue
             .dependencies
             .iter()
-            .filter(|d| issue_ids.contains(d.depends_on_id.as_str()) && d.r#type.is_blocking())
-            .map(|d| d.depends_on_id.clone())
+            .filter(|d| issue_ids.contains(d.effective_depends_on()) && d.r#type.is_blocking())
+            .map(|d| d.effective_depends_on().to_string())
             .collect();
 
         let history = opts
@@ -321,16 +319,20 @@ pub fn generate_interactive_graph_html(
         // Links come from *every* dependency, blocking or not — only
         // `BlockedBy` is restricted to blocking ones (graph_interactive.go:246).
         for dep in &issue.dependencies {
-            if !issue_ids.contains(dep.depends_on_id.as_str()) {
+            let target = dep.effective_depends_on();
+            if !issue_ids.contains(target) {
                 continue;
             }
             // `graph_interactive.go:250` — critical means both ends have zero
-            // slack, and only when stats were computed at all.
+            // slack. Go indexes a possibly-nil slack map, where a missing
+            // metric reads as 0 and every link is critical; the byte-pinned
+            // parity fixture proves that is the oracle's behaviour, so the
+            // map's presence is deliberately NOT checked here.
             let critical = lookup_opt(&opts.extras.slack, &issue.id) == 0.0
-                && lookup_opt(&opts.extras.slack, &dep.depends_on_id) == 0.0;
+                && lookup_opt(&opts.extras.slack, target) == 0.0;
             links.push(GraphLink {
                 source: issue.id.clone(),
-                target: dep.depends_on_id.clone(),
+                target: target.to_string(),
                 r#type: dep_type_text(dep.r#type.clone()),
                 critical,
             });

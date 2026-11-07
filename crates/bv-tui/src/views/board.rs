@@ -36,17 +36,61 @@ impl SwimlaneMode {
     }
 }
 
+/// Every `Status` variant, in enum order. The board must not hide issues
+/// whose status is deferred/draft/pinned/hooked/review/tombstone — the old
+/// 4-column Kanban silently dropped them (audit: `audit-tui-board-statuses`).
+const ALL_STATUSES: [Status; 10] = [
+    Status::Open,
+    Status::InProgress,
+    Status::Blocked,
+    Status::Deferred,
+    Status::Draft,
+    Status::Pinned,
+    Status::Hooked,
+    Status::Review,
+    Status::Closed,
+    Status::Tombstone,
+];
+
+/// Column label for a status: `IN PROGRESS` keeps its space, every other
+/// variant is the uppercased wire form (`OPEN`, `TOMBSTONE`, …).
+fn status_label(status: Status) -> String {
+    match status {
+        Status::InProgress => "IN PROGRESS".to_string(),
+        _ => status.as_str().to_uppercase(),
+    }
+}
+
+/// Border/accent color per status — mirrors `graph::status_icon_color` so
+/// the same status reads the same color in every view.
+fn status_color(status: Status) -> Color {
+    match status {
+        Status::Open => Color::Green,
+        Status::InProgress => Color::Cyan,
+        Status::Blocked => Color::Red,
+        Status::Deferred | Status::Closed | Status::Tombstone => Color::DarkGray,
+        Status::Draft | Status::Review => Color::Yellow,
+        Status::Pinned | Status::Hooked => Color::Magenta,
+    }
+}
+
 /// Column labels for a swimlane mode, data-driven where the mode needs it.
-/// `Status` is the fixed 4-column Kanban; `Priority` is fixed P0–P4;
+/// `Status` renders every [`Status`] variant so no issue is invisible;
+/// `Priority` is P0–P4 plus every other `priority` value present in the
+/// rows, sorted (out-of-range priorities get their own column);
 /// `Type` is the sorted distinct `issue_type` values present in the rows
 /// (single `ALL` fallback when no row declares a type).
 pub fn column_labels(app: &App, mode: SwimlaneMode) -> Vec<String> {
     match mode {
-        SwimlaneMode::Status => ["OPEN", "IN PROGRESS", "BLOCKED", "CLOSED"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        SwimlaneMode::Priority => (0..=4).map(|p| format!("P{p}")).collect(),
+        SwimlaneMode::Status => ALL_STATUSES.iter().map(|s| status_label(*s)).collect(),
+        SwimlaneMode::Priority => {
+            // P0–P4 always exist as columns (stable navigation); any
+            // priority outside that range present in the data gets its own
+            // column appended in sorted order instead of being dropped.
+            let mut priorities: std::collections::BTreeSet<i32> = (0..=4).collect();
+            priorities.extend(app.rows.iter().map(|r| r.priority));
+            priorities.iter().map(|p| format!("P{p}")).collect()
+        }
         SwimlaneMode::Type => {
             let mut types: Vec<String> = app
                 .rows
@@ -69,12 +113,18 @@ pub fn column_labels(app: &App, mode: SwimlaneMode) -> Vec<String> {
 /// column (moved with `h`/`l`, jumped with `1`-`9`).
 pub fn render_board(f: &mut Frame, app: &App, area: Rect, mode: SwimlaneMode, selected: usize) {
     let columns = column_labels(app, mode);
-    let status_for = |label: &str| match label {
-        "OPEN" => Status::Open,
-        "IN PROGRESS" => Status::InProgress,
-        "BLOCKED" => Status::Blocked,
-        _ => Status::Closed,
-    };
+    // Resolve each column label back to its `Status` once per frame
+    // (Status mode only) — doing it per row would allocate a `String`
+    // for every row × column.
+    let column_status: Vec<Option<Status>> = columns
+        .iter()
+        .map(|label| {
+            ALL_STATUSES
+                .iter()
+                .copied()
+                .find(|s| status_label(*s) == *label)
+        })
+        .collect();
 
     let n = columns.len().max(1) as u16;
     let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Percentage(100 / n)).collect();
@@ -88,7 +138,7 @@ pub fn render_board(f: &mut Frame, app: &App, area: Rect, mode: SwimlaneMode, se
             .rows
             .iter()
             .filter(|r| match mode {
-                SwimlaneMode::Status => r.status == status_for(label),
+                SwimlaneMode::Status => column_status[i] == Some(r.status),
                 SwimlaneMode::Priority => {
                     label.strip_prefix('P').and_then(|d| d.parse::<i32>().ok()) == Some(r.priority)
                 }
@@ -97,18 +147,15 @@ pub fn render_board(f: &mut Frame, app: &App, area: Rect, mode: SwimlaneMode, se
             .collect();
 
         let color = match mode {
-            SwimlaneMode::Status => match status_for(label) {
-                Status::Open => Color::Green,
-                Status::InProgress => Color::Yellow,
-                Status::Blocked => Color::Red,
-                _ => Color::Gray,
-            },
-            SwimlaneMode::Priority => match label.as_str() {
-                "P0" | "P1" => Color::Red,
-                "P2" => Color::Yellow,
-                "P3" => Color::Cyan,
-                _ => Color::Gray,
-            },
+            SwimlaneMode::Status => column_status[i].map(status_color).unwrap_or(Color::Gray),
+            SwimlaneMode::Priority => {
+                match label.strip_prefix('P').and_then(|d| d.parse::<i32>().ok()) {
+                    Some(0 | 1) => Color::Red,
+                    Some(2) => Color::Yellow,
+                    Some(3) => Color::Cyan,
+                    _ => Color::Gray,
+                }
+            }
             SwimlaneMode::Type => Color::Cyan,
         };
 

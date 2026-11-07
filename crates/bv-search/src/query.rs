@@ -82,6 +82,10 @@ pub fn adjust_weights_for_query(
         };
     }
     let scale = (1.0 - target) / remaining;
+    // Go `AdjustWeightsForQuery` ends its rescale path with
+    // `adjusted.Normalize()` — the rescaled sum is 1.0 only in exact
+    // arithmetic, and the last-ULP difference is observable in the emitted
+    // weights (and any hash digested from them).
     Weights {
         text_relevance: target,
         pagerank: weights.pagerank * scale,
@@ -90,6 +94,7 @@ pub fn adjust_weights_for_query(
         priority: weights.priority * scale,
         recency: weights.recency * scale,
     }
+    .normalized()
 }
 
 /// Hybrid candidate pool size (Go `HybridCandidateLimit`): 3× limit clamped
@@ -112,12 +117,14 @@ pub fn hybrid_candidate_limit(limit: usize, total: usize, query: &str) -> usize 
     base.max(min).min(total)
 }
 
-/// Lexical tokens: maximal letter/digit runs (Go `lexicalTokens`).
+/// Lexical tokens: maximal letter/digit runs (Go `lexicalTokens` —
+/// `unicode.IsLetter(r) || unicode.IsDigit(r)`; see `char_class` for why
+/// `char::is_alphanumeric()` is not equivalent).
 pub fn lexical_tokens(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut start: Option<usize> = None;
     for (i, c) in s.char_indices() {
-        if c.is_alphanumeric() {
+        if crate::char_class::is_letter_or_digit(c) {
             if start.is_none() {
                 start = Some(i);
             }
@@ -139,17 +146,29 @@ pub fn short_query_lexical_boost(query: &str, doc: &str) -> f64 {
     LexicalMatchDoc::new(doc).boost(query)
 }
 
+/// Go `strings.ToLower` is a *simple* per-rune mapping (`unicode.ToLower`
+/// applied to each rune independently): it never applies the
+/// context-sensitive final-sigma rule, so Go lowers "ΟΣ" to "οσ" where
+/// `str::to_lowercase` produces "ος". Taking only the first char of
+/// `char::to_lowercase` keeps the mapping 1:1 like Go's simple mapping —
+/// full mappings that expand to several chars collapse to their simple
+/// form ('İ' → 'i', matching `unicode.ToLower('İ') == 'i'`, verified
+/// against Go 1.26).
+fn simple_lower(s: &str) -> String {
+    s.chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect()
+}
+
 /// A document prepared once for repeated [`short_query_lexical_boost`]
 /// scoring.
 ///
-/// Go's `ShortQueryLexicalBoost` lowercases the *whole* document before
-/// tokenizing it. That is not a detail a caller can skip or reimplement: the
-/// lowercased form is what the tokens are cut from, and Unicode case folding
-/// is context-sensitive (Greek final sigma), so lowering token-by-token is
-/// not the same function. Which leaves the allocation — a fresh copy of the
-/// document on every call. Scoring one document per issue per keystroke means
-/// re-lowercasing the entire corpus for every character typed, ~15 ms on a
-/// 3.4 MB dataset. Prepare once, score many.
+/// Go's `ShortQueryLexicalBoost` lowercases the *whole* document (with the
+/// simple per-rune mapping above) before tokenizing it. Which leaves the
+/// allocation — a fresh copy of the document on every call. Scoring one
+/// document per issue per keystroke means re-lowercasing the entire corpus
+/// for every character typed, ~15 ms on a 3.4 MB dataset. Prepare once,
+/// score many.
 #[derive(Clone)]
 pub struct LexicalMatchDoc {
     lowered: String,
@@ -159,7 +178,7 @@ impl LexicalMatchDoc {
     /// Pre-lowers `doc` for [`Self::boost`].
     pub fn new(doc: &str) -> Self {
         Self {
-            lowered: doc.to_lowercase(),
+            lowered: simple_lower(doc),
         }
     }
 
@@ -168,7 +187,7 @@ impl LexicalMatchDoc {
         if !is_short_query(query) {
             return 0.0;
         }
-        let needle = query.trim().to_lowercase();
+        let needle = simple_lower(query.trim());
         if needle.is_empty() || self.lowered.is_empty() {
             return 0.0;
         }
@@ -190,7 +209,7 @@ impl LexicalMatchDoc {
 fn for_each_token(s: &str, mut f: impl FnMut(&str)) {
     let mut start: Option<usize> = None;
     for (i, c) in s.char_indices() {
-        if c.is_alphanumeric() {
+        if crate::char_class::is_letter_or_digit(c) {
             if start.is_none() {
                 start = Some(i);
             }
@@ -308,11 +327,11 @@ fn short_query_lexical_boost_naive(query: &str, doc: &str) -> f64 {
     if !is_short_query(query) {
         return 0.0;
     }
-    let needle = query.trim().to_lowercase();
+    let needle = simple_lower(query.trim());
     if needle.is_empty() || doc.is_empty() {
         return 0.0;
     }
-    if short_query_matches_document_naive(&needle, &doc.to_lowercase()) {
+    if short_query_matches_document_naive(&needle, &simple_lower(doc)) {
         SHORT_QUERY_DOC_BOOST
     } else {
         0.0
@@ -388,6 +407,27 @@ mod tests {
             (same.text_relevance, w.text_relevance),
             (w.text_relevance, w.text_relevance)
         );
+    }
+
+    #[test]
+    fn lowercasing_matches_go_simple_mapping() {
+        // Go `strings.ToLower` applies `unicode.ToLower` per rune — no
+        // context-sensitive final sigma: "ΟΣ" → "οσ", where
+        // `str::to_lowercase` would give "ος". Verified against Go 1.26.
+        assert_eq!(simple_lower("ΟΣ"), "οσ");
+        assert_eq!(simple_lower("ΣΊΣΥΦΟΣ"), "σίσυφοσ");
+        // Multi-char full mappings collapse to Go's simple form.
+        assert_eq!(simple_lower("İ"), "i");
+        assert_eq!(LexicalMatchDoc::new("ΟΣ").lowered, "οσ");
+    }
+
+    #[test]
+    fn token_class_matches_go_isletter_isdigit() {
+        // Nl (Roman numeral) and No (fraction/superscript) are separators in
+        // Go; Nd digits join the token. Verified against Go 1.26.
+        assert_eq!(lexical_tokens("aⅧb"), vec!["a", "b"]);
+        assert_eq!(lexical_tokens("a٣b"), vec!["a٣b"]);
+        assert_eq!(lexical_tokens("x½y²z"), vec!["x", "y", "z"]);
     }
 
     #[test]
