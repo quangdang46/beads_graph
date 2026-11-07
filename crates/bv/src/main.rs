@@ -315,7 +315,7 @@ mod impact_network {
                 bead_id: bead_id.clone(),
                 title: history.title.clone(),
                 status: history.status.clone(),
-                priority: i64::from(priority),
+                priority,
                 last_activity: latest_history_activity(history),
                 degree: 0,
                 cluster_id: -1,
@@ -2286,19 +2286,18 @@ fn main() -> ExitCode {
                 // Go main.go:3524-3527 — the bare words `html`/`interactive`
                 // get `opts.Path = ""` so the writer auto-generates
                 // `{project}_graph_export__as_of__<date>__<time>__git_head_
-                // hash__<short>.html`; a real path is passed through (the
-                // writer still swaps a missing/foreign extension for `.html`,
-                // which is why the RETURNED path — not `out_path` — is what
-                // gets reported). The bv-export port of the auto-namer emits
-                // a different shape, so the Go name is computed here and
-                // passed in explicitly.
+                // hash__<short>.html` (bv-export's
+                // `generate_interactive_graph_filename` ports that helper
+                // verbatim); a real path is passed through (the writer still
+                // swaps a missing/foreign extension for `.html`, which is why
+                // the RETURNED path — not `out_path` — is what gets reported).
                 let project_name = cwd
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| "project".to_string());
                 let out_path = if bare_word {
-                    go_interactive_graph_autoname(&project_name, &cwd)
+                    String::new()
                 } else {
                     output_path.clone()
                 };
@@ -12043,7 +12042,7 @@ fn run_robot_plan() -> ExitCode {
         // Go's tie-break is (count desc, priority asc, id asc) — the slice is
         // already ID-sorted, so matching on (count, priority) picks the lowest ID
         // among equals, exactly as Go's comparator does (plan.go:279-287).
-        let mut highest_priority = 0i32;
+        let mut highest_priority = 0i64;
         for issue in &sorted_actionable {
             let count = compute_unblocks(&issue.id).len() as i64;
             if count > highest_count
@@ -15542,7 +15541,7 @@ fn search_validate_finite(vec: &[f32]) -> Result<(), String> {
 struct SearchIssueMetrics {
     pagerank: f64,
     status: String,
-    priority: i32,
+    priority: i64,
     blocker_count: usize,
     updated_at: Option<jiff::Timestamp>,
 }
@@ -19444,6 +19443,13 @@ fn run_robot_metrics() -> ExitCode {
     }
     let m = bv_analysis::metrics::get_all_metrics();
     payload["cache"] = go_cache_stats(&m);
+    // Go's `memory` block is `runtime.ReadMemStats` output — real Go-runtime
+    // counters (pkg/metrics/cache.go:148-158) that have no Rust analogue:
+    // `gc_cycles`, `gc_pause_ms`, `goroutine_count` and `heap_objects_k`
+    // stay `null` rather than a fake 0 (bv-analysis/src/metrics.rs:190-217),
+    // while `heap_alloc_mb`/`heap_sys_mb` report RSS where the platform can
+    // read it. ACCEPTED-DIVERGENCE: values can never byte-match Go's, only
+    // the shape can — same exemption class as `timing`.
     payload["memory"] = m["memory"].clone();
     emit_json(&payload)
 }
@@ -20105,50 +20111,6 @@ fn jiff_local_now() -> String {
             dt.second()
         )
     }
-}
-
-/// Go `GenerateInteractiveGraphFilename`
-/// (`pkg/export/graph_interactive.go:97-114`) — the name
-/// `--export-graph html` / `--export-graph interactive` auto-generate:
-/// `{safe}_graph_export__as_of__YYYY_MM_DD__HH_MM__git_head_hash__{short}.html`.
-///
-/// The timestamp is `time.Now()` in the LOCAL zone at minute precision —
-/// deliberately not `robotNow()`, so SOURCE_DATE_EPOCH does not pin it, same
-/// as Go. The git half is `git rev-parse --short HEAD` run in `dir`, falling
-/// back to `nogit` on any failure, exactly like Go's `cmd.Output()` check.
-///
-/// This lives here rather than in bv-export because that crate's port of the
-/// same helper emits a different shape (`{safe}_graph_export__{rfc3339}.html`);
-/// passing the Go-faithful name in as `opts.path` reaches the same bytes on
-/// disk without touching the other crate.
-fn go_interactive_graph_autoname(project_name: &str, dir: &std::path::Path) -> String {
-    // Two successive Go `strings.ReplaceAll` calls — equivalent to one pass
-    // over either character, same as the bv-export port notes.
-    let safe_name = project_name.replace([' ', '/'], "_");
-    let offset = local_utc_offset_seconds();
-    let offset_dur = std::time::Duration::from_secs(offset.unsigned_abs());
-    let now = jiff::Timestamp::now();
-    let local = if offset < 0 {
-        now.checked_sub(offset_dur)
-    } else {
-        now.checked_add(offset_dur)
-    }
-    .unwrap_or(now);
-    let dt = local.to_zoned(jiff::tz::TimeZone::UTC).datetime();
-    let date_str = dt.strftime("%Y_%m_%d").to_string();
-    let time_str = dt.strftime("%H_%M").to_string();
-    let git_short = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(dir)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "nogit".to_string());
-    format!(
-        "{safe_name}_graph_export__as_of__{date_str}__{time_str}__git_head_hash__{git_short}.html"
-    )
 }
 
 /// The machine's current UTC offset in seconds, from the C library's

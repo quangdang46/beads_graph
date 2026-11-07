@@ -395,7 +395,7 @@ fn type_emoji(issue_type: &str) -> &'static str {
 }
 
 /// Go `getPriorityLabel`.
-fn priority_label(priority: i32) -> String {
+fn priority_label(priority: i64) -> String {
     match priority {
         0 => "🔥 Critical (P0)".to_string(),
         1 => "⚡ High (P1)".to_string(),

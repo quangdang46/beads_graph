@@ -126,7 +126,7 @@ struct GraphNode {
     #[serde(skip_serializing_if = "String::is_empty")]
     notes: String,
     status: String,
-    priority: i32,
+    priority: i64,
     r#type: String,
     labels: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -385,10 +385,7 @@ pub fn generate_interactive_graph_html(
         } else {
             opts.project_name.as_str()
         };
-        output_path = PathBuf::from(generate_interactive_graph_filename(
-            stem,
-            &opts.generated_at,
-        ));
+        output_path = PathBuf::from(generate_interactive_graph_filename(stem));
     }
     if !output_path
         .extension()
@@ -413,16 +410,96 @@ pub fn generate_interactive_graph_html(
     Ok(output_path)
 }
 
-/// Go `GenerateInteractiveGraphFilename` (`pkg/export/graph_interactive.go:96-113`).
+/// Go `GenerateInteractiveGraphFilename` (`pkg/export/graph_interactive.go:96-115`)
+/// — the name auto-generated when `opts.path` is empty:
+/// `{safe}_graph_export__as_of__YYYY_MM_DD__HH_MM__git_head_hash__{short}.html`.
 ///
-/// Go shells out to `git rev-parse --short HEAD` for the hash and falls back
-/// to `nogit`; the caller supplies `generated_at` in place of Go's `time.Now()`
-/// and `git_head` in place of the subprocess, so the name is deterministic here.
-pub fn generate_interactive_graph_filename(project_name: &str, generated_at: &str) -> String {
+/// The timestamp is `time.Now()` in the machine's LOCAL zone at minute
+/// precision — deliberately not `opts.generated_at`, which is the
+/// SOURCE_DATE_EPOCH-pinnable `robotNow()` the template embeds, so the two
+/// clocks stay independent exactly as they are in Go. The git half is
+/// `git rev-parse --short HEAD` in the process working directory (Go's
+/// `exec.Command` inherits it through the empty `cmd.Dir`), falling back to
+/// `nogit` on any failure.
+pub fn generate_interactive_graph_filename(project_name: &str) -> String {
+    let (date_str, time_str) = local_minute_stamp();
+    let git_short = git_head_short();
+    interactive_graph_filename(project_name, &date_str, &time_str, &git_short)
+}
+
+/// `time.Now().Format("2006_01_02")` and `Format("15_04")` rendered in the
+/// machine's local zone. jiff's `TimeZone::system()` resolves UTC on macOS,
+/// so — same as `jiff_local_now` in the CLI — the offset is read from the C
+/// library's `localtime_r` and applied to the UTC instant by hand.
+fn local_minute_stamp() -> (String, String) {
+    let offset = local_utc_offset_seconds();
+    let offset_dur = std::time::Duration::from_secs(offset.unsigned_abs());
+    let now = jiff::Timestamp::now();
+    let local = if offset < 0 {
+        now.checked_sub(offset_dur)
+    } else {
+        now.checked_add(offset_dur)
+    }
+    .unwrap_or(now);
+    let dt = local.to_zoned(jiff::tz::TimeZone::UTC).datetime();
+    (
+        dt.strftime("%Y_%m_%d").to_string(),
+        dt.strftime("%H_%M").to_string(),
+    )
+}
+
+/// Go's `exec.Command("git", "rev-parse", "--short", "HEAD").Output()`:
+/// success means exit status 0, and the trimmed stdout is used verbatim —
+/// Go does not special-case empty output, so neither does this. Any start
+/// failure or non-zero exit yields `nogit`.
+fn git_head_short() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "nogit".to_string())
+}
+
+/// The machine's current UTC offset in seconds, from the C library's
+/// `localtime_r`. Falls back to 0 (UTC) if the call is unavailable.
+fn local_utc_offset_seconds() -> i64 {
+    #[cfg(unix)]
+    {
+        // SAFETY: `localtime_r` writes a single `tm` we own and initialise to
+        // zero first; `time` with a null argument is the documented way to
+        // read the current time.
+        unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut tm: libc::tm = std::mem::zeroed();
+            if libc::localtime_r(&now, &mut tm).is_null() {
+                return 0;
+            }
+            tm.tm_gmtoff as i64
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// The pure half of [`generate_interactive_graph_filename`], split out so the
+/// exact byte shape is testable without depending on the clock or the repo's
+/// git state.
+fn interactive_graph_filename(
+    project_name: &str,
+    date_str: &str,
+    time_str: &str,
+    git_short: &str,
+) -> String {
     // Go: two successive `strings.ReplaceAll` calls, which is the same as
     // replacing either character.
     let safe_name = project_name.replace([' ', '/'], "_");
-    format!("{safe_name}_graph_export__{generated_at}.html")
+    format!(
+        "{safe_name}_graph_export__as_of__{date_str}__{time_str}__git_head_hash__{git_short}.html"
+    )
 }
 
 /// Go `generateUltimateHTML` (`pkg/export/graph_render_beautiful.go:10-1967`).
@@ -687,19 +764,22 @@ mod tests {
 
     #[test]
     fn the_auto_filename_matches_go_shape() {
-        // graph_interactive.go:96-113 — the stem is sanitised, and the
-        // timestamp/hash tail is appended.
+        // graph_interactive.go:96-115 — the stem is sanitised, and the
+        // `as_of`/`git_head_hash` tail is appended.
         assert_eq!(
-            generate_interactive_graph_filename(
-                "my project",
-                "2024_01_15__10_00__git_head_hash__abc123"
-            ),
-            "my_project_graph_export__2024_01_15__10_00__git_head_hash__abc123.html"
+            interactive_graph_filename("my project", "2024_01_15", "10_00", "abc123"),
+            "my_project_graph_export__as_of__2024_01_15__10_00__git_head_hash__abc123.html"
         );
         assert_eq!(
-            generate_interactive_graph_filename("a/b", "X"),
-            "a_b_graph_export__X.html"
+            interactive_graph_filename("a/b", "2024_01_15", "10_00", "nogit"),
+            "a_b_graph_export__as_of__2024_01_15__10_00__git_head_hash__nogit.html"
         );
+        // The public entry point gathers the clock and git state itself; all
+        // that is assertable here is the fixed scaffolding around them.
+        let name = generate_interactive_graph_filename("my project");
+        assert!(name.starts_with("my_project_graph_export__as_of__"));
+        assert!(name.ends_with(".html"));
+        assert!(name.contains("__git_head_hash__"));
     }
 
     #[test]

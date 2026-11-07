@@ -13,7 +13,7 @@
 use bv_core::model::{Comment, Dependency, DependencyType, Issue, Status};
 use bv_export::markdown::{generate_markdown, ReportOptions};
 
-fn issue(id: &str, title: &str, status: Status, issue_type: &str, priority: i32) -> Issue {
+fn issue(id: &str, title: &str, status: Status, issue_type: &str, priority: i64) -> Issue {
     Issue {
         id: id.to_string(),
         content_hash: String::new(),
