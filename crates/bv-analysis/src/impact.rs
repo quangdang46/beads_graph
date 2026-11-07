@@ -40,7 +40,7 @@ pub fn compute_staleness(updated_at: Option<&str>, now: &jiff::Timestamp) -> f64
 }
 
 /// Go: `computePriorityBoost` — P0=1.0 .. P4+=0.
-pub fn compute_priority_boost(priority: i32) -> f64 {
+pub fn compute_priority_boost(priority: i64) -> f64 {
     match priority {
         0 => 1.0,
         1 => 0.75,
@@ -507,7 +507,7 @@ pub struct IssueImpact {
     /// arrived with no owner even though the oracle names one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub assignee: String,
-    pub priority: i32,
+    pub priority: i64,
     /// Go `Recommendation.Labels` is a plain `[]string` with no omitempty, so
     /// an issue with no labels serializes as `null` rather than `[]`.
     #[serde(serialize_with = "crate::impact::serialize_labels")]

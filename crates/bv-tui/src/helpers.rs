@@ -40,7 +40,7 @@ pub fn status_icon(status: &bv_core::model::Status) -> &'static str {
 }
 
 /// Get priority icon.
-pub fn priority_icon(priority: i32) -> &'static str {
+pub fn priority_icon(priority: i64) -> &'static str {
     match priority {
         0 => "P0",
         1 => "P1",

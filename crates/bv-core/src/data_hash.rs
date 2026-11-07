@@ -30,7 +30,7 @@ struct HashIssue<'a> {
     external_ref: Option<&'a str>,
     status: &'a str,
     issue_type: &'a str,
-    priority: i32,
+    priority: i64,
     estimated_minutes: Option<i64>,
     created_at: Option<String>,
     updated_at: Option<String>,
@@ -144,7 +144,10 @@ const GO_ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 /// Go would have rejected the record at decode) sorts as the zero time,
 /// i.e. before every real timestamp.
 fn cmp_comment_time(a: &Option<String>, b: &Option<String>) -> std::cmp::Ordering {
-    let parse = |v: &Option<String>| v.as_deref().and_then(|s| s.parse::<jiff::Timestamp>().ok());
+    let parse = |v: &Option<String>| {
+        v.as_deref()
+            .and_then(crate::fingerprint::parse_go_timestamp)
+    };
     match (parse(a), parse(b)) {
         (Some(x), Some(y)) => x.cmp(&y),
         (None, None) => std::cmp::Ordering::Equal,
@@ -174,7 +177,7 @@ fn compute_issue_content_hash(w: &mut FingerprintWriter, issue: &Issue) -> Strin
 
     w.write_string_hash(issue.status.as_str());
     w.write_string_hash(&issue.issue_type);
-    w.write_int_hash(issue.priority as i64);
+    w.write_int_hash(issue.priority);
     w.write_int_ptr_hash(issue.estimated_minutes);
     w.write_time_hash(issue.created_at.as_deref());
     w.write_time_hash(issue.updated_at.as_deref());

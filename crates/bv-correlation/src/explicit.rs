@@ -85,44 +85,45 @@ pub fn calculate_confidence(match_kind: Option<MatchKind>, total_matches: usize)
     base.clamp(0.70, 0.99)
 }
 
-/// Builtin bead-ID patterns mirroring Go's explicit.go set.
+/// Builtin bead-ID patterns — Go's `builtinPatterns()`
+/// (explicit.go:70-90) verbatim and in evaluation order, followed by the
+/// `DefaultPatterns` custom tail (`--id-pattern`, #188).
 ///
-/// Divergence note: these patterns intentionally differ from
-/// `history::builtin_patterns` (the full history walker's set). The history
-/// port splits the action keywords into per-verb regexes and uses
-/// `beads?[-_]`; this matcher keeps Go explicit.go's combined action
-/// alternation and its own `beads[-_]` legacy form. Both feed
-/// [`crate::history::normalize_bead_id`], so the IDs they emit are
-/// interchangeable even where the match text differs.
+/// Go has exactly ONE builtin set; it backs both `ExplicitMatcher` (this
+/// file's port target) and the history walker's explicit-ID strategy
+/// (`history::builtin_patterns` evaluates the same eight regexes). An earlier
+/// revision of this struct carried a divergent combined-alternation action
+/// regex and a `beads[-_]` (no `?`) legacy form, so "closed BV-1" scored
+/// Closes/0.95 where Go scores generic/0.90 and "fixes#BV-1" was missed
+/// entirely — both are fixed by evaluating Go's patterns literally.
 pub struct IdPatterns {
-    /// [PREFIX-123] bracket form
-    pub bracket: Regex,
-    /// closes/fixes/resolves/refs + optional # + ID
-    pub action: Regex,
-    /// beads[-_]N legacy
-    pub bead: Regex,
-    /// bv[-_]N project form
-    pub bv: Regex,
-    /// generic UPPERCASE-PREFIX-N
-    pub generic: Regex,
-    /// Go `DefaultPatterns` tail — the patterns registered via
-    /// [`set_custom_id_patterns`] (`--id-pattern`, #188). Empty by default; use
-    /// [`IdPatterns::with_custom`] to carry them.
-    pub custom: Vec<Regex>,
+    /// Ordered pattern list: the eight Go built-ins, then any custom
+    /// `--id-pattern` registrations. Order decides which pattern claims an ID
+    /// first — Go keeps the first match per normalized ID.
+    patterns: Vec<Regex>,
 }
 
 impl Default for IdPatterns {
     fn default() -> Self {
         IdPatterns {
-            bracket: Regex::new(r"\[([A-Za-z]+-\d+)\]").unwrap(),
-            action: Regex::new(
-                r"(?i)(closes?|closed|fixes|fixed|resolves?|resolved|refs?)[:\s]+#?([A-Za-z]+-\d+)",
-            )
-            .unwrap(),
-            bead: Regex::new(r"(?i)\bbeads[-_](\d+)\b").unwrap(),
-            bv: Regex::new(r"(?i)\bbv[-_](\d+)\b").unwrap(),
-            generic: Regex::new(r"\b([A-Z]{2,10}-\d+)\b").unwrap(),
-            custom: Vec::new(),
+            patterns: vec![
+                // Go explicit.go:73 — `[PREFIX-123]` bracket form.
+                Regex::new(r"\[([A-Za-z]+-\d+)\]").unwrap(),
+                // Go explicit.go:77 — `closes?` action verb.
+                Regex::new(r"(?i)closes?:?\s*#?([A-Za-z]+-\d+)").unwrap(),
+                // Go explicit.go:78 — `fix`/`fixes`/`fixed`.
+                Regex::new(r"(?i)fix(?:es|ed)?:?\s*#?([A-Za-z]+-\d+)").unwrap(),
+                // Go explicit.go:79 — `ref`/`refs`.
+                Regex::new(r"(?i)refs?:?\s*#?([A-Za-z]+-\d+)").unwrap(),
+                // Go explicit.go:80 — `resolve`/`resolves`/`resolved`.
+                Regex::new(r"(?i)resolves?:?\s*#?([A-Za-z]+-\d+)").unwrap(),
+                // Go explicit.go:85 — `bead-N`/`beads-N`/`bead_N`/`beads_N`.
+                Regex::new(r"(?i)beads?[-_](\d+)\b").unwrap(),
+                // Go explicit.go:86 — `bv-N`/`bv_N` project form.
+                Regex::new(r"(?i)bv[-_](\d+)\b").unwrap(),
+                // Go explicit.go:89 — generic UPPERCASE-PREFIX-N.
+                Regex::new(r"\b([A-Z]{2,10}-\d+)\b").unwrap(),
+            ],
         }
     }
 }
@@ -134,10 +135,9 @@ impl IdPatterns {
     /// built-ins-only: a `Default` that read the process-global would make every
     /// `IdPatterns::default()` caller depend on CLI flag state.
     pub fn with_custom(custom: Vec<Regex>) -> Self {
-        Self {
-            custom,
-            ..Self::default()
-        }
+        let mut patterns = Self::default().patterns;
+        patterns.extend(custom);
+        Self { patterns }
     }
 }
 
@@ -148,71 +148,24 @@ pub struct IdMention {
     pub kind: MatchKind,
 }
 
-/// Scan a commit message for bead-ID mentions.
+/// Scan a commit message for bead-ID mentions — Go
+/// `ExplicitMatcher.ExtractIDsFromMessage` (explicit.go:126-160): patterns are
+/// evaluated in order, every builtin capture goes through
+/// [`crate::history::normalize_bead_id`], and the FIRST pattern to name a
+/// normalized ID claims it (later patterns may not reclassify it). The kind
+/// is Go's `classifyMatch` applied to the whole match text, narrowed to
+/// [`MatchKind`]. Output order is pattern order, not sorted.
 pub fn find_mentions(message: &str, patterns: &IdPatterns) -> Vec<IdMention> {
     let mut out = Vec::new();
-
-    // Action keywords first (highest signal). Every builtin capture goes
-    // through `normalize_bead_id`, the same fold the custom-pattern pass and
-    // `history::IdRegexes::extract` apply, so "fixes BV-123" names the same
-    // bead as "fixes bv-123".
-    for cap in patterns.action.captures_iter(message) {
-        if let Some(id) = cap.get(2) {
-            let verb = cap.get(1).unwrap().as_str().to_lowercase();
-            let kind = if verb.starts_with("close") {
-                MatchKind::Closes
-            } else if verb.starts_with("fix") {
-                MatchKind::Fixes
-            } else if verb.starts_with("resolv") {
-                MatchKind::Resolves
-            } else {
-                MatchKind::Refs
-            };
-            out.push(IdMention {
-                bead_id: crate::history::normalize_bead_id(id.as_str()),
-                kind,
-            });
-        }
-    }
-
-    // Bracket form.
-    for cap in patterns.bracket.captures_iter(message) {
-        out.push(IdMention {
-            bead_id: crate::history::normalize_bead_id(&cap[1]),
-            kind: MatchKind::Bracket,
-        });
-    }
-
-    // beads-N / bv-N / generic forms.
-    for cap in patterns.bead.captures_iter(message) {
-        out.push(IdMention {
-            bead_id: crate::history::normalize_bead_id(&cap[1]),
-            kind: MatchKind::Bead,
-        });
-    }
-    for cap in patterns.bv.captures_iter(message) {
-        out.push(IdMention {
-            bead_id: crate::history::normalize_bead_id(&format!("bv-{}", &cap[1])),
-            kind: MatchKind::Bead,
-        });
-    }
-    for cap in patterns.generic.captures_iter(message) {
-        out.push(IdMention {
-            bead_id: crate::history::normalize_bead_id(&cap[1]),
-            kind: MatchKind::Refs,
-        });
-    }
-
-    // Custom patterns (--id-pattern, #188) close out the list, so they are the
-    // tail of Go's `DefaultPatterns` and share its extraction rule: capture
-    // group 1 when the pattern has one, else the whole match. Go keeps the
-    // *first* ID it finds for a given value, and the built-ins are evaluated
-    // first, so a custom match may introduce an ID but never reclassify one the
-    // built-ins already named.
-    let mut seen_ids: HashSet<String> = out.iter().map(|m| m.bead_id.clone()).collect();
-    for re in &patterns.custom {
+    let mut seen = HashSet::new();
+    for re in &patterns.patterns {
         for caps in re.captures_iter(message) {
-            let Some(whole) = caps.get(0) else { continue };
+            let Some(whole) = caps.get(0) else {
+                continue;
+            };
+            // Go prefers capture group 1 when the pattern defines one;
+            // custom patterns without a capture group match the whole
+            // expression as the ID (#188).
             let raw = caps
                 .get(1)
                 .map(|g| g.as_str())
@@ -222,7 +175,7 @@ pub fn find_mentions(message: &str, patterns: &IdPatterns) -> Vec<IdMention> {
                 continue;
             }
             let bead_id = crate::history::normalize_bead_id(raw);
-            if !seen_ids.insert(bead_id.clone()) {
+            if !seen.insert(bead_id.clone()) {
                 continue;
             }
             out.push(IdMention {
@@ -231,24 +184,7 @@ pub fn find_mentions(message: &str, patterns: &IdPatterns) -> Vec<IdMention> {
             });
         }
     }
-
-    // Dedup by (id), keeping the strongest kind per id.
-    let mut seen: std::collections::HashMap<String, MatchKind> = std::collections::HashMap::new();
-    let mut deduped = Vec::new();
-    for m in out {
-        let better = seen
-            .get(&m.bead_id)
-            .map(|existing| kind_rank(m.kind) > kind_rank(*existing))
-            .unwrap_or(true);
-        if better {
-            seen.insert(m.bead_id.clone(), m.kind);
-        }
-    }
-    for (id, kind) in seen {
-        deduped.push(IdMention { bead_id: id, kind });
-    }
-    deduped.sort_by(|a, b| a.bead_id.cmp(&b.bead_id));
-    deduped
+    out
 }
 
 /// Go `classifyMatch`'s string, narrowed to [`MatchKind`].
@@ -261,18 +197,6 @@ fn match_kind(match_type: &str) -> MatchKind {
         "refs" => MatchKind::Refs,
         "bead" => MatchKind::Bead,
         _ => MatchKind::Generic,
-    }
-}
-
-/// Strength ordering used by the dedup above. `Generic` ranks lowest because a
-/// custom pattern only ever names an ID no built-in claimed.
-fn kind_rank(k: MatchKind) -> u8 {
-    match k {
-        MatchKind::Closes | MatchKind::Fixes | MatchKind::Resolves => 4,
-        MatchKind::Bracket => 3,
-        MatchKind::Bead => 2,
-        MatchKind::Refs => 1,
-        MatchKind::Generic => 0,
     }
 }
 

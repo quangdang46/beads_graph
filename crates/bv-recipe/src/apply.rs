@@ -233,7 +233,7 @@ fn matches_status(issue: &Issue, statuses: &[String]) -> bool {
 }
 
 /// Go `matchesPriority` — exact match; 0 is the highest priority.
-fn matches_priority(issue: &Issue, priorities: &[i32]) -> bool {
+fn matches_priority(issue: &Issue, priorities: &[i64]) -> bool {
     priorities.is_empty() || priorities.contains(&issue.priority)
 }
 

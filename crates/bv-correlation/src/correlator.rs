@@ -107,6 +107,23 @@ pub struct CorrelatedCommit {
 /// Correlate every commit against every issue. Returns commits grouped by
 /// bead ID, each entry carrying the combined confidence across whichever
 /// signals fired (explicit-ID mention and/or same-author temporal window).
+///
+/// SCOPE CUT (swarm audit): no production caller remains — the TUI history
+/// view, `--robot-history` and the file-index robot commands all build
+/// `history::HistoryReport` via `build_history_report`, which is the faithful
+/// port of Go `Correlator.GenerateReport`. Two known divergences live here
+/// and are deliberately retained only for the `CorrelatedCommit` type that
+/// `bv-analysis::file_impact` and `network` consume:
+///
+/// 1. The temporal window anchors on `Issue.created_at..closed_at`, while Go
+///    `extractTemporalCandidates` uses the bead's claimed→closed window
+///    derived from `BeadEvent`s (`temporal.go:423`). `Issue` carries no
+///    claimed timestamp — the window is a property of the event history, not
+///    the issue record — so this cannot be repaired without the events
+///    pipeline `correlate` does not take. The faithful implementation already
+///    exists: `history::temporal_windows_from_events`.
+/// 2. This function predates the `explicit::IdPatterns` rewrite; it now
+///    evaluates Go's `builtinPatterns` literally like everything else.
 pub fn correlate(
     issues: &[Issue],
     commits: &[CommitInfo],

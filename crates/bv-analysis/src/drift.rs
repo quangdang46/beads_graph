@@ -224,7 +224,7 @@ pub struct DriftConfig {
     /// Most urgent priority (P0=0 … P4=4) that still counts as "high impact"
     /// downstream. Go default 1, i.e. P0 or P1
     /// (pkg/drift/config.go:121).
-    pub high_impact_priority_max: i32,
+    pub high_impact_priority_max: i64,
     /// Graph-size cap for the whole-graph proactive checks. Go default 2000
     /// (pkg/drift/config.go:125); above it the checks are skipped and the
     /// reason is reported so silence is not mistaken for health.
@@ -601,7 +601,7 @@ fn check_blocking_cascade(
         let priority_sum: i64 = unblocked
             .iter()
             .filter_map(|id| by_id.get(id.as_str()))
-            .map(|i| i.priority as i64)
+            .map(|i| i.priority)
             .sum();
 
         result.push(Alert {
@@ -1248,7 +1248,7 @@ mod tests {
 
     // -- BlockingCascade tests ----------------------------------------------
 
-    fn casc_issue(id: &str, status: bv_core::model::Status, priority: i32) -> Issue {
+    fn casc_issue(id: &str, status: bv_core::model::Status, priority: i64) -> Issue {
         Issue {
             id: id.to_string(),
             content_hash: String::new(),

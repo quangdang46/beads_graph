@@ -409,7 +409,7 @@ fn format_labels(labels: &[String]) -> String {
 /// Go: `priorityString` — `"P0"`..`"P9"` in the single-digit branch, and plain
 /// decimal formatting above that (`"P10"`, `"P-1"`). Both branches produce the
 /// same string in Rust, so the split collapses.
-fn priority_string(p: i32) -> String {
+fn priority_string(p: i64) -> String {
     format!("P{p}")
 }
 

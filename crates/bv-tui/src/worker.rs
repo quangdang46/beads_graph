@@ -1,5 +1,18 @@
 //! Background snapshot worker — port of Go `pkg/ui/background_worker.go`
 //! constants and pipeline semantics, using std::thread + crossbeam-channel.
+//!
+//! STATUS: reference port, not wired into the app. Go's `BackgroundWorker`
+//! is the Bubble Tea model's phase-1/phase-2 snapshot pipeline (fsnotify
+//! watcher, heartbeats, recovery); the Rust TUI deliberately implements the
+//! same user-visible live reload synchronously — `App::check_for_reload`
+//! polls the watched `.beads/*.jsonl` mtime on the existing ~500 ms
+//! terminal-event tick and calls `reload_from_disk` (see `lib.rs`,
+//! "Live reload (Go fsnotify … TUI_UX_PARITY_PLAN.md Phase F)"). Nothing
+//! constructs `BackgroundWorker`; it is retained as the parity reference for
+//! the worker constants/messages and for future wiring if the poll proves
+//! insufficient. Its own mtime scan already handles the None→Some
+//! (file recreated) transition via `current_mtime.is_some() &&
+//! last_mtime != current_mtime`.
 
 use crossbeam_channel as channel;
 use std::path::PathBuf;

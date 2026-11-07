@@ -231,7 +231,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
-    fn make_issue(id: &str, status: Status, priority: i32) -> Issue {
+    fn make_issue(id: &str, status: Status, priority: i64) -> Issue {
         Issue {
             id: id.to_string(),
             content_hash: String::new(),

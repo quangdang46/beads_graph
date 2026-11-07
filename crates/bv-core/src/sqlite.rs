@@ -245,7 +245,7 @@ pub fn load_issues_sqlite(db_path: &Path) -> Result<Vec<Issue>, SqliteError> {
             acceptance_criteria: String::new(),
             notes: String::new(),
             status,
-            priority: priority as i32,
+            priority,
             issue_type,
             assignee: assignee.unwrap_or_default(),
             estimated_minutes: None, // not selected (Go parity)

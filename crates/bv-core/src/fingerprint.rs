@@ -166,26 +166,192 @@ impl FingerprintWriter {
 /// (Go's RFC3339Nano layout uses "Z07:00", printing "Z" for UTC), so an input
 /// like `...+00:00` is normalized to `...Z` — a raw pass-through would change
 /// the hash bytes.
+///
+/// Only strings Go's `time.Time` JSON decoder would have accepted reach this
+/// point on the JSONL path (the loader rejects the record otherwise — see
+/// `loader::process_line`), so parsing is the strict Go grammar, not jiff's
+/// more lenient ISO-8601 reader.
 fn normalize_time(raw: &str) -> String {
-    match raw.parse::<jiff::Timestamp>() {
-        Ok(ts) => {
-            // jiff prints the smallest-precision RFC3339 form; append the
-            // explicit UTC designator Go emits.
-            let s = ts.to_string();
-            if let Some(stripped) = s.strip_suffix("Z") {
-                format!("{stripped}Z")
-            } else if let Some(idx) = s.rfind(['+']) {
-                if s.len() - idx == 6 {
-                    format!("{}Z", &s[..idx])
-                } else {
-                    s
-                }
+    match parse_go_timestamp(raw) {
+        Some((secs, nanos)) => format_go_utc(secs, nanos),
+        // Unreachable for loader-validated issues; a programmatically built
+        // `Issue` can still carry an arbitrary string, and Go has no state for
+        // it — hash the stored bytes rather than invent a normalized value.
+        None => raw.to_string(),
+    }
+}
+
+/// Strict port of Go's `time.Time` RFC3339 decode, probed against Go 1.26:
+///
+/// - `YYYY-MM-DD` `T` `HH:MM:SS` — capital `T` only (lowercase `t` and a space
+///   separator are rejected), seconds required (`HH:MM` alone fails), year is
+///   exactly four digits (0000–9999).
+/// - Optional fraction: `.` or `,` followed by one or more digits, truncated
+///   (never rounded) to nanosecond precision — `.1234567895` → `.123456789`.
+/// - Zone: `Z` or `±HH:MM`; the offset hour must be ≤ 24 and the minute ≤ 60
+///   (`+24:60` parses, `+25:00` and `+05:61` do not).
+/// - Calendar fields are range-checked on the proleptic Gregorian calendar
+///   (`2026-02-30`, `T24:00:00`, `T00:00:60` all fail).
+///
+/// Returns `(unix_seconds, nanoseconds)` for the instant, or `None` when the
+/// input is not a Go-parseable timestamp.
+pub(crate) fn parse_go_timestamp(raw: &str) -> Option<(i64, u32)> {
+    let b = raw.as_bytes();
+    let len = b.len();
+    let mut i = 0usize;
+
+    fn digits(b: &[u8], i: &mut usize, n: usize) -> Option<u32> {
+        if *i + n > b.len() {
+            return None;
+        }
+        let mut v: u32 = 0;
+        for _ in 0..n {
+            let c = b[*i];
+            if !c.is_ascii_digit() {
+                return None;
+            }
+            v = v * 10 + u32::from(c - b'0');
+            *i += 1;
+        }
+        Some(v)
+    }
+    fn expect(b: &[u8], i: &mut usize, c: u8) -> Option<()> {
+        if b.get(*i) == Some(&c) {
+            *i += 1;
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    let year = digits(b, &mut i, 4)? as i64;
+    expect(b, &mut i, b'-')?;
+    let month = digits(b, &mut i, 2)?;
+    expect(b, &mut i, b'-')?;
+    let day = digits(b, &mut i, 2)?;
+    expect(b, &mut i, b'T')?;
+    let hour = digits(b, &mut i, 2)?;
+    expect(b, &mut i, b':')?;
+    let min = digits(b, &mut i, 2)?;
+    expect(b, &mut i, b':')?;
+    let sec = digits(b, &mut i, 2)?;
+
+    // Fraction: `.` or `,` plus ≥1 digit; keep the first nine digits and
+    // right-pad with zeros — Go truncates extra digits away.
+    let mut nanos = 0u32;
+    if matches!(b.get(i), Some(b'.') | Some(b',')) {
+        i += 1;
+        let start = i;
+        let mut kept = 0usize;
+        while i < len && b[i].is_ascii_digit() {
+            if kept < 9 {
+                nanos = nanos * 10 + u32::from(b[i] - b'0');
+                kept += 1;
+            }
+            i += 1;
+        }
+        if i == start {
+            return None; // decimal point with no digits ("...00.Z")
+        }
+        for _ in kept..9 {
+            nanos *= 10;
+        }
+    }
+
+    // Zone: `Z` or sign + two-digit hour + ':' + two-digit minute.
+    let offset_secs: i64 = match b.get(i) {
+        Some(b'Z') => {
+            i += 1;
+            0
+        }
+        Some(sign @ (b'+' | b'-')) => {
+            i += 1;
+            let oh = digits(b, &mut i, 2)?;
+            expect(b, &mut i, b':')?;
+            let om = digits(b, &mut i, 2)?;
+            // Go's zone-offset bounds, probed: hour ≤ 24, minute ≤ 60.
+            if oh > 24 || om > 60 {
+                return None;
+            }
+            let mag = i64::from(oh) * 3600 + i64::from(om) * 60;
+            if *sign == b'-' {
+                -mag
             } else {
-                format!("{s}Z")
+                mag
             }
         }
-        Err(_) => raw.to_string(),
+        _ => return None,
+    };
+    if i != len {
+        return None;
     }
+
+    // Calendar validation (proleptic Gregorian, same rules `time.Date` uses).
+    if !(1..=12).contains(&month) || hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let dim = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day == 0 || day > dim {
+        return None;
+    }
+
+    // days-from-civil (Howard Hinnant's algorithm; valid for year 0 and
+    // negative years, matching Go's proleptic Gregorian `time.Time`).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+
+    let local = days * 86400 + i64::from(hour) * 3600 + i64::from(min) * 60 + i64::from(sec);
+    Some((local - offset_secs, nanos))
+}
+
+/// `time.Time.UTC().Format(time.RFC3339Nano)` for a `(unix_seconds, nanos)`
+/// instant: civil date in UTC, `Z` suffix, fraction printed only when nonzero
+/// with trailing zeros stripped. Years outside 0000–9999 (reachable only via
+/// extreme offsets) print unpadded like Go (`-0001`, `10000`).
+fn format_go_utc(secs: i64, nanos: u32) -> String {
+    // civil-from-days (inverse of the algorithm above).
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    let rem = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (rem / 3600, rem % 3600 / 60, rem % 60);
+
+    let mut out = if year < 0 {
+        format!("-{:04}", -year)
+    } else {
+        format!("{year:04}")
+    };
+    out.push_str(&format!(
+        "-{:02}-{:02}T{:02}:{:02}:{:02}",
+        month, day, hh, mm, ss
+    ));
+    if nanos > 0 {
+        let frac = format!("{nanos:09}");
+        out.push('.');
+        out.push_str(frac.trim_end_matches('0'));
+    }
+    out.push('Z');
+    out
 }
 
 /// Public wrapper so `data_hash` normalizes dependency timestamps identically.
@@ -251,5 +417,72 @@ mod tests {
         let mut b = FingerprintWriter::new();
         b.write_string_ptr_hash(Some(""));
         assert_ne!(a.sum_hex(), b.sum_hex());
+    }
+
+    /// Every expectation below was probed against Go 1.26
+    /// `time.Time` JSON decoding + `UTC().Format(RFC3339Nano)`.
+    #[test]
+    fn go_timestamp_strict_grammar() {
+        let ok = |raw: &str, want: &str| {
+            assert_eq!(normalize_time(raw), want, "normalize_time({raw:?})");
+        };
+        let bad = |raw: &str| assert!(parse_go_timestamp(raw).is_none(), "{raw:?}");
+
+        // Accepted forms.
+        ok("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+        ok("2026-01-01T00:00:00.5Z", "2026-01-01T00:00:00.5Z");
+        ok("2026-01-01T00:00:00.500000000Z", "2026-01-01T00:00:00.5Z");
+        ok("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00Z");
+        ok("2026-01-01T00:00:00-05:30", "2026-01-01T05:30:00Z");
+        ok("0001-01-01T00:00:00Z", "0001-01-01T00:00:00Z");
+        ok("0000-01-01T00:00:00Z", "0000-01-01T00:00:00Z");
+        ok("9999-12-31T23:59:59Z", "9999-12-31T23:59:59Z");
+        // Go truncates (never rounds) fractions past nanoseconds.
+        ok(
+            "2026-01-01T00:00:00.123456789123Z",
+            "2026-01-01T00:00:00.123456789Z",
+        );
+        ok("2026-01-01T00:00:00.0000000009Z", "2026-01-01T00:00:00Z");
+        ok(
+            "2026-01-01T00:00:00.9999999999Z",
+            "2026-01-01T00:00:00.999999999Z",
+        );
+        // Comma fraction separator is legal Go RFC3339.
+        ok("2026-01-01T00:00:00,5Z", "2026-01-01T00:00:00.5Z");
+        ok(
+            "2026-01-01T00:00:00,123456789123Z",
+            "2026-01-01T00:00:00.123456789Z",
+        );
+        // Go's offset bounds: hour ≤ 24, minute ≤ 60.
+        ok("2026-01-01T00:00:00+24:00", "2025-12-31T00:00:00Z");
+        ok("2026-01-01T00:00:00+24:60", "2025-12-30T23:00:00Z");
+        ok("2026-01-01T00:00:00+05:60", "2025-12-31T18:00:00Z");
+        ok("2026-01-01T00:00:00-00:00", "2026-01-01T00:00:00Z");
+        // Extreme offsets can shift the printed year outside 0000–9999.
+        ok("0000-01-01T00:00:00+24:00", "-0001-12-31T00:00:00Z");
+        ok("9999-12-31T23:59:59-24:00", "10000-01-01T23:59:59Z");
+
+        // Rejected forms (Go `json.Unmarshal` into `time.Time` errors).
+        bad("2026-01-01t00:00:00z"); // lowercase t/z
+        bad("2026-01-01 00:00:00Z"); // space separator
+        bad("2026-01-01T00:00Z"); // seconds required
+        bad("2026-01-01T00:00:00"); // zone required
+        bad("2026-01-01T00:00:00+05"); // offset needs :MM
+        bad("2026-01-01T00:00:00+0530");
+        bad("2026-01-01T00:00:00+05:30:15"); // trailing junk
+        bad("2026-01-01T00:00:00+25:00"); // offset hour > 24
+        bad("2026-01-01T00:00:00+05:61"); // offset minute > 60
+        bad("2026-01-01T00:00:00.Z"); // fraction needs digits
+        bad("2026-01-01T00:00:00z"); // lowercase z
+        bad("2026-1-1T0:0:0Z"); // field widths
+        bad("10000-01-01T00:00:00Z"); // 5-digit year
+        bad(" 2026-01-01T00:00:00Z"); // leading space
+        bad("");
+        bad("not-a-time");
+        bad("2026-02-30T00:00:00Z"); // day out of range
+        bad("2026-01-01T24:00:00Z"); // hour out of range
+        bad("2026-01-01T00:00:60Z"); // second out of range
+                                     // jiff accepts these but Go does not — the strict port must not.
+        bad("2026-01-01T00:00Z");
     }
 }

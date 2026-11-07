@@ -133,7 +133,7 @@ struct RawIssue {
     #[serde(default, deserialize_with = "crate::model::de_null_default")]
     status: String,
     #[serde(default, deserialize_with = "crate::model::de_null_default")]
-    priority: i32,
+    priority: i64,
     #[serde(
         default,
         rename = "issue_type",
@@ -364,6 +364,19 @@ fn process_line(
         }
     };
 
+    // Go decodes every timestamp into `time.Time`/`*time.Time` during
+    // `json.Unmarshal` — a value strict RFC3339 cannot parse fails the whole
+    // record at decode time ("skipping malformed JSON"), long before
+    // `Issue.Validate` runs. serde keeps them as strings, so enforce the same
+    // grammar here: issue fields plus dependency and comment `created_at`.
+    if let Some(err) = first_bad_timestamp(&raw) {
+        stats.errors += 1;
+        warn(&format!(
+            "skipping malformed JSON on line {line_num}: {err}"
+        ));
+        return;
+    }
+
     let parent_id = raw.id.clone();
     let deps: Vec<Dependency> = raw
         .dependencies
@@ -381,6 +394,38 @@ fn process_line(
     };
     stats.valid += 1;
     issues.push(issue);
+}
+
+/// First timestamp field Go's `time.Time` decode would reject, rendered as a
+/// Go-style `parsing time ...` error for the malformed-JSON warning. Covers
+/// every `time.Time`/`*time.Time` field on the record: the six issue-level
+/// timestamps plus `created_at` on each dependency and comment.
+fn first_bad_timestamp(raw: &RawIssue) -> Option<String> {
+    let issue_fields = [
+        &raw.created_at,
+        &raw.updated_at,
+        &raw.due_date,
+        &raw.defer_until,
+        &raw.closed_at,
+        &raw.compacted_at,
+    ];
+    let dep_fields = raw.dependencies.iter().map(|d| &d.created_at);
+    let comment_fields = raw.comments.iter().map(|c| &c.created_at);
+    for v in issue_fields
+        .into_iter()
+        .chain(dep_fields)
+        .chain(comment_fields)
+        .flatten()
+    {
+        if crate::fingerprint::parse_go_timestamp(v).is_none() {
+            // Go's `time.ParseError` shape: `parsing time "X" as
+            // "2006-01-02T15:04:05Z07:00": cannot parse ...`.
+            return Some(format!(
+                "parsing time {v:?} as \"2006-01-02T15:04:05Z07:00\": cannot parse input"
+            ));
+        }
+    }
+    None
 }
 
 // Small helper trait shim to keep RawDependency conversion ergonomic.
@@ -442,7 +487,10 @@ impl RawIssue {
         // not typos. `DependencyType::is_blocking` is where a type earns the
         // right to gate readiness.
         if let (Some(c), Some(u)) = (&self.created_at, &self.updated_at) {
-            if let (Ok(c), Ok(u)) = (c.parse::<jiff::Timestamp>(), u.parse::<jiff::Timestamp>()) {
+            if let (Some(c), Some(u)) = (
+                crate::fingerprint::parse_go_timestamp(c),
+                crate::fingerprint::parse_go_timestamp(u),
+            ) {
                 if u < c {
                     return Err(ValidationError::InvertedTimestamps);
                 }

@@ -135,7 +135,7 @@ impl ComponentScores {
 
     /// Go `normalizePriority`: P0=1.0, P1=0.8, P2=0.6, P3=0.4, P4=0.2,
     /// anything else (including negative) = 0.5.
-    pub fn normalize_priority(prio: i32) -> f64 {
+    pub fn normalize_priority(prio: i64) -> f64 {
         match prio {
             0 => 1.0,
             1 => 0.8,
@@ -176,7 +176,7 @@ impl ComponentScores {
     /// Legacy constructor kept for existing callers (CLI text-mode path):
     /// status/priority/recency via the Go-exact normalizers above,
     /// pagerank/impact default to 0 (no graph context at the call site).
-    pub fn new(status_str: &str, prio: i32, days_since_update: f64) -> Self {
+    pub fn new(status_str: &str, prio: i64, days_since_update: f64) -> Self {
         ComponentScores {
             pagerank: 0.0,
             status: Self::normalize_status(status_str),

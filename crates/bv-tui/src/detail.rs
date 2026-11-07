@@ -26,7 +26,7 @@ fn type_icon_md(t: &str) -> &'static str {
     }
 }
 
-fn priority_icon(p: i32) -> &'static str {
+fn priority_icon(p: i64) -> &'static str {
     match p {
         0 => "🔴 P0",
         1 => "🟠 P1",

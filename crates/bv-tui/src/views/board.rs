@@ -87,7 +87,7 @@ pub fn column_labels(app: &App, mode: SwimlaneMode) -> Vec<String> {
             // P0–P4 always exist as columns (stable navigation); any
             // priority outside that range present in the data gets its own
             // column appended in sorted order instead of being dropped.
-            let mut priorities: std::collections::BTreeSet<i32> = (0..=4).collect();
+            let mut priorities: std::collections::BTreeSet<i64> = (0..=4i64).collect();
             priorities.extend(app.rows.iter().map(|r| r.priority));
             priorities.iter().map(|p| format!("P{p}")).collect()
         }
@@ -140,7 +140,7 @@ pub fn render_board(f: &mut Frame, app: &App, area: Rect, mode: SwimlaneMode, se
             .filter(|r| match mode {
                 SwimlaneMode::Status => column_status[i] == Some(r.status),
                 SwimlaneMode::Priority => {
-                    label.strip_prefix('P').and_then(|d| d.parse::<i32>().ok()) == Some(r.priority)
+                    label.strip_prefix('P').and_then(|d| d.parse::<i64>().ok()) == Some(r.priority)
                 }
                 SwimlaneMode::Type => label == "ALL" || r.issue_type == *label,
             })

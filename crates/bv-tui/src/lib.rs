@@ -102,7 +102,7 @@ pub struct ListRow {
     pub id: String,
     pub title: String,
     pub status: Status,
-    pub priority: i32,
+    pub priority: i64,
     pub issue_type: String,
     pub labels: Vec<String>,
     pub created_at: Option<String>,
@@ -434,7 +434,7 @@ pub struct App {
     /// same engine `--robot-priority` uses — Go `ComputeImpactScores` +
     /// `scoreToPriority`). `None` until first computed. Only entries where
     /// suggested != current are kept (that's the misalignment set).
-    pub priority_hints: Option<std::collections::BTreeMap<String, i32>>,
+    pub priority_hints: Option<std::collections::BTreeMap<String, i64>>,
     /// Live-reload watch target: the resolved `.beads/*.jsonl` path (Go
     /// watches this via `fsnotify`; bvr polls its mtime on the existing
     /// ~500ms terminal-event-poll tick instead of adding a background
@@ -2656,7 +2656,7 @@ impl App {
     /// issues are scored (Go parity — closed/tombstone are skipped inside
     /// `compute_impact_scores` itself); only entries where the suggestion
     /// differs from the current priority are kept, matching "misalignment."
-    fn compute_priority_hints(&self) -> std::collections::BTreeMap<String, i32> {
+    fn compute_priority_hints(&self) -> std::collections::BTreeMap<String, i64> {
         let issues: Vec<bv_core::model::Issue> = self.issue_map.values().cloned().collect();
         let g = bv_analysis::build_graph(&issues);
         let empty = BTreeMap::new();
@@ -4041,7 +4041,7 @@ pub(crate) fn type_icon(issue_type: &str) -> (&'static str, Color) {
     }
 }
 
-pub(crate) fn prio_badge_style(priority: i32) -> (Color, Color) {
+pub(crate) fn prio_badge_style(priority: i64) -> (Color, Color) {
     match priority {
         0 => (Color::White, Color::Red),
         1 => (Color::White, Color::LightRed),
@@ -5999,7 +5999,7 @@ mod tests {
                 } else {
                     Status::Open
                 },
-                priority: (i % 4) as i32,
+                priority: (i % 4) as i64,
                 issue_type: "task".into(),
                 assignee: String::new(),
                 estimated_minutes: None,

@@ -465,7 +465,7 @@ pub fn status_icon_color(status: &Status) -> (&'static str, Color) {
 }
 
 /// Priority badge string.
-pub fn prio_badge(priority: i32) -> &'static str {
+pub fn prio_badge(priority: i64) -> &'static str {
     match priority {
         0 => "P0",
         1 => "P1",

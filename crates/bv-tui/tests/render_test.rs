@@ -16,7 +16,7 @@ fn make_app(n: usize) -> App {
             } else {
                 bv_core::model::Status::Open
             },
-            priority: (i % 4) as i32,
+            priority: (i % 4) as i64,
             issue_type: "task".into(),
             assignee: String::new(),
             estimated_minutes: None,

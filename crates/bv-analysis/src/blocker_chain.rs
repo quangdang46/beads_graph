@@ -85,7 +85,7 @@ pub struct BlockerChainEntry {
     pub id: String,
     pub title: String,
     pub status: Status,
-    pub priority: i32,
+    pub priority: i64,
     pub depth: i64,
     pub is_root: bool,
     pub actionable: bool,

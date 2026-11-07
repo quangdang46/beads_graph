@@ -39,7 +39,7 @@ pub struct FilterConfig {
     pub status: Vec<String>,
     /// Keep issues whose priority is one of these (0 = highest).
     #[serde(default, rename = "priority")]
-    pub priority: Vec<i32>,
+    pub priority: Vec<i64>,
     /// Keep issues carrying ALL of these labels (case-insensitive).
     #[serde(default, rename = "tags")]
     pub tags: Vec<String>,

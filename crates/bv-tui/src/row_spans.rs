@@ -25,7 +25,7 @@ pub struct RowCtx<'a> {
     /// Workspace-mode repo filter active (shows the `[API]` badge).
     pub workspace_repos: bool,
     /// Priority hints toggled on, if any.
-    pub priority_hints: Option<&'a std::collections::BTreeMap<String, i32>>,
+    pub priority_hints: Option<&'a std::collections::BTreeMap<String, i64>>,
     /// Per-issue triage badge, if any (quick win / unblocks counts).
     pub triage: Option<&'a bv_analysis::triage::RowTriage>,
     /// Fuzzy (`/`) or semantic (Ctrl+S) search active (shows the `#n` badge).

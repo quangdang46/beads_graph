@@ -64,7 +64,7 @@ pub fn stamp(t: jiff::Timestamp) -> String {
 /// struct-update chain.
 pub trait IssueExt {
     fn title(self, title: &str) -> Issue;
-    fn priority(self, priority: i32) -> Issue;
+    fn priority(self, priority: i64) -> Issue;
     fn status(self, status: Status) -> Issue;
     fn labels(self, labels: &[&str]) -> Issue;
     fn created_at(self, at: jiff::Timestamp) -> Issue;
@@ -78,7 +78,7 @@ impl IssueExt for Issue {
         self.title = title.into();
         self
     }
-    fn priority(mut self, priority: i32) -> Issue {
+    fn priority(mut self, priority: i64) -> Issue {
         self.priority = priority;
         self
     }

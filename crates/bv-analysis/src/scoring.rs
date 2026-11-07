@@ -211,7 +211,7 @@ pub fn compute_impact_with_weights(
 }
 
 /// Go: `scoreToPriority` — impact score (0-1) -> P0..P4.
-pub fn score_to_priority(score: f64) -> i32 {
+pub fn score_to_priority(score: f64) -> i64 {
     if score >= 0.7 {
         0
     } else if score >= 0.5 {
@@ -226,7 +226,7 @@ pub fn score_to_priority(score: f64) -> i32 {
 }
 
 /// Go: `priorityToScore`.
-pub fn priority_to_score(priority: i32) -> f64 {
+pub fn priority_to_score(priority: i64) -> f64 {
     match priority {
         0 => 0.8,
         1 => 0.6,
@@ -251,7 +251,7 @@ pub const TRIAGE_UNBLOCK_THRESHOLD: usize = 5;
 /// copy had drifted from it in two places (an extra `.min(1.0)` cap on the
 /// unblock term Go does not apply, and a three-tier priority bonus); it is
 /// aligned here so the two can never disagree if a caller is added.
-pub fn quickwin_score(unblocks: usize, blocker_ratio_norm: f64, priority: i32) -> f64 {
+pub fn quickwin_score(unblocks: usize, blocker_ratio_norm: f64, priority: i64) -> f64 {
     // `go_log2`, not `f64::log2` — same bit-exact log Go's math.Log2 emits,
     // matching `compute_row_triage`.
     let unblock_impact = crate::go_math::go_log2(unblocks as f64 + 1.0);

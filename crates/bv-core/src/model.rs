@@ -393,7 +393,7 @@ pub struct Issue {
     pub notes: String,
     pub status: Status,
     #[serde(default)]
-    pub priority: i32,
+    pub priority: i64,
     #[serde(default, rename = "issue_type")]
     pub issue_type: String,
     /// `bd` spells this `owner` on the wire (`types.Issue.Owner`); the frozen
@@ -467,7 +467,10 @@ impl Issue {
         }
         // updated_at < created_at rejection (loader feeds these to load_stats)
         if let (Some(c), Some(u)) = (&self.created_at, &self.updated_at) {
-            if let (Ok(c), Ok(u)) = (c.parse::<jiff::Timestamp>(), u.parse::<jiff::Timestamp>()) {
+            if let (Some(c), Some(u)) = (
+                crate::fingerprint::parse_go_timestamp(c),
+                crate::fingerprint::parse_go_timestamp(u),
+            ) {
                 if u < c {
                     return Err(ValidationError::InvertedTimestamps);
                 }
