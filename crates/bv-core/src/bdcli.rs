@@ -183,10 +183,7 @@ fn bd_command(exe: &Path) -> std::process::Command {
                 .arg(exe);
             c
         }
-        _ => {
-            let mut c = std::process::Command::new(exe);
-            c
-        }
+        _ => std::process::Command::new(exe),
     }
 }
 
