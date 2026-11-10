@@ -14746,23 +14746,69 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
             .collect();
     }
 
-    if fmt != "json" {
-        let content = if fmt == "dot" {
-            bv_export::graph_export::generate_dot(&issues, None)
-        } else {
-            bv_export::graph_export::generate_mermaid_graph(&issues)
-        };
+    // Go's ExportGraph returns early on an empty filtered set
+    // (pkg/export/graph_export.go:80-91): nodes/edges are 0, the explanation
+    // is the empty-graph text, `graph`/`adjacency` stay empty (omitempty),
+    // and `filters_applied` is only populated later by the label scope the
+    // robot registry adds (cmd/bv/robot_registry.go:1077-1082) — root and
+    // depth are never reported on this path.
+    if issues.is_empty() {
         let mut payload = full_envelope_for(&hash, &scope_issues);
         payload["format"] = serde_json::json!(fmt);
-        payload["graph"] = serde_json::json!(content);
-        payload["nodes"] = serde_json::json!(issues.len());
+        payload["nodes"] = serde_json::json!(0);
+        payload["edges"] = serde_json::json!(0);
+        let (label_scope, _, _) = active_scope_flags();
+        if !label_scope.is_empty() {
+            payload["filters_applied"] = serde_json::json!({"label": label_scope});
+        }
+        payload["explanation"] = serde_json::json!({
+            "what": "Empty graph - no issues match the filter criteria",
+            "when_to_use": "Adjust filter parameters to include more issues",
+        });
         emit_json(&payload);
         return ExitCode::from(0);
     }
 
-    // Go generateAdjacency: nodes sorted by ID with labels+pagerank; edges
-    // follow sorted issues with deps sorted by DependsOnID; type normalized
-    // ("blocks" when empty). Counts at top level (Go GraphExportResult).
+    // Go counts edges over the filtered set before the format switch
+    // (pkg/export/graph_export.go:95-103) and reports the count for every
+    // format, not just json.
+    let edge_count = {
+        let issue_ids: std::collections::HashSet<&str> =
+            issues.iter().map(|i| i.id.as_str()).collect();
+        issues
+            .iter()
+            .flat_map(|i| i.dependencies.iter())
+            .filter(|dep| issue_ids.contains(dep.effective_depends_on()))
+            .count()
+    };
+
+    // Go's `filters_applied` (pkg/export/graph_export.go:107-117, plus the
+    // label scope the robot registry adds at cmd/bv/robot_registry.go:1077-
+    // 1082): a `map[string]string`, so the keys are sorted, and the field is
+    // omitted entirely when nothing was filtered. The port never emitted the
+    // field, so an agent could not tell a scoped graph from a whole one.
+    // `depth` is only recorded when positive (Go `config.Depth > 0`), so a
+    // negative depth — accepted silently, treated as unlimited — leaves no
+    // trace, matching the oracle.
+    let mut filters_applied: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    if graph_depth > 0 {
+        filters_applied.insert("depth".into(), serde_json::json!(graph_depth.to_string()));
+    }
+    let (label_scope, _, _) = active_scope_flags();
+    if !label_scope.is_empty() {
+        filters_applied.insert("label".into(), serde_json::json!(label_scope));
+    }
+    if !graph_root.is_empty() {
+        filters_applied.insert("root".into(), serde_json::json!(graph_root));
+    }
+    let mut sorted_filters: Vec<(String, serde_json::Value)> =
+        filters_applied.into_iter().collect();
+    sorted_filters.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Go's analyzer computes PageRank over the FULL issue set
+    // (`analyzer.Analyze()` runs before filtering, cmd/bv/robot_registry.go:
+    // 1047) and generateDOT sizes node penwidth from it
+    // (pkg/export/graph_export.go:277-283): `1.0 + pr*3.0` when pr > 0.
     let pagerank = bv_graph_core::pagerank_default(&g);
     let pr_by_id: std::collections::BTreeMap<String, f64> = pagerank
         .iter()
@@ -14770,6 +14816,46 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
         .map(|(i, v)| (g.node_id(i).unwrap_or_default().to_string(), *v))
         .collect();
 
+    if fmt != "json" {
+        let content = if fmt == "dot" {
+            bv_export::graph_export::generate_dot(&issues, Some(&pr_by_id))
+        } else {
+            bv_export::graph_export::generate_mermaid_graph(&issues)
+        };
+        let mut payload = full_envelope_for(&hash, &scope_issues);
+        payload["format"] = serde_json::json!(fmt);
+        payload["graph"] = serde_json::json!(content);
+        payload["nodes"] = serde_json::json!(issues.len());
+        payload["edges"] = serde_json::json!(edge_count);
+        if !sorted_filters.is_empty() {
+            let mut ordered = serde_json::Map::new();
+            for (k, v) in sorted_filters {
+                ordered.insert(k, v);
+            }
+            payload["filters_applied"] = serde_json::Value::Object(ordered);
+        }
+        // Go's per-format GraphExplanation (pkg/export/graph_export.go:128-
+        // 144); the json variant carries no `how_to_render`.
+        payload["explanation"] = if fmt == "dot" {
+            serde_json::json!({
+                "what": "Dependency graph in Graphviz DOT format",
+                "how_to_render": "Save to file.dot, run: dot -Tpng file.dot -o graph.png",
+                "when_to_use": "When you need a visual overview of dependencies for documentation or debugging",
+            })
+        } else {
+            serde_json::json!({
+                "what": "Dependency graph in Mermaid diagram format",
+                "how_to_render": "Paste into any Markdown renderer that supports Mermaid, or use mermaid.live",
+                "when_to_use": "When you need an embeddable diagram for documentation or GitHub issues",
+            })
+        };
+        emit_json(&payload);
+        return ExitCode::from(0);
+    }
+
+    // Go generateAdjacency: nodes sorted by ID with labels+pagerank; edges
+    // follow sorted issues with deps sorted by DependsOnID; type normalized
+    // ("blocks" when empty). Counts at top level (Go GraphExportResult).
     let mut sorted_issues: Vec<&bv_core::model::Issue> = issues.iter().collect();
     sorted_issues.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -14811,13 +14897,6 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
             }));
         }
     }
-    let edge_count = issues
-        .iter()
-        .filter(|i| issue_ids.contains(i.id.as_str()))
-        .flat_map(|i| i.dependencies.iter())
-        .filter(|dep| issue_ids.contains(dep.effective_depends_on()))
-        .count();
-
     // Go emits the v0.25.0 envelope first, then format/nodes/edges/
     // explanation/adjacency. This branch hand-rolled its payload and put
     // data_hash last, so it missed the envelope entirely.
@@ -14825,27 +14904,9 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
     payload["format"] = serde_json::json!("json");
     payload["nodes"] = serde_json::json!(sorted_issues.len());
     payload["edges"] = serde_json::json!(edge_count);
-    // Go's `filters_applied` (pkg/export/graph_export.go:107-113, plus the
-    // label scope the robot registry adds at cmd/bv/robot_registry.go:1078-
-    // 1082): a `map[string]string`, so the keys are sorted, and the field is
-    // omitted entirely when nothing was filtered. The port never emitted the
-    // field, so an agent could not tell a scoped graph from a whole one.
-    let mut filters_applied: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    if graph_depth > 0 {
-        filters_applied.insert("depth".into(), serde_json::json!(graph_depth.to_string()));
-    }
-    let (label_scope, _, _) = active_scope_flags();
-    if !label_scope.is_empty() {
-        filters_applied.insert("label".into(), serde_json::json!(label_scope));
-    }
-    if !graph_root.is_empty() {
-        filters_applied.insert("root".into(), serde_json::json!(graph_root));
-    }
-    if !filters_applied.is_empty() {
-        let mut sorted: Vec<(String, serde_json::Value)> = filters_applied.into_iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    if !sorted_filters.is_empty() {
         let mut ordered = serde_json::Map::new();
-        for (k, v) in sorted {
+        for (k, v) in sorted_filters {
             ordered.insert(k, v);
         }
         payload["filters_applied"] = serde_json::Value::Object(ordered);
