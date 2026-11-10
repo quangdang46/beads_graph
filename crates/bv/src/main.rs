@@ -1957,7 +1957,10 @@ fn main() -> ExitCode {
         // already turned it into the `robot-docs guide` intent.
         if presence.changed("format") {
             let payload = bv_robot::docs::generate_robot_docs("guide", GO_APP_VERSION, &jiff_now());
-            return emit_json(&sort_json_maps_like_go(&payload));
+            // `generate_robot_docs` already emits Go's sorted map order —
+            // the deep `sort_json_maps_like_go` re-sort was removed with the
+            // docs.rs rewrite (perf bead iv8v).
+            return emit_json(&payload);
         }
         print_robot_help();
         return ExitCode::from(0);
@@ -17549,52 +17552,6 @@ fn emit_sorted_object(value: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
-/// Go's `map[string]interface{}` literals sort at EVERY level, not just the
-/// top one — `generateRobotDocs` (main.go:8143) builds the topic, the guide,
-/// `guide.output_modes`, each example, the env-var table and the exit-code
-/// table as maps, so `encoding/json` reorders each of them.
-///
-/// The one exception is `commands`: Go types it `map[string]robotCommandDoc`
-/// (main.go:7612), so the command NAMES sort but each doc is a struct and
-/// keeps its declaration order (`flag`, `description`, `key_fields`, `params`,
-/// then the five booleans). Sorting those values would be a byte diff on every
-/// command, so they are passed through untouched.
-fn sort_json_maps_like_go(value: &serde_json::Value) -> serde_json::Value {
-    sort_json_maps_like_go_inner(value, false)
-}
-
-fn sort_json_maps_like_go_inner(
-    value: &serde_json::Value,
-    skip_children: bool,
-) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let mut out = serde_json::Map::new();
-            for key in keys {
-                out.insert(
-                    key.clone(),
-                    if skip_children {
-                        map[key].clone()
-                    } else {
-                        sort_json_maps_like_go_inner(&map[key], key == "commands")
-                    },
-                );
-            }
-            serde_json::Value::Object(out)
-        }
-        serde_json::Value::Array(items) if !skip_children => {
-            serde_json::Value::Array(items.iter().map(sort_json_maps_like_go_inner_fn).collect())
-        }
-        other => other.clone(),
-    }
-}
-
-fn sort_json_maps_like_go_inner_fn(item: &serde_json::Value) -> serde_json::Value {
-    sort_json_maps_like_go_inner(item, false)
-}
-
 /// Go `robot-sprint-list` — loads `.beads/sprints.jsonl` and emits all sprints.
 fn run_robot_sprint_list() -> ExitCode {
     let cwd = go_working_dir();
@@ -20276,7 +20233,9 @@ fn run_robot_docs(args: &[String]) -> ExitCode {
     // — not stderr — and exits 2, so an agent that mistyped a topic sees the
     // available list and the status code together.
     let unknown = payload.get("error").is_some();
-    emit_json(&sort_json_maps_like_go(&payload));
+    // Same as the robot-help arm above: the payload is already in Go's
+    // sorted-key order, so it emits directly.
+    emit_json(&payload);
     if unknown {
         return ExitCode::from(2);
     }

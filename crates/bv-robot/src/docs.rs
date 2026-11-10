@@ -170,25 +170,10 @@ pub fn commands_doc() -> Value {
     Value::Object(map)
 }
 
+/// `guide_doc` keys are inserted in Go's `encoding/json` map order (sorted)
+/// so callers can emit the payload directly — no deep re-sort pass.
 fn guide_doc() -> Value {
     json!({
-        "description": "bvr (Beads Viewer) provides structural analysis of the beads issue tracker DAG. It is the primary interface for AI agents to understand project state, plan work, and discover high-impact tasks.",
-        "quickstart": [
-            "bvr robot-triage --json           # Full triage with recommendations",
-            "bvr robot-next --json             # Single top pick plus claim/show commands",
-            "bvr robot-plan --json             # Dependency-respecting execution plan",
-            "bvr robot-insights --json         # Deep graph analysis (PageRank, betweenness, etc.)",
-            "bvr robot-triage-by-track --json  # Parallel work streams for multi-agent coordination",
-            "bvr robot-capabilities --json     # Machine-readable command manifest",
-            "bvr robot-schema --json           # JSON Schema definitions for all commands",
-            "bvr triage --json                 # Short alias for robot-triage",
-            "bvr capabilities --json           # Short alias for robot-capabilities",
-        ],
-        "data_source": ".beads/beads.jsonl, .beads/issues.jsonl, or BEADS_DB plus git history (correlations)",
-        "output_modes": {
-            "json": "Default structured output",
-            "toon": "Tabular notation; measured smaller than JSON only for wide payloads such as --robot-graph (~7%), and 9-15% larger for nested ones (--robot-triage, --robot-plan, --robot-insights, --robot-label-health). See tests/artifacts/perf/toon_vs_json.md and check --stats before adopting it.",
-        },
         "agent_intent_aliases": [
             {"agent_instinct": "bvr --json", "canonical": "bvr --robot-triage --format json"},
             {"agent_instinct": "bvr robot-triage --json", "canonical": "bvr --robot-triage --format json"},
@@ -209,21 +194,40 @@ fn guide_doc() -> Value {
             {"agent_instinct": "bvr robot-related bv-123 --json", "canonical": "bvr --robot-related bv-123 --format json"},
             {"agent_instinct": "bvr --name backend --json", "canonical": "bvr --label backend --robot-triage --format json"},
         ],
+        "data_source": ".beads/beads.jsonl, .beads/issues.jsonl, or BEADS_DB plus git history (correlations)",
+        "description": "bvr (Beads Viewer) provides structural analysis of the beads issue tracker DAG. It is the primary interface for AI agents to understand project state, plan work, and discover high-impact tasks.",
+        "output_modes": {
+            "json": "Default structured output",
+            "toon": "Tabular notation; measured smaller than JSON only for wide payloads such as --robot-graph (~7%), and 9-15% larger for nested ones (--robot-triage, --robot-plan, --robot-insights, --robot-label-health). See tests/artifacts/perf/toon_vs_json.md and check --stats before adopting it.",
+        },
+        "quickstart": [
+            "bvr robot-triage --json           # Full triage with recommendations",
+            "bvr robot-next --json             # Single top pick plus claim/show commands",
+            "bvr robot-plan --json             # Dependency-respecting execution plan",
+            "bvr robot-insights --json         # Deep graph analysis (PageRank, betweenness, etc.)",
+            "bvr robot-triage-by-track --json  # Parallel work streams for multi-agent coordination",
+            "bvr robot-capabilities --json     # Machine-readable command manifest",
+            "bvr robot-schema --json           # JSON Schema definitions for all commands",
+            "bvr triage --json                 # Short alias for robot-triage",
+            "bvr capabilities --json           # Short alias for robot-capabilities",
+        ],
     })
 }
 
+/// `examples_doc` items keep Go's sorted map keys: `command` before
+/// `description`.
 fn examples_doc() -> Value {
     json!([
-        {"description": "Get top 3 picks for immediate work", "command": "bvr robot-triage --json | jq '.triage.quick_ref.top_picks[:3]'"},
-        {"description": "Inspect the claim command for the top recommendation", "command": "bvr robot-next --json | jq -r '.claim_command'"},
-        {"description": "Find high-impact blockers to clear", "command": "bvr robot-triage --json | jq '.triage.blockers_to_clear | map(.id)'"},
-        {"description": "Get bug-only recommendations", "command": "bvr robot-triage --json | jq '.triage.recommendations[] | select(.type == \"bug\")'"},
-        {"description": "Multi-agent: top pick per parallel track", "command": "bvr robot-triage-by-track --json | jq '.triage.recommendations_by_track[].top_pick'"},
-        {"description": "Find beads related to a specific file", "command": "bvr robot-file-beads README.md --json"},
-        {"description": "Search for issues by keyword", "command": "bvr robot-search \"authentication\" --json"},
-        {"description": "Get TOON output for a wide payload (measured ~7% smaller than JSON)", "command": "bvr robot-graph --toon"},
-        {"description": "Use env for default format", "command": "BV_OUTPUT_FORMAT=toon bvr robot-triage"},
-        {"description": "Compare JSON and TOON size for this payload (TOON can be larger)", "command": "TOON_STATS=1 bvr robot-triage --toon"},
+        {"command": "bvr robot-triage --json | jq '.triage.quick_ref.top_picks[:3]'", "description": "Get top 3 picks for immediate work"},
+        {"command": "bvr robot-next --json | jq -r '.claim_command'", "description": "Inspect the claim command for the top recommendation"},
+        {"command": "bvr robot-triage --json | jq '.triage.blockers_to_clear | map(.id)'", "description": "Find high-impact blockers to clear"},
+        {"command": "bvr robot-triage --json | jq '.triage.recommendations[] | select(.type == \"bug\")'", "description": "Get bug-only recommendations"},
+        {"command": "bvr robot-triage-by-track --json | jq '.triage.recommendations_by_track[].top_pick'", "description": "Multi-agent: top pick per parallel track"},
+        {"command": "bvr robot-file-beads README.md --json", "description": "Find beads related to a specific file"},
+        {"command": "bvr robot-search \"authentication\" --json", "description": "Search for issues by keyword"},
+        {"command": "bvr robot-graph --toon", "description": "Get TOON output for a wide payload (measured ~7% smaller than JSON)"},
+        {"command": "BV_OUTPUT_FORMAT=toon bvr robot-triage", "description": "Use env for default format"},
+        {"command": "TOON_STATS=1 bvr robot-triage --toon", "description": "Compare JSON and TOON size for this payload (TOON can be larger)"},
     ])
 }
 
@@ -232,14 +236,14 @@ fn env_vars_doc() -> Value {
         "BEADS_DB": "Path to beads database file or .beads directory (overrides BEADS_DIR; overridden by --db flag)",
         "BEADS_DIR": "Path to .beads directory (fallback when BEADS_DB and --db are not set)",
         "BV_OUTPUT_FORMAT": "Default output format: json or toon (overridden by --format)",
-        "TOON_DEFAULT_FORMAT": "Fallback format if BV_OUTPUT_FORMAT not set",
-        "TOON_STATS": "Set to 1 to show JSON vs TOON token estimates on stderr",
-        "TOON_KEY_FOLDING": "TOON key folding mode",
-        "TOON_INDENT": "TOON indentation level (0-16)",
         "BV_PRETTY_JSON": "Set to 1 for indented JSON output",
         "BV_ROBOT": "Set to 1 to force robot mode (clean stdout)",
         "BV_SEARCH_MODE": "Search mode: text or hybrid",
         "BV_SEARCH_PRESET": "Hybrid search preset name",
+        "TOON_DEFAULT_FORMAT": "Fallback format if BV_OUTPUT_FORMAT not set",
+        "TOON_INDENT": "TOON indentation level (0-16)",
+        "TOON_KEY_FOLDING": "TOON key folding mode",
+        "TOON_STATS": "Set to 1 to show JSON vs TOON token estimates on stderr",
     })
 }
 
@@ -343,7 +347,27 @@ pub fn generate_robot_docs(topic: &str, app_version: &str, now: &str) -> Value {
             }
         }
     }
-    result
+    sort_top_level_keys(result)
+}
+
+/// Go's `encoding/json` sorts every `map[string]…` key. The doc builders
+/// above already emit nested maps in sorted order; only the handful of
+/// top-level keys (`generated_at`, `topic`, the section name, the error
+/// fields) still need ordering, so sort just this level — deep-cloning the
+/// whole payload a second time was pure waste.
+fn sort_top_level_keys(value: Value) -> Value {
+    let Value::Object(map) = value else {
+        return value;
+    };
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    keys.sort();
+    let mut out = serde_json::Map::new();
+    for key in keys {
+        if let Some(v) = map.get(&key) {
+            out.insert(key, v.clone());
+        }
+    }
+    Value::Object(out)
 }
 
 #[cfg(test)]

@@ -46,8 +46,10 @@ impl FingerprintWriter {
     /// Go `flush()` — drain the pending buffer into the hash.
     fn flush(&mut self) {
         if self.used > 0 {
-            let chunk: Vec<u8> = self.buffer[..self.used].to_vec();
-            self.hash.update(&chunk);
+            // Hash the stack buffer in place — the old `to_vec()` allocated a
+            // fresh 256-byte Vec on every flush, and flush runs once per
+            // 256 bytes hashed.
+            self.hash.update(&self.buffer[..self.used]);
             self.used = 0;
         }
     }

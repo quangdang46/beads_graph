@@ -340,30 +340,58 @@ fn short_query_lexical_boost_naive(query: &str, doc: &str) -> f64 {
 
 /// Issue document text for indexing (Go `IssueDocument`): ID ×3, title ×2,
 /// labels ×1, description ×1, newline-joined, empty parts skipped.
+///
+/// Built into a single `String` — the old version allocated a `Vec<String>`
+/// of parts plus one `String` per repeated field, ~8 allocations per issue
+/// on every `--robot-search` index sync.
 pub fn issue_document(id: &str, title: &str, labels: &[String], description: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
     let id = id.trim();
-    if !id.is_empty() {
-        parts.extend([id.to_string(), id.to_string(), id.to_string()]);
-    }
     let title = title.trim();
-    if !title.is_empty() {
-        parts.extend([title.to_string(), title.to_string()]);
-    }
-    let labels_joined = labels
-        .iter()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if !labels_joined.is_empty() {
-        parts.push(labels_joined);
-    }
     let desc = description.trim();
-    if !desc.is_empty() {
-        parts.push(desc.to_string());
+    let labels_joined = {
+        let mut joined = String::new();
+        for label in labels {
+            let label = label.trim();
+            if label.is_empty() {
+                continue;
+            }
+            if !joined.is_empty() {
+                joined.push(' ');
+            }
+            joined.push_str(label);
+        }
+        joined
+    };
+
+    let mut out = String::with_capacity(
+        id.len() * 3 + title.len() * 2 + labels_joined.len() + desc.len() + 8,
+    );
+    let mut needs_sep = false;
+    let push = |out: &mut String, text: &str, needs_sep: &mut bool| {
+        if !*needs_sep {
+            *needs_sep = true;
+        } else {
+            out.push('\n');
+        }
+        out.push_str(text);
+    };
+    if !id.is_empty() {
+        for _ in 0..3 {
+            push(&mut out, id, &mut needs_sep);
+        }
     }
-    parts.join("\n")
+    if !title.is_empty() {
+        for _ in 0..2 {
+            push(&mut out, title, &mut needs_sep);
+        }
+    }
+    if !labels_joined.is_empty() {
+        push(&mut out, &labels_joined, &mut needs_sep);
+    }
+    if !desc.is_empty() {
+        push(&mut out, desc, &mut needs_sep);
+    }
+    out
 }
 
 #[cfg(test)]
