@@ -153,6 +153,25 @@ impl Presence {
         self.values.contains_key(flag)
     }
 
+    /// Whether `flag` should claim a COMMAND slot — the predicate the
+    /// `main` dispatch arms and the exclusive-primary group count use.
+    ///
+    /// For value-taking STRING flags this is pflag's `Changed`, not
+    /// [`Presence::has`]'s non-empty test: `--robot-impact-network ""` and
+    /// `--robot-impact-network=` both name the command, and an empty value
+    /// must reach the handler (which reads `flag_value` and gets `""`)
+    /// rather than falling through to the TUI or being silently dropped
+    /// when a second primary is present. Every other kind keeps the
+    /// [`Presence::has`] rule, so `--robot-triage=false` still does not
+    /// claim the triage group.
+    pub fn command_active(&self, flag: &str) -> bool {
+        if crate::flags::flag_is_string(flag) {
+            self.changed(flag)
+        } else {
+            self.has(flag)
+        }
+    }
+
     /// The raw value of the last `Set` for `flag`, or `None` when absent.
     /// For rules that read the DEREFERENCED flag value rather than
     /// `isFlagActive` — Go's `--watch-export`/`--as-of` guard
@@ -251,9 +270,14 @@ pub fn validate_modifier_requires_with(
 pub fn validate_exclusive_primaries(present: &Presence) -> Vec<ValidationError> {
     let mut active_groups: Vec<String> = Vec::new();
     for group in crate::flags::PRIMARY_GROUPS {
+        // `command_active`, not `has`: a string-valued primary given an
+        // empty value (`--robot-impact-network ""`) still names its command,
+        // so pairing it with a second primary is the same exclusive-primary
+        // violation Go reports for two named commands — silently letting the
+        // empty-valued flag drop out would hide the conflict.
         let active: Vec<String> = group
             .iter()
-            .filter(|name| present.has(name))
+            .filter(|name| present.command_active(name))
             .map(|name| format!("--{name}"))
             .collect();
         if active.is_empty() {
@@ -495,9 +519,17 @@ mod tests {
             "HEAD~1"
         ])
         .is_empty());
-        // Value-carrying primaries follow the same string rule:
-        // `--robot-related ""` is inactive and claims no primary group.
-        assert!(check(&["bvr", "--robot-related", "", "--robot-triage"]).is_empty());
+        // Value-carrying primaries follow the same string rule for the
+        // REQUIREMENT side (`has`), but the exclusive-primary group count
+        // uses `command_active`: `--robot-related ""` still names its
+        // command, so pairing it with `--robot-triage` is the same
+        // two-primary violation as two non-empty values — silently
+        // dropping the empty-valued flag was the bug.
+        assert_eq!(
+            check(&["bvr", "--robot-related", "", "--robot-triage"]).len(),
+            1
+        );
+        assert!(check(&["bvr", "--robot-related", "",]).is_empty());
         assert!(check(&["bvr", "--robot-related", "bv-123", "--robot-triage"]).len() == 1);
     }
 

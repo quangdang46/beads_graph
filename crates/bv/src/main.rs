@@ -2134,7 +2134,10 @@ fn main() -> ExitCode {
     if presence.has("robot-metrics") {
         return run_robot_metrics();
     }
-    if presence.has("robot-docs") {
+    // `command_active`, not `has`: robot-docs is a STRING-valued primary, so
+    // `--robot-docs ""` / `--robot-docs=` still name the command and must
+    // reach the handler rather than fall through to the TUI.
+    if presence.command_active("robot-docs") {
         return run_robot_docs(&args);
     }
 
@@ -2478,7 +2481,10 @@ fn main() -> ExitCode {
     }
 
     // Correlation-family dispatch (Phase 3e).
-    if presence.has("robot-history") || presence.has("bead-history") {
+    // bead-history is string-valued: `--bead-history ""` still dispatches
+    // (command_active = Changed for string flags), matching the other
+    // string-valued primaries below.
+    if presence.has("robot-history") || presence.command_active("bead-history") {
         return run_robot_history();
     }
     if presence.has("robot-orphans") {
@@ -2539,28 +2545,33 @@ fn main() -> ExitCode {
     if presence.has("robot-label-attention") {
         return run_robot_label_attention(&args);
     }
-    if presence.has("robot-blocker-chain") {
+    // Every string-valued primary below dispatches on `command_active`
+    // (pflag Changed for string flags), not `has`: an empty value —
+    // `--robot-impact-network ""` or `--robot-impact-network=` — still names
+    // the command. `has`'s non-empty test dropped those invocations onto the
+    // TUI launcher (or, beside a second primary, silently ignored the flag).
+    if presence.command_active("robot-blocker-chain") {
         return run_robot_blocker_chain(&args);
     }
-    if presence.has("robot-confirm-correlation") {
+    if presence.command_active("robot-confirm-correlation") {
         return run_robot_correlation_feedback(&args, "confirm-correlation", "confirm");
     }
-    if presence.has("robot-reject-correlation") {
+    if presence.command_active("robot-reject-correlation") {
         return run_robot_correlation_feedback(&args, "reject-correlation", "reject");
     }
-    if presence.has("robot-explain-correlation") {
+    if presence.command_active("robot-explain-correlation") {
         return run_robot_explain_correlation(&args);
     }
     if presence.has("robot-correlation-stats") {
         return run_robot_correlation_stats();
     }
-    if presence.has("robot-file-beads") {
+    if presence.command_active("robot-file-beads") {
         return run_robot_file_beads(&args);
     }
     if presence.has("robot-file-hotspots") {
         return run_robot_file_hotspots(&args);
     }
-    if presence.has("robot-file-relations") {
+    if presence.command_active("robot-file-relations") {
         return run_robot_file_relations(&args);
     }
     if presence.has("robot-search") {
@@ -2570,42 +2581,44 @@ fn main() -> ExitCode {
     // and prints the tab-separated text table (cmd/bv/main.go:2963, :3028-3035),
     // so it goes through the identical code path and differs only in output.
     if search_flag(&args, "search").is_some_and(|q| !q.trim().is_empty())
-        && !flags::ROBOT_PRIMARIES.iter().any(|f| presence.has(f.name))
+        && !flags::ROBOT_PRIMARIES
+            .iter()
+            .any(|f| presence.command_active(f.name))
     {
         return run_robot_search(&args);
     }
-    if presence.has("robot-causality") {
+    if presence.command_active("robot-causality") {
         return run_robot_causality(&args);
     }
-    if presence.has("robot-related") {
+    if presence.command_active("robot-related") {
         return run_robot_related(&args);
     }
-    if presence.has("robot-impact-network") {
+    if presence.command_active("robot-impact-network") {
         return run_robot_impact_network(&args);
     }
     if presence.has("robot-sprint-list") {
         return run_robot_sprint_list();
     }
-    if presence.has("robot-sprint-show") {
+    if presence.command_active("robot-sprint-show") {
         return run_robot_sprint_show(&args);
     }
-    if presence.has("robot-burndown") {
+    if presence.command_active("robot-burndown") {
         return run_robot_burndown(&args);
     }
-    if presence.has("robot-forecast") {
+    if presence.command_active("robot-forecast") {
         return run_robot_forecast(&args);
     }
     if presence.has("robot-capacity") {
         return run_robot_capacity(&args);
     }
 
-    if presence.has("robot-impact") {
+    if presence.command_active("robot-impact") {
         return run_robot_impact(&args);
     }
     if presence.has("robot-diff") {
         return run_robot_diff(&args);
     }
-    if presence.has("robot-not-ready-labels") {
+    if presence.command_active("robot-not-ready-labels") {
         return run_robot_not_ready_labels(&args);
     }
     // Handle --pages wizard (Go main.go:3040-3048). Placed ahead of BOTH
@@ -3311,7 +3324,7 @@ fn main() -> ExitCode {
     // no way to drive and would just hang or block CI).
     if let Some(unhandled) = flags::ROBOT_PRIMARIES
         .iter()
-        .find(|f| f.name != "robot-help" && presence.has(f.name))
+        .find(|f| f.name != "robot-help" && presence.command_active(f.name))
     {
         eprintln!(
             "Error: --{} is registered but not yet implemented in bvr",
