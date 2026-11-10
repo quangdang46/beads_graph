@@ -5,7 +5,6 @@
 //! High core numbers indicate densely connected regions.
 
 use crate::graph::DiGraph;
-use std::collections::HashSet;
 
 /// Compute k-core numbers for all nodes.
 ///
@@ -20,14 +19,22 @@ pub fn kcore(graph: &DiGraph) -> Vec<u32> {
     }
 
     // Build undirected degree and neighbor lists
-    // For directed graph, treat as undirected (symmetric edges)
-    let mut neighbors: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    // For directed graph, treat as undirected (symmetric edges).
+    // Sorted+deduped Vecs instead of a per-node HashSet: one allocation per
+    // node total (plus growth), no per-insert hashing, and a deterministic
+    // peel order — HashSet's RandomState made bucket push order vary run to
+    // run even though core numbers themselves are order-independent.
+    let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); n];
 
     for u in 0..n {
         for &v in graph.successors_slice(u) {
-            neighbors[u].insert(v);
-            neighbors[v].insert(u);
+            neighbors[u].push(v);
+            neighbors[v].push(u);
         }
+    }
+    for list in &mut neighbors {
+        list.sort_unstable();
+        list.dedup();
     }
 
     // Compute undirected degree
