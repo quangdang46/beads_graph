@@ -3,15 +3,12 @@
 
 pub mod analyzer;
 pub mod blocker_chain;
-pub mod cache;
 pub mod diff;
 pub mod drift;
 pub mod feedback;
-pub mod file_impact;
 pub mod go_math;
 pub mod go_time;
 pub mod impact;
-pub mod incremental;
 pub mod label_health;
 pub mod metrics;
 pub mod scoring;

@@ -3668,7 +3668,7 @@ pub const ENV_VARS: &[EnvVar] = &[
     EnvVar { name: "BEADS_DIR", description: "Custom beads directory path. When set, overrides the default `.beads` directory lookup.", default: "`.beads` in cwd" },
     EnvVar { name: "BV_BACKGROUND_MODE", description: "Startup default for the background snapshot worker (`1` on, `0` off). At runtime the TUI promotes itself to the worker after any synchronous reload that takes 1 s or longer; `0` pins synchronous reload and disables that promotion.", default: "sync at startup, auto-promote after a slow reload" },
     EnvVar { name: "BV_BUILD_HYBRID_WASM", description: "Set to `1` to build the hybrid search WASM scorer during `--export-pages` (requires wasm-pack).", default: "(skip)" },
-    EnvVar { name: "BV_CACHE_DIR", description: "Base directory for the disk caches (`analysis_cache/` and correlation caches live under it).", default: "`<user cache dir>/bv`" },
+    EnvVar { name: "BV_CACHE_DIR", description: "Base directory for the disk caches (correlation caches live under it).", default: "`<user cache dir>/bv`" },
     EnvVar { name: "BV_DEBOUNCE_MS", description: "Debounce window (milliseconds) for live reload events in background mode.", default: "`200`" },
     EnvVar { name: "BV_DEBUG", description: "Any value: write `[BV_DEBUG]` diagnostics to stderr.", default: "(off)" },
     EnvVar { name: "BV_FORCE_POLL", description: "Alias for `BV_FORCE_POLLING`.", default: "(auto)" },
