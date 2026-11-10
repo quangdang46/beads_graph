@@ -3398,7 +3398,7 @@ fn main() -> ExitCode {
                 if let Some(code) = exit_if_no_issues(&issues) {
                     return code;
                 }
-                let mut app = bv_tui::App::new(issues.clone());
+                let mut app = bv_tui::App::new(issues.to_vec());
                 app.workspace_repos = Some(repo_names);
                 // Go main.go:4526-4531 — the debug-render check sits AFTER
                 // `EnableWorkspaceMode`, so it is reachable from workspace mode
@@ -3427,7 +3427,7 @@ fn main() -> ExitCode {
             if let Some(code) = exit_if_no_issues(&issues) {
                 return code;
             }
-            let mut app = bv_tui::App::new(issues.clone());
+            let mut app = bv_tui::App::new(issues.to_vec());
             if let Some(code) = run_debug_render(&mut app, &issues, &args) {
                 return code;
             }
@@ -4195,10 +4195,18 @@ fn apply_label_scope(issues: &[bv_core::model::Issue]) -> Vec<bv_core::model::Is
         return issues.to_vec();
     }
     let (_, analysis_ids) = bv_analysis::label_health::label_scope_ids(&label, issues);
+    // One index build instead of Go's per-id linear scan: the old
+    // `issues.iter().find` made this O(issues × candidates). `or_insert`
+    // keeps the FIRST match on duplicate ids, matching `find`.
+    let mut by_id: std::collections::BTreeMap<&str, &bv_core::model::Issue> =
+        std::collections::BTreeMap::new();
+    for issue in issues {
+        by_id.entry(issue.id.as_str()).or_insert(issue);
+    }
     let mut out = Vec::with_capacity(analysis_ids.len());
     for id in &analysis_ids {
-        if let Some(issue) = issues.iter().find(|i| &i.id == id) {
-            out.push(issue.clone());
+        if let Some(issue) = by_id.get(id.as_str()) {
+            out.push((*issue).clone());
         }
     }
     out
@@ -4213,12 +4221,14 @@ fn apply_label_scope(issues: &[bv_core::model::Issue]) -> Vec<bv_core::model::Is
 /// the same narrowed set. Applying the filter at a few call sites instead left
 /// `--label` decorative on the majority of handlers while the envelope still
 /// advertised it.
-fn apply_repo_scope(issues: &[bv_core::model::Issue]) -> Vec<bv_core::model::Issue> {
+fn apply_repo_scope<'a>(
+    issues: &'a [bv_core::model::Issue],
+) -> std::borrow::Cow<'a, [bv_core::model::Issue]> {
     let (_label, _recipe, repo) = active_scope_flags();
     if repo.is_empty() {
-        return issues.to_vec();
+        return std::borrow::Cow::Borrowed(issues);
     }
-    bv_core::repo_filter::filter_by_repo(issues, &repo)
+    std::borrow::Cow::Owned(bv_core::repo_filter::filter_by_repo(issues, &repo))
 }
 
 /// Every loader routes through this so the scope is applied exactly once,
@@ -4229,7 +4239,12 @@ fn apply_repo_scope(issues: &[bv_core::model::Issue]) -> Vec<bv_core::model::Iss
 /// RE-hashes the repo-filtered source, while a `--label` filter leaves the
 /// loader's hash alone and only sets `DataHashMatchesIssues = false`. Getting
 /// that backwards would change the `data_hash` on every `--label` golden.
-fn apply_scope(issues: &[bv_core::model::Issue]) -> (Vec<bv_core::model::Issue>, Option<String>) {
+fn apply_scope<'a>(
+    issues: &'a [bv_core::model::Issue],
+) -> (
+    std::borrow::Cow<'a, [bv_core::model::Issue]>,
+    Option<String>,
+) {
     let (label, recipe, repo) = active_scope_flags();
     let repo_scoped = apply_repo_scope(issues);
     let hash_override = if repo.is_empty() {
@@ -4248,10 +4263,21 @@ fn apply_scope(issues: &[bv_core::model::Issue]) -> (Vec<bv_core::model::Issue>,
             eprintln!("Warning: No issues found with label {label:?}");
         }
     }
-    (
-        apply_recipe_scope(&apply_label_scope(&repo_scoped), &recipe),
-        hash_override,
-    )
+    // Each stage only allocates when its filter actually narrows the set:
+    // `--repo` unset borrows, `--label`/`--recipe` unset pass the previous
+    // stage's Cow through untouched. The old chain cloned the whole corpus
+    // up to three times per command even with no scope flags at all.
+    let label_scoped = if label.is_empty() {
+        repo_scoped
+    } else {
+        std::borrow::Cow::Owned(apply_label_scope(&repo_scoped))
+    };
+    let scoped = if recipe.is_empty() || !recipe_scope_active() {
+        label_scoped
+    } else {
+        std::borrow::Cow::Owned(apply_recipe_scope(&label_scoped, &recipe))
+    };
+    (scoped, hash_override)
 }
 
 /// Go main.go:2780-2784 — the recipe narrows the loaded set only for the
@@ -5385,7 +5411,12 @@ fn load_issues_auto_meta(
 > {
     let (issues, hash, commit, source) = load_issues_auto_meta_raw(cwd, as_of)?;
     let (issues, hash_override) = apply_scope(&issues);
-    Ok((issues, hash_override.unwrap_or(hash), commit, source))
+    Ok((
+        issues.into_owned(),
+        hash_override.unwrap_or(hash),
+        commit,
+        source,
+    ))
 }
 
 fn load_issues_auto_meta_raw(
@@ -7124,7 +7155,7 @@ fn run_robot_triage() -> ExitCode {
     .unwrap_or_default()
     .to_string();
     let analysis_issues: Vec<bv_core::model::Issue> = if graph_root.is_empty() {
-        issues.clone()
+        issues.to_vec()
     } else {
         bv_analysis::triage::extract_descendant_subgraph(&issues, &graph_root)
     };
@@ -10334,7 +10365,15 @@ fn load_and_analyze(as_of: Option<&str>) -> Result<AnalysisTuple, ExitCode> {
     let g2 = std::sync::Arc::clone(&g);
     let (status, _phase2) = bv_analysis::analyze_phase2_blocking(g2, &budget);
 
-    Ok((issues, data_hash, p1, status, g, loaded_source, _hash))
+    Ok((
+        issues.into_owned(),
+        data_hash,
+        p1,
+        status,
+        g,
+        loaded_source,
+        _hash,
+    ))
 }
 
 /// Go `NewRobotEnvelope` parity: for handlers whose Go output embeds the
@@ -11065,7 +11104,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     let gc = std::sync::Arc::clone(&g);
     let (status, phase2) = bv_analysis::analyze_phase2_blocking(gc, &budget);
     Ok((
-        issues,
+        issues.into_owned(),
         data_hash,
         p1,
         status,
@@ -20105,7 +20144,7 @@ fn run_robot_metrics() -> ExitCode {
             // re-hashes, so the loader digest survives for the authority.
             let (issues, hash_override) = apply_scope(&loaded);
             (
-                issues,
+                issues.into_owned(),
                 hash_override.unwrap_or_else(|| loader_hash.clone()),
                 loader_hash,
                 loaded_source,

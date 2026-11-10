@@ -319,41 +319,108 @@ pub fn compute_data_hash(issues: &[Issue]) -> String {
 /// — the same order Go appends them in, and `compute_data_hash` sorts by ID
 /// anyway.
 pub fn source_issues_hash(issues: &[Issue], tombstone_ids: &[String]) -> String {
-    let mut all: Vec<Issue> = issues.to_vec();
-    let seen: std::collections::HashSet<String> = all.iter().map(|i| i.id.clone()).collect();
-    for id in tombstone_ids {
-        if !seen.contains(id) {
-            all.push(Issue {
-                id: id.clone(),
-                content_hash: String::new(),
-                title: String::new(),
-                description: String::new(),
-                design: String::new(),
-                acceptance_criteria: String::new(),
-                notes: String::new(),
-                status: crate::model::Status::Tombstone,
-                priority: 0,
-                issue_type: String::new(),
-                assignee: String::new(),
-                estimated_minutes: None,
-                created_at: None,
-                updated_at: None,
-                due_date: None,
-                defer_until: None,
-                closed_at: None,
-                external_ref: None,
-                compaction_level: 0,
-                compacted_at: None,
-                compacted_at_commit: None,
-                original_size: 0,
-                labels: vec![],
-                dependencies: vec![],
-                comments: vec![],
-                source_repo: String::new(),
-            });
+    // Hash by reference: the old code deep-cloned every issue into `all` just
+    // to append the tombstone stubs, a multi-MB copy per datasource load. The
+    // fingerprints below only ever read through `&Issue`, and one reusable
+    // stub `Issue` produces byte-identical output because each fingerprint is
+    // materialised before the next stub overwrites `id`.
+    let seen: std::collections::HashSet<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    let stubs: Vec<&str> = tombstone_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !seen.contains(id))
+        .collect();
+    if issues.is_empty() && stubs.is_empty() {
+        return "empty".to_string();
+    }
+
+    let mut w = FingerprintWriter::new();
+    let mut fingerprints: Vec<OrderedFingerprint> = Vec::with_capacity(issues.len() + stubs.len());
+    for (i, issue) in issues.iter().enumerate() {
+        fingerprints.push(ordered_fingerprint(&mut w, issue, i));
+    }
+    if !stubs.is_empty() {
+        let mut stub = Issue {
+            id: String::new(),
+            content_hash: String::new(),
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            acceptance_criteria: String::new(),
+            notes: String::new(),
+            status: crate::model::Status::Tombstone,
+            priority: 0,
+            issue_type: String::new(),
+            assignee: String::new(),
+            estimated_minutes: None,
+            created_at: None,
+            updated_at: None,
+            due_date: None,
+            defer_until: None,
+            closed_at: None,
+            external_ref: None,
+            compaction_level: 0,
+            compacted_at: None,
+            compacted_at_commit: None,
+            original_size: 0,
+            labels: vec![],
+            dependencies: vec![],
+            comments: vec![],
+            source_repo: String::new(),
+        };
+        for (j, id) in stubs.iter().enumerate() {
+            stub.id.clear();
+            stub.id.push_str(id);
+            fingerprints.push(ordered_fingerprint(&mut w, &stub, issues.len() + j));
         }
     }
-    compute_data_hash(&all)
+    finish_data_hash(fingerprints)
+}
+
+/// One (id, content hash, dependency hash) triple plus the input position that
+/// breaks duplicate-id ties exactly the way the Go sort does.
+struct OrderedFingerprint {
+    id: String,
+    content_hash: String,
+    dependency_hash: String,
+    position: usize,
+}
+
+fn ordered_fingerprint(
+    w: &mut FingerprintWriter,
+    issue: &Issue,
+    position: usize,
+) -> OrderedFingerprint {
+    OrderedFingerprint {
+        id: issue.id.clone(),
+        content_hash: compute_issue_content_hash(w, issue),
+        dependency_hash: compute_issue_dependency_hash(w, issue),
+        position,
+    }
+}
+
+/// Sort fingerprints by ID (position breaks ties) and stream them through the
+/// writer — the shared tail of every v0.25.0 data-hash entry point.
+fn finish_data_hash(mut fingerprints: Vec<OrderedFingerprint>) -> String {
+    if fingerprints.is_empty() {
+        return "empty".to_string();
+    }
+    fingerprints.sort_by(|a, b| {
+        if a.id != b.id {
+            a.id.cmp(&b.id)
+        } else {
+            a.position.cmp(&b.position)
+        }
+    });
+
+    let mut w = FingerprintWriter::new();
+    w.write_uint_hash(fingerprints.len() as u64);
+    for fp in &fingerprints {
+        w.write_string_hash(&fp.id);
+        w.write_string_hash(&fp.content_hash);
+        w.write_string_hash(&fp.dependency_hash);
+    }
+    w.sum_hex()
 }
 
 /// [`compute_data_hash`] over borrowed issues.
@@ -369,39 +436,13 @@ pub fn compute_data_hash_refs(issues: &[&Issue]) -> String {
         return "empty".to_string();
     }
 
-    struct OrderedFingerprint {
-        id: String,
-        content_hash: String,
-        dependency_hash: String,
-        position: usize,
-    }
     let mut w = FingerprintWriter::new();
-    let mut fingerprints: Vec<OrderedFingerprint> = issues
+    let fingerprints: Vec<OrderedFingerprint> = issues
         .iter()
         .enumerate()
-        .map(|(i, issue)| OrderedFingerprint {
-            id: issue.id.clone(),
-            content_hash: compute_issue_content_hash(&mut w, issue),
-            dependency_hash: compute_issue_dependency_hash(&mut w, issue),
-            position: i,
-        })
+        .map(|(i, issue)| ordered_fingerprint(&mut w, issue, i))
         .collect();
-    fingerprints.sort_by(|a, b| {
-        if a.id != b.id {
-            a.id.cmp(&b.id)
-        } else {
-            a.position.cmp(&b.position)
-        }
-    });
-
-    w.reset();
-    w.write_uint_hash(fingerprints.len() as u64);
-    for fp in &fingerprints {
-        w.write_string_hash(&fp.id);
-        w.write_string_hash(&fp.content_hash);
-        w.write_string_hash(&fp.dependency_hash);
-    }
-    w.sum_hex()
+    finish_data_hash(fingerprints)
 }
 
 /// v0.20.0 data hash — retained so the historical goldens stay reproducible and
