@@ -822,13 +822,13 @@ pub fn detect_orphans(
 /// Go `filterOrphanReportByMinScore` — drop weak candidates, then re-derive the
 /// bead index and the two stats that depend on what survived. The index is
 /// rebuilt from the *short* SHAs, which is what the payload reports.
-pub fn filter_by_min_score(report: &mut OrphanReport, min_score: i32) {
+pub fn filter_by_min_score(report: &mut OrphanReport, min_score: i64) {
     let mut filtered: Vec<OrphanCandidate> = Vec::with_capacity(report.candidates.len());
     let mut by_bead: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut total_suspicion = 0i64;
 
     for candidate in report.candidates.drain(..) {
-        if candidate.suspicion_score < min_score {
+        if i64::from(candidate.suspicion_score) < min_score {
             continue;
         }
         total_suspicion += candidate.suspicion_score as i64;

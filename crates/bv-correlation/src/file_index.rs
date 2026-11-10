@@ -803,8 +803,12 @@ pub struct CoChangeResult {
     pub file_path: String,
     /// Total commits touching this file.
     pub total_commits: usize,
-    /// Files that co-change, sorted by correlation descending.
-    pub related_files: Vec<CoChangeEntry>,
+    /// Files that co-change, sorted by correlation descending. Go's
+    /// `[]CoChangeEntry` distinguishes the two empty shapes: the early
+    /// returns pre-seed a non-nil slice (JSON `[]`), while a filter that
+    /// admits nothing leaves the nil `entries` slice behind (JSON `null`)
+    /// — `None`/`Some(vec![])` mirrors that exactly.
+    pub related_files: Option<Vec<CoChangeEntry>>,
     /// The effective minimum correlation threshold used.
     pub threshold: f64,
 }
@@ -843,7 +847,7 @@ impl CoChangeMatrix {
         let mut result = CoChangeResult {
             file_path: file_path.to_string(),
             total_commits,
-            related_files: Vec::new(),
+            related_files: Some(Vec::new()),
             threshold,
         };
         if total_commits == 0 {
@@ -881,7 +885,14 @@ impl CoChangeMatrix {
                 .then_with(|| a.file_path.cmp(&b.file_path))
         });
         entries.truncate(limit);
-        result.related_files = entries;
+        // Go `result.RelatedFiles = entries` (file_index.go:562): `entries`
+        // stays nil when the threshold admitted nothing, which encodes as
+        // `null`; the early returns above keep the pre-seeded `[]`.
+        result.related_files = if entries.is_empty() {
+            None
+        } else {
+            Some(entries)
+        };
         result
     }
 
@@ -1343,18 +1354,21 @@ mod tests {
         let at_default = lookup.get_related_files("src/a.rs", 0.0, 10);
         assert_eq!(at_default.threshold, 0.5);
         assert_eq!(at_default.total_commits, 2);
-        assert_eq!(at_default.related_files.len(), 1);
-        assert_eq!(at_default.related_files[0].file_path, "src/b.rs");
-        assert_eq!(at_default.related_files[0].co_change_count, 1);
-        assert_eq!(at_default.related_files[0].correlation, 0.5);
-        assert_eq!(at_default.related_files[0].sample_commits, vec!["aaaaaa11"]);
+        let files = at_default.related_files.as_deref().unwrap_or(&[]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_path, "src/b.rs");
+        assert_eq!(files[0].co_change_count, 1);
+        assert_eq!(files[0].correlation, 0.5);
+        assert_eq!(files[0].sample_commits, vec!["aaaaaa11"]);
     }
 
     #[test]
     fn related_files_threshold_above_correlation_filters_everything() {
         let lookup = FileLookup::new(&sample_report());
         let strict = lookup.get_related_files("src/a.rs", 0.99, 10);
-        assert!(strict.related_files.is_empty());
+        // Go leaves the nil `entries` slice behind, which encodes as JSON
+        // `null` — distinct from the `[]` the early returns produce.
+        assert!(strict.related_files.is_none());
         assert_eq!(strict.threshold, 0.99);
         // The queried file itself is still reported.
         assert_eq!(strict.total_commits, 2);
@@ -1365,7 +1379,7 @@ mod tests {
         let lookup = FileLookup::new(&sample_report());
         let capped = lookup.get_related_files("src/a.rs", 0.1, 0);
         assert_eq!(
-            capped.related_files.len(),
+            capped.related_files.as_deref().unwrap_or(&[]).len(),
             1,
             "only b.rs co-changes with a.rs"
         );
@@ -1376,7 +1390,9 @@ mod tests {
         let lookup = FileLookup::new(&sample_report());
         let result = lookup.get_related_files("nope.rs", 0.5, 10);
         assert_eq!(result.total_commits, 0);
-        assert!(result.related_files.is_empty());
+        // Go pre-seeds `RelatedFiles: []CoChangeEntry{}`, so the unknown-file
+        // early return encodes as `[]`, not `null`.
+        assert!(result.related_files.as_ref().is_some_and(Vec::is_empty));
     }
 
     #[test]
@@ -1852,8 +1868,9 @@ mod tests {
         assert_eq!(result.file_path, "src/a.rs");
         assert_eq!(result.total_commits, 3);
         assert_eq!(result.threshold, 0.5);
-        assert_eq!(result.related_files.len(), 1);
-        let entry = &result.related_files[0];
+        let files = result.related_files.as_deref().unwrap_or(&[]);
+        assert_eq!(files.len(), 1);
+        let entry = &files[0];
         assert_eq!(entry.file_path, "src/b.rs");
         assert_eq!(entry.co_change_count, 2);
         assert_eq!(entry.total_commits, 3);

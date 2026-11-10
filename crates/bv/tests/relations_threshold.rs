@@ -70,10 +70,13 @@ fn threshold_of(target: &str, value: &str) -> f64 {
 fn related_files_of(target: &str, value: &str) -> Vec<serde_json::Value> {
     let (code, stdout, stderr) = run(target, value);
     assert_eq!(code, 0, "exit code, stderr: {stderr}");
+    // `null` (Go's nil `entries` slice) reads as an empty set here; the
+    // null-vs-`[]` distinction has its own assertion in
+    // `the_threshold_reaches_the_filter`.
     payload(&stdout)["related_files"]
         .as_array()
-        .expect("related_files is an array")
-        .clone()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// `file_index.go:484-486` floors anything `<= 0` to 0.5, so a bare `0` and a
@@ -230,9 +233,14 @@ fn the_threshold_reaches_the_filter() {
         floored,
         "a negative floors the same way"
     );
+    // A threshold nothing can reach leaves Go's nil `entries` slice in
+    // place, which `json.Marshal` writes as `null` — not `[]` (the `[]`
+    // shape is reserved for the early returns in GetRelatedFiles).
+    let (code, stdout, stderr) = run(target, "1.1");
+    assert_eq!(code, 0, "exit code, stderr: {stderr}");
     assert!(
-        related_files_of(target, "1.1").is_empty(),
-        "no co-change correlation reaches 110%"
+        payload(&stdout)["related_files"].is_null(),
+        "no co-change correlation reaches 110%, and Go reports null"
     );
     let wider = related_files_of(target, "0.05");
     assert!(

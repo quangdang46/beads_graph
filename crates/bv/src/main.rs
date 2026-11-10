@@ -10201,21 +10201,26 @@ fn run_robot_orphans() -> ExitCode {
         ..Default::default()
     };
     if let Some(limit) = history_flag_value("history-limit") {
-        match limit.trim().parse::<i64>() {
+        // pflag int parse failure: `invalid argument "v" for "--history-limit"
+        // flag: strconv.ParseInt: ...`, reported at exit 1 (main.go:4548).
+        match go_parse_int_base0(&limit) {
             Ok(v) => opts.limit = v,
-            Err(_) => {
-                eprintln!("Error: invalid --history-limit: {limit}");
-                return ExitCode::from(2);
+            Err(detail) => {
+                eprintln!("invalid argument {limit:?} for \"--history-limit\" flag: {detail}");
+                return ExitCode::from(1);
             }
         }
     }
 
-    let min_score: i32 = match history_flag_value("orphans-min-score") {
-        Some(v) => match v.trim().parse::<i32>() {
+    // Go registers `--orphans-min-score` as a plain int flag with NO range
+    // check (main.go:1561): any int64 parses, and the value is only compared
+    // against suspicion scores. Parse failures are pflag errors at exit 1.
+    let min_score: i64 = match history_flag_value("orphans-min-score") {
+        Some(v) => match go_parse_int_base0(&v) {
             Ok(score) => score,
-            Err(_) => {
-                eprintln!("Error: invalid --orphans-min-score: {v}");
-                return ExitCode::from(2);
+            Err(detail) => {
+                eprintln!("invalid argument {v:?} for \"--orphans-min-score\" flag: {detail}");
+                return ExitCode::from(1);
             }
         },
         None => 30,
