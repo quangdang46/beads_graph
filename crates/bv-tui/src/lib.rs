@@ -161,6 +161,17 @@ pub type TimeTravelLoad = (u64, String, Result<Vec<bv_core::model::Issue>, Strin
 /// `(generation, bead_id, sessions, keywords)`.
 pub type CassLookup = (u64, String, Vec<crate::cass::ScoredSession>, Vec<String>);
 
+/// Cached detail-pane content for one selected issue — see
+/// [`App::detail_cache`]. The validity key mirrors every input
+/// `render_detail` reads besides the issue itself.
+struct DetailCache {
+    issue_id: String,
+    has_graph_metrics: bool,
+    update_tag: Option<String>,
+    update_url: Option<String>,
+    lines: Vec<Line<'static>>,
+}
+
 /// Application state (Elm model).
 /// Stores computed graph metrics for rendering views.
 #[derive(Default, Clone)]
@@ -345,6 +356,12 @@ pub struct App {
     pub dep_tree_nodes: Vec<crate::views::deptree::DepNode>,
     /// The slice of `dep_tree_nodes` painted last frame.
     pub dep_tree_window: std::ops::Range<usize>,
+    /// `dep_tree_nodes` is stale and must be rebuilt before the next paint.
+    /// Set wherever `filtered_indices` is rewritten without going through
+    /// `apply_filter` (fuzzy/semantic search); cleared by
+    /// `rebuild_dep_tree`. Without it `render_list` rebuilt the whole tree
+    /// — hashmaps + a walk over every filtered issue — on *every frame*.
+    dep_tree_dirty: bool,
     /// Cursor position within the Alerts view list.
     pub alerts_cursor: usize,
     /// Cross-label flow data for the FlowMatrix view.
@@ -483,6 +500,25 @@ pub struct App {
     /// `--robot-triage`'s builders) and read at render time. Empty until
     /// `App::new` fills it — render treats a missing entry as no decoration.
     pub row_triage: std::collections::HashMap<String, bv_analysis::triage::RowTriage>,
+    /// Cached detail-pane lines for the selected issue (#9 perf):
+    /// `build_detail_lines` walks the whole dependency subtree and formats
+    /// every description/design/notes/comments line, and `render_detail`
+    /// ran it on *every frame* — every keypress and every 1s tick — even
+    /// when the selection hadn't moved. Issues are immutable for the life
+    /// of an `App` (reload replaces the whole `App`), so the cache key is
+    /// the issue id plus the inputs that also feed the pane: graph-metrics
+    /// presence and the update notice.
+    detail_cache: Option<DetailCache>,
+    /// Status-bar counters, computed once in `App::new` — `rows` never
+    /// mutates in place, so the three `iter().filter().count()` passes
+    /// `render_status_bar` used to run per frame were constant.
+    status_open_count: usize,
+    status_blocked_count: usize,
+    status_closed_count: usize,
+    /// Freshness-badge thresholds (`BV_FRESHNESS_WARN_S`/`_STALE_S`),
+    /// resolved once at startup instead of two `env::var` lookups per frame.
+    freshness_warn_s: u64,
+    freshness_stale_s: u64,
     /// Quit-confirmation overlay (Go `showQuitConfirm` / `focusQuitConfirm`):
     /// at the main list, first Esc clears filters, second Esc shows this
     /// confirm box; Esc/Y quits, any other key cancels back to the list.
@@ -551,6 +587,9 @@ pub struct App {
     pub agent_prompt_modal: Option<crate::agent_prompt_modal::AgentPromptModal>,
     /// Velocity-comparison overlay inside Sprint view (Go `v` sub-toggle).
     pub show_velocity: bool,
+    /// Lazily built velocity model, cached for the App's lifetime — see
+    /// [`App::velocity_model`].
+    velocity_model: Option<crate::views::velocity_comparison::VelocityComparisonModel>,
     /// Theme for consistent styling. Resolved from `--theme` > `BV_THEME` >
     /// `~/.config/bv/config.yaml` > auto — call
     /// [`App::apply_theme_preference`] once after [`App::new`] to install it.
@@ -1049,10 +1088,35 @@ impl App {
                 repo_prefix: issue_repo_key(&i.id, &i.source_repo),
             })
             .collect();
+        // Status-bar counters are constant for the App's lifetime — `rows`
+        // is never mutated in place (a reload replaces the whole `App`).
+        let status_open_count = rows
+            .iter()
+            .filter(|r| matches!(r.status, Status::Open))
+            .count();
+        let status_blocked_count = rows
+            .iter()
+            .filter(|r| matches!(r.status, Status::Blocked))
+            .count();
+        let status_closed_count = rows.iter().filter(|r| r.status.is_closed()).count();
+        let freshness_warn_s = std::env::var("BV_FRESHNESS_WARN_S")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        let freshness_stale_s = std::env::var("BV_FRESHNESS_STALE_S")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120);
         let mut app = App {
             rows,
             issue_map,
             row_triage,
+            detail_cache: None,
+            status_open_count,
+            status_blocked_count,
+            status_closed_count,
+            freshness_warn_s,
+            freshness_stale_s,
             alerts_critical: a_crit,
             alerts_warning: a_warn,
             alerts_total,
@@ -1061,6 +1125,7 @@ impl App {
             left_tree_mode: true,
             dep_tree_nodes: Vec::new(),
             dep_tree_window: 0..0,
+            dep_tree_dirty: false,
             alerts_cursor: 0,
             flow: None,
             flow_cursor: 0,
@@ -1157,6 +1222,7 @@ impl App {
             show_agent_prompt: false,
             agent_prompt_modal: None,
             show_velocity: false,
+            velocity_model: None,
             theme: crate::theme::Theme::default(),
             key_registry: crate::keybindings::build_default_registry(),
         };
@@ -1297,11 +1363,12 @@ impl App {
         // Reverse(id))` order — changing it would rebaseline every golden.)
         match self.sort_mode {
             SortMode::Default => {
-                self.filtered_indices.sort_by_key(|&i| {
-                    (
-                        self.rows[i].priority,
-                        std::cmp::Reverse(self.rows[i].id.clone()),
-                    )
+                // Borrow the id for the tiebreak — `sort_by_key` with
+                // `id.clone()` allocated a String per comparison.
+                let rows = &self.rows;
+                self.filtered_indices.sort_by(|&a, &b| {
+                    (rows[a].priority, std::cmp::Reverse(rows[a].id.as_str()))
+                        .cmp(&(rows[b].priority, std::cmp::Reverse(rows[b].id.as_str())))
                 });
             }
             _ => {
@@ -1364,6 +1431,7 @@ impl App {
             self.cursor,
         );
         self.dep_tree_nodes = nodes;
+        self.dep_tree_dirty = false;
     }
     /// Update cass session count for the selected bead (Go getCassSessionCount).
     ///
@@ -1497,6 +1565,7 @@ impl App {
         let idx: Vec<usize> = scored.into_iter().map(|(_, i)| i).collect();
         self.filtered_indices = idx;
         self.cursor = 0;
+        self.dep_tree_dirty = true;
     }
     /// Semantic search input (Ctrl+S mode): Esc clears and exits, Enter
     /// accepts (back to the standard filter order), typing re-ranks, Tab
@@ -1667,6 +1736,7 @@ impl App {
         });
         self.filtered_indices = scored.into_iter().map(|(_, i)| i).collect();
         self.cursor = 0;
+        self.dep_tree_dirty = true;
     }
 
     /// Fresh hash-embed text scores for every row (fallback when no
@@ -3400,15 +3470,24 @@ impl App {
 
     /// Go's `velocityComparison` model (model.go:770, :1736, :1923). Go
     /// computes it from `analysis.ComputeAllHistoricalVelocity(issues, 4, now)`
-    /// and holds it on the model, refreshing it in `SetData`; Rust rebuilds it
-    /// from the live issue set each time the view is opened, which is the same
-    /// data without a stale cache to invalidate.
-    fn velocity_comparison(&self) -> crate::views::velocity_comparison::VelocityComparisonModel {
-        let mut model =
-            crate::views::velocity_comparison::VelocityComparisonModel::new(self.theme.clone());
-        let issues: Vec<bv_core::model::Issue> = self.issue_map.values().cloned().collect();
-        model.set_size(self.width as usize, self.height as usize);
-        model.set_data(&issues);
+    /// and holds it on the model, refreshing it in `SetData`.
+    ///
+    /// Cached per `App` (#9 perf): issues are immutable for the App's
+    /// lifetime (a reload replaces the whole `App`), so cloning every
+    /// issue and recomputing the velocity rows ran once at first open
+    /// instead of on every frame the overlay was visible. `set_size`
+    /// still runs each call so terminal resizes take effect.
+    fn velocity_model(&mut self) -> &crate::views::velocity_comparison::VelocityComparisonModel {
+        if self.velocity_model.is_none() {
+            let mut model =
+                crate::views::velocity_comparison::VelocityComparisonModel::new(self.theme.clone());
+            let issues: Vec<bv_core::model::Issue> = self.issue_map.values().cloned().collect();
+            model.set_data(&issues);
+            self.velocity_model = Some(model);
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let model = self.velocity_model.as_mut().unwrap();
+        model.set_size(w, h);
         model
     }
 
@@ -4379,8 +4458,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 f.render_widget(msg, f.area());
             }
             if app.show_velocity {
-                let model = app.velocity_comparison();
-                crate::views::velocity_comparison::render_velocity_comparison(f, &model, f.area());
+                let model = app.velocity_model();
+                crate::views::velocity_comparison::render_velocity_comparison(f, model, f.area());
             }
             render_status_bar(f, app);
             render_overlays(f, app);
@@ -5136,10 +5215,14 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     // tree's, and `painted_row_for_screen` indexes `dep_tree_nodes` by the
     // same offset `handle_mouse` subtracts.
     if app.left_tree_mode {
-        // Rebuild here as well as in `apply_filter`: the resize that lands
-        // between two keystrokes changes `row_capacity`, and a rebuild is
-        // cheap (borrowed slices, no clones — see `views/tree.rs`).
-        app.rebuild_dep_tree();
+        // Rebuild only when the filtered set changed since the last build
+        // (`apply_filter`, fuzzy/semantic search, the `D` toggle all mark
+        // or perform it). Cursor moves and resizes leave the tree itself
+        // untouched — rebuilding it every frame was an O(filtered) pass
+        // of hashmap inserts plus a full tree walk per repaint.
+        if app.dep_tree_dirty {
+            app.rebuild_dep_tree();
+        }
         let tree_cursor =
             crate::views::deptree::tree_row_for_cursor(&app.dep_tree_nodes, app.cursor);
         app.dep_tree_window =
@@ -5292,58 +5375,88 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     f.render_stateful_widget(list, list_area, &mut state);
 }
 
-fn render_detail(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let mut content: Vec<Line> = match app.selected() {
-        Some(row) => {
-            let graph_scores = app.graph_metrics.as_ref().and_then(|gm| {
-                gm.pagerank
-                    .get(&row.id)
-                    .map(|&pr| crate::detail::GraphScores {
-                        pagerank: pr,
-                        betweenness: gm.betweenness.get(&row.id).copied().unwrap_or(0.0),
-                        eigenvector: gm.eigenvector.get(&row.id).copied().unwrap_or(0.0),
-                        hubs: gm.hubs.get(&row.id).copied().unwrap_or(0.0),
-                        authorities: gm.authorities.get(&row.id).copied().unwrap_or(0.0),
-                        critical_path: 0.0,
-                    })
-            });
+fn render_detail(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    // `build_detail_lines` walks the whole dependency subtree and formats
+    // every description/design/notes/comments line; it used to run on every
+    // frame. Issues are immutable for the App's lifetime, so the rendered
+    // lines are cached and only rebuilt when the selection, the
+    // graph-metrics presence, or the update notice changes (#9 perf).
+    // `detail_scroll` and `focus_detail` are applied at render time and
+    // deliberately not part of the key.
+    let selected_id = app.selected().map(|r| r.id.clone()).unwrap_or_default();
+    let has_metrics = app.graph_metrics.is_some();
+    let cache_hit = app.detail_cache.as_ref().is_some_and(|c| {
+        c.issue_id == selected_id
+            && c.has_graph_metrics == has_metrics
+            && c.update_tag == app.update_tag
+            && c.update_url == app.update_url
+    });
+    if !cache_hit {
+        let mut content: Vec<Line> = match app.selected() {
+            Some(row) => {
+                let graph_scores = app.graph_metrics.as_ref().and_then(|gm| {
+                    gm.pagerank
+                        .get(&row.id)
+                        .map(|&pr| crate::detail::GraphScores {
+                            pagerank: pr,
+                            betweenness: gm.betweenness.get(&row.id).copied().unwrap_or(0.0),
+                            eigenvector: gm.eigenvector.get(&row.id).copied().unwrap_or(0.0),
+                            hubs: gm.hubs.get(&row.id).copied().unwrap_or(0.0),
+                            authorities: gm.authorities.get(&row.id).copied().unwrap_or(0.0),
+                            critical_path: 0.0,
+                        })
+                });
 
-            // Use full issue data from issue_map for detail rendering
-            if let Some(full_issue) = app.issue_map.get(&row.id) {
-                crate::detail::build_detail_lines(
-                    full_issue,
-                    graph_scores.as_ref(),
-                    Some(&app.issue_map),
-                )
-            } else {
-                vec![Line::from(""), Line::from("Issue not found in map")]
+                // Use full issue data from issue_map for detail rendering
+                if let Some(full_issue) = app.issue_map.get(&row.id) {
+                    crate::detail::build_detail_lines(
+                        full_issue,
+                        graph_scores.as_ref(),
+                        Some(&app.issue_map),
+                    )
+                } else {
+                    vec![Line::from(""), Line::from("Issue not found in map")]
+                }
             }
+            None => vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "No issue selected",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ],
+        };
+        // Go's `updateViewportContent` (`model.go:8894-8895`) opens with the
+        // update notice, ahead of the title block, and closes with a blank
+        // line. The raw `[tag](url)` is deliberate: Go writes the same
+        // literal string into a plain viewport, so the link syntax is shown,
+        // not resolved.
+        if let Some(tag) = &app.update_tag {
+            let url = app.update_url.as_deref().unwrap_or_default();
+            content.insert(
+                0,
+                Line::from(Span::styled(
+                    format!("\u{2b50} **Update Available:** [{tag}]({url})"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            );
+            content.insert(1, Line::from(""));
         }
-        None => vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "No issue selected",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ],
-    };
-    // Go's `updateViewportContent` (`model.go:8894-8895`) opens with the
-    // update notice, ahead of the title block, and closes with a blank line.
-    // The raw `[tag](url)` is deliberate: Go writes the same literal string
-    // into a plain viewport, so the link syntax is shown, not resolved.
-    if let Some(tag) = &app.update_tag {
-        let url = app.update_url.as_deref().unwrap_or_default();
-        content.insert(
-            0,
-            Line::from(Span::styled(
-                format!("\u{2b50} **Update Available:** [{tag}]({url})"),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        );
-        content.insert(1, Line::from(""));
+        app.detail_cache = Some(DetailCache {
+            issue_id: selected_id,
+            has_graph_metrics: has_metrics,
+            update_tag: app.update_tag.clone(),
+            update_url: app.update_url.clone(),
+            lines: content,
+        });
     }
+    let content = app
+        .detail_cache
+        .as_ref()
+        .map(|c| c.lines.clone())
+        .unwrap_or_default();
     let focused_border = if app.focus_detail {
         Color::Cyan
     } else {
@@ -5442,23 +5555,14 @@ fn render_status_bar(f: &mut Frame, app: &App) {
         ));
     }
 
-    // Stats section with colored indicators
-    let open_count = app
-        .rows
-        .iter()
-        .filter(|r| matches!(r.status, Status::Open))
-        .count();
+    // Stats section with colored indicators — counters are precomputed in
+    // `App::new` (rows never mutate in place); this used to be three full
+    // passes over every row on every frame.
     let ready_count = app.filtered_indices.len();
-    let blocked_count = app
-        .rows
-        .iter()
-        .filter(|r| matches!(r.status, Status::Blocked))
-        .count();
-    let closed_count = app.rows.iter().filter(|r| r.status.is_closed()).count();
 
     spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
     spans.push(Span::styled(
-        format!("○{open_count} "),
+        format!("○{} ", app.status_open_count),
         Style::default().fg(Color::Green),
     ));
     spans.push(Span::styled(
@@ -5466,11 +5570,11 @@ fn render_status_bar(f: &mut Frame, app: &App) {
         Style::default().fg(Color::Cyan),
     ));
     spans.push(Span::styled(
-        format!("◈{blocked_count} "),
+        format!("◈{} ", app.status_blocked_count),
         Style::default().fg(Color::Yellow),
     ));
     spans.push(Span::styled(
-        format!("●{closed_count}"),
+        format!("●{}", app.status_closed_count),
         Style::default().fg(Color::DarkGray),
     ));
 
@@ -5490,14 +5594,6 @@ fn render_status_bar(f: &mut Frame, app: &App) {
     // Freshness badge (Go bv-h305: warn 30s, stale 2min since snapshot)
     {
         let elapsed = app.loaded_at.elapsed();
-        let stale_s = std::env::var("BV_FRESHNESS_STALE_S")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(120);
-        let warn_s = std::env::var("BV_FRESHNESS_WARN_S")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
         let secs = elapsed.as_secs();
         let fmt_age = |s: u64| {
             if s < 60 {
@@ -5508,7 +5604,7 @@ fn render_status_bar(f: &mut Frame, app: &App) {
                 format!("{}h ago", s / 3600)
             }
         };
-        if secs >= stale_s {
+        if secs >= app.freshness_stale_s {
             spans.push(Span::styled(
                 format!(" \u{26a0} STALE: {} ", fmt_age(secs)),
                 Style::default()
@@ -5516,7 +5612,7 @@ fn render_status_bar(f: &mut Frame, app: &App) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ));
-        } else if secs >= warn_s {
+        } else if secs >= app.freshness_warn_s {
             spans.push(Span::styled(
                 format!(" \u{26a0} {} ", fmt_age(secs)),
                 Style::default().bg(Color::DarkGray).fg(Color::Yellow),
@@ -7608,7 +7704,7 @@ mod tests {
             app.handle_key(KeyCode::Char('v'));
             assert!(app.show_velocity);
 
-            let model = app.velocity_comparison();
+            let model = app.velocity_model();
             assert!(
                 model.data_count() >= 2,
                 "expected one row per label, got {}",
