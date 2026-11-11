@@ -554,29 +554,13 @@ pub struct App {
     pub cass_modal: Option<crate::cass::CassModalState>,
     /// cass CLI availability cache
     cass_available: bool,
+    /// Bead-id → session count for the `💼 sessions` status badge. Populated
+    /// only by explicit user action — the `V` modal's `cass::correlate`
+    /// result (`poll_cass_load`) — never automatically on cursor move: the
+    /// original implementation ran `cass search` synchronously per j/k
+    /// (#9), and every async variant still spawned a subprocess per bead
+    /// visited. Cursor movement now only reads this cache.
     cass_cache: std::collections::HashMap<String, usize>,
-    /// Background cass session-count worker (#9): the per-cursor-move
-    /// lookup used to run `cass::search_sessions` synchronously on the UI
-    /// thread — up to 3s per uncached bead per keypress. Now
-    /// `update_session_count` queues the id on `session_count_tx` and
-    /// `poll_session_counts` drains results on the event-loop tick, the
-    /// same pattern `cass_lookup_rx`/`poll_cass_load` already uses for the
-    /// `V` modal. `session_count_pending` dedupes queued/in-flight ids and
-    /// bounds the backlog (`SESSION_COUNT_PENDING_CAP`).
-    session_count_tx: Option<crossbeam_channel::Sender<String>>,
-    session_count_rx: Option<crossbeam_channel::Receiver<(String, usize)>>,
-    session_count_pending: std::collections::HashSet<String>,
-    /// Bead awaiting a session-count lookup (#9): `update_session_count`
-    /// only records the *target* on each cursor move; `poll_session_counts`
-    /// sends the request once the target has been stable for
-    /// [`SESSION_COUNT_SETTLE`]. Scrolling through 50 beads used to spawn
-    /// 50 `cass search` subprocesses — one per keypress — because the send
-    /// happened inside the key handler. Coalescing to a settled target
-    /// means a scroll burst costs exactly one lookup, for the bead the
-    /// cursor actually stopped on.
-    session_count_target: Option<String>,
-    /// When `session_count_target` last changed — the settle timer.
-    session_count_target_at: Option<std::time::Instant>,
     /// Go `m.cassRequest` + `cassSessionsLoadedMsg` (model.go:9582-9619):
     /// `V` queues a background `cass::correlate` — "queues a lookup without
     /// running external processes in Update" — instead of blocking the UI
@@ -855,18 +839,6 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 /// `Limit == 0`, so it is named here only to make the Go constant explicit.
 const HISTORY_COMMIT_LIMIT: i64 = 500;
 
-/// Upper bound on queued+in-flight cass session-count lookups. Each entry
-/// can cost up to cass's 3s timeout, so an unbounded backlog from a fast
-/// scroll would keep the worker busy for minutes on beads the user has
-/// already scrolled past.
-const SESSION_COUNT_PENDING_CAP: usize = 128;
-
-/// How long the cursor must rest on a bead before its cass session-count
-/// lookup is issued (#9). The event loop polls far faster than this while
-/// keys repeat, so gating on elapsed time — not on "next tick" — is what
-/// actually coalesces a scroll burst into a single `cass search`.
-const SESSION_COUNT_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
-
 /// Quiet period the watched datasource must have before a live reload
 /// fires — the same value as the background worker's `DEFAULT_DEBOUNCE_MS`
 /// (`worker.rs`). The mtime poll runs on the ~500ms event tick, so the
@@ -1077,23 +1049,7 @@ impl App {
             .count();
         let alerts_total = alerts.len();
         let row_triage = bv_analysis::triage::compute_row_triage(&issues);
-        // Background cass session-count worker (#9): one thread per App,
-        // fed by `update_session_count` and drained by `poll_session_counts`.
-        // It exits when the request sender drops (App replaced on reload).
         let cass_available = cass_installed();
-        let (session_count_tx, session_count_req_rx) = crossbeam_channel::unbounded::<String>();
-        let (session_count_res_tx, session_count_rx) =
-            crossbeam_channel::unbounded::<(String, usize)>();
-        if cass_available {
-            std::thread::spawn(move || {
-                while let Ok(id) = session_count_req_rx.recv() {
-                    let count = crate::cass::search_sessions(&id, 10).len();
-                    if session_count_res_tx.send((id, count)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
         let rows: Vec<ListRow> = issues
             .iter()
             .map(|i| ListRow {
@@ -1230,11 +1186,6 @@ impl App {
             cass_modal: None,
             cass_available,
             cass_cache: std::collections::HashMap::new(),
-            session_count_tx: Some(session_count_tx),
-            session_count_rx: Some(session_count_rx),
-            session_count_pending: std::collections::HashSet::new(),
-            session_count_target: None,
-            session_count_target_at: None,
             cass_lookup_rx: None,
             cass_lookup_bead: None,
             cass_lookup_generation: 0,
@@ -1462,75 +1413,22 @@ impl App {
         self.dep_tree_nodes = nodes;
         self.dep_tree_dirty = false;
     }
-    /// Update cass session count for the selected bead (Go getCassSessionCount).
-    ///
-    /// Two layers of deferral (#9): the lookup itself is asynchronous —
-    /// `cass::search_sessions` shells out to the cass CLI with a 3s bound —
-    /// and the *request* is coalesced to the event-loop tick. This handler
-    /// runs on every j/k press, so sending here spawned one `cass search`
-    /// subprocess per bead scrolled past; instead it only records
-    /// `session_count_target`, and `poll_session_counts` issues the lookup
-    /// for the bead the cursor settled on. Cached counts apply immediately.
+    /// Update the cass session-count badge for the selected bead (Go
+    /// getCassSessionCount). Cache read only (#9): this runs on every
+    /// j/k press, and every variant of an automatic lookup — synchronous,
+    /// per-tick, or settle-gated — still spawned a `cass search`
+    /// subprocess per bead visited. Counts enter `cass_cache` exclusively
+    /// from the explicit `V` modal lookup in `poll_cass_load`, so the badge
+    /// shows data the user asked for and navigation spawns nothing.
     fn update_session_count(&mut self) {
         self.session_count = 0;
-        self.session_count_target = None;
-        self.session_count_target_at = None;
         if !self.cass_available {
             return;
         }
         let Some(row) = self.selected() else { return };
-        let id = row.id.clone();
-        if let Some(n) = self.cass_cache.get(&id) {
+        if let Some(n) = self.cass_cache.get(&row.id) {
             self.session_count = *n;
-            return;
         }
-        self.session_count_target_at = Some(std::time::Instant::now());
-        self.session_count_target = Some(id);
-    }
-
-    /// Drain completed cass session-count lookups into `cass_cache`, then
-    /// issue the pending target's request if one is owed (#9). Called from
-    /// the run loop's tick alongside `poll_cass_load` so the subprocess
-    /// work never blocks a keypress, and at most once per tick so a scroll
-    /// burst produces a single `cass search` for the settled bead.
-    /// Returns whether the status-bar badge may have changed, for the
-    /// caller's redraw skip.
-    pub fn poll_session_counts(&mut self) -> bool {
-        let mut changed = false;
-        if let Some(rx) = &self.session_count_rx {
-            while let Ok((id, count)) = rx.try_recv() {
-                self.session_count_pending.remove(&id);
-                self.cass_cache.insert(id.clone(), count);
-                if self.selected().is_some_and(|r| r.id == id) {
-                    self.session_count = count;
-                    changed = true;
-                }
-            }
-        }
-        // Issue the settled bead's lookup, if any. The settle gate is what
-        // coalesces a scroll burst: while the cursor keeps moving the
-        // target timestamp keeps resetting, so nothing is sent until the
-        // user actually stops. `pending` dedupes in-flight/queued ids; the
-        // cap bounds the backlog (each entry can cost up to cass's 3s
-        // timeout).
-        let settled = self
-            .session_count_target_at
-            .is_some_and(|t| t.elapsed() >= SESSION_COUNT_SETTLE);
-        let Some(id) = self.session_count_target.clone() else {
-            return changed;
-        };
-        if settled
-            && !self.cass_cache.contains_key(&id)
-            && !self.session_count_pending.contains(&id)
-            && self.session_count_pending.len() < SESSION_COUNT_PENDING_CAP
-            && self
-                .session_count_tx
-                .as_ref()
-                .is_some_and(|tx| tx.send(id.clone()).is_ok())
-        {
-            self.session_count_pending.insert(id);
-        }
-        changed
     }
 
     fn handle_search_key(&mut self, code: KeyCode) -> bool {
@@ -3454,8 +3352,14 @@ impl App {
         }
         if sessions.is_empty() {
             self.status_msg = format!("No correlated sessions found for {bead_id}");
+            self.cass_cache.insert(bead_id, 0);
             return true;
         }
+        // Feed the status-bar badge from the explicit lookup (#9): counts
+        // only ever enter `cass_cache` here, so `update_session_count` on
+        // cursor move is a pure cache read and navigation spawns no
+        // subprocesses.
+        self.cass_cache.insert(bead_id.clone(), sessions.len());
         let search_cmd = if keywords.is_empty() {
             format!("cass search \"{bead_id}\"")
         } else {
@@ -6257,11 +6161,7 @@ fn tui_event_loop(
             // Go `cassSessionsLoadedMsg`): the correlate walk shells out to
             // the cass CLI and must never block a keypress.
             dirty |= app.poll_cass_load();
-            // Same for the per-cursor-move cass session *count* lookups —
-            // they used to run `cass search` synchronously inside the j/k
-            // handler, blocking input for up to 3s per uncached bead (#9).
-            dirty |= app.poll_session_counts();
-            // Same for the background Time-Travel git walk (`t`/`T` keys).
+            // Same trick for the background Time-Travel git walk (`t`/`T` keys).
             dirty |= app.poll_time_travel_load();
             // Wall-clock widgets. The previous loop redrew twice a second, so a
             // badge showing "45s ago" refreshed every 500ms; redrawing once per
