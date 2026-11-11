@@ -443,6 +443,14 @@ pub struct App {
     /// startup error).
     pub watched_path: Option<std::path::PathBuf>,
     pub watched_mtime: Option<std::time::SystemTime>,
+    /// Debounce state for live reload: the last mtime seen to differ from
+    /// `watched_mtime` and when it was first observed. `check_for_reload`
+    /// only fires `reload_from_disk` once the file has been quiet for
+    /// [`RELOAD_DEBOUNCE`] — a writer touching the source repeatedly
+    /// (agent activity, `br sync`, another bvr instance) used to trigger a
+    /// full `App::new` rebuild on every ~500ms tick.
+    reload_pending_mtime: Option<std::time::SystemTime>,
+    reload_pending_since: Option<std::time::Instant>,
     /// Sprint dashboard state (loaded from .beads/sprints.jsonl).
     pub sprint: Option<crate::views::sprint::SprintState>,
     /// When the snapshot was loaded (freshness badge, Go bv-h305)
@@ -506,6 +514,17 @@ pub struct App {
     /// cass CLI availability cache
     cass_available: bool,
     cass_cache: std::collections::HashMap<String, usize>,
+    /// Background cass session-count worker (#9): the per-cursor-move
+    /// lookup used to run `cass::search_sessions` synchronously on the UI
+    /// thread — up to 3s per uncached bead per keypress. Now
+    /// `update_session_count` queues the id on `session_count_tx` and
+    /// `poll_session_counts` drains results on the event-loop tick, the
+    /// same pattern `cass_lookup_rx`/`poll_cass_load` already uses for the
+    /// `V` modal. `session_count_pending` dedupes queued/in-flight ids and
+    /// bounds the backlog (`SESSION_COUNT_PENDING_CAP`).
+    session_count_tx: Option<crossbeam_channel::Sender<String>>,
+    session_count_rx: Option<crossbeam_channel::Receiver<(String, usize)>>,
+    session_count_pending: std::collections::HashSet<String>,
     /// Go `m.cassRequest` + `cassSessionsLoadedMsg` (model.go:9582-9619):
     /// `V` queues a background `cass::correlate` — "queues a lookup without
     /// running external processes in Update" — instead of blocking the UI
@@ -781,6 +800,19 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 /// `Limit == 0`, so it is named here only to make the Go constant explicit.
 const HISTORY_COMMIT_LIMIT: i64 = 500;
 
+/// Upper bound on queued+in-flight cass session-count lookups. Each entry
+/// can cost up to cass's 3s timeout, so an unbounded backlog from a fast
+/// scroll would keep the worker busy for minutes on beads the user has
+/// already scrolled past.
+const SESSION_COUNT_PENDING_CAP: usize = 128;
+
+/// Quiet period the watched datasource must have before a live reload
+/// fires — the same value as the background worker's `DEFAULT_DEBOUNCE_MS`
+/// (`worker.rs`). The mtime poll runs on the ~500ms event tick, so the
+/// effective delay is this plus up to one tick.
+const RELOAD_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(crate::worker::DEFAULT_DEBOUNCE_MS);
+
 /// How many levels below the root the dependency tree (`D`) expands.
 ///
 /// Three matches `detail.rs`'s `max_depth: 3` and Go's `BuildDependencyTree`,
@@ -984,6 +1016,23 @@ impl App {
             .count();
         let alerts_total = alerts.len();
         let row_triage = bv_analysis::triage::compute_row_triage(&issues);
+        // Background cass session-count worker (#9): one thread per App,
+        // fed by `update_session_count` and drained by `poll_session_counts`.
+        // It exits when the request sender drops (App replaced on reload).
+        let cass_available = cass_installed();
+        let (session_count_tx, session_count_req_rx) = crossbeam_channel::unbounded::<String>();
+        let (session_count_res_tx, session_count_rx) =
+            crossbeam_channel::unbounded::<(String, usize)>();
+        if cass_available {
+            std::thread::spawn(move || {
+                while let Ok(id) = session_count_req_rx.recv() {
+                    let count = crate::cass::search_sessions(&id, 10).len();
+                    if session_count_res_tx.send((id, count)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
         let rows: Vec<ListRow> = issues
             .iter()
             .map(|i| ListRow {
@@ -1047,6 +1096,8 @@ impl App {
             priority_hints: None,
             watched_path: None,
             watched_mtime: None,
+            reload_pending_mtime: None,
+            reload_pending_since: None,
             sprint: None,
             filtered_indices: Vec::new(),
             cursor: 0,
@@ -1089,8 +1140,11 @@ impl App {
             workspace_repos: None,
             active_repo: None,
             cass_modal: None,
-            cass_available: cass_installed(),
+            cass_available,
             cass_cache: std::collections::HashMap::new(),
+            session_count_tx: Some(session_count_tx),
+            session_count_rx: Some(session_count_rx),
+            session_count_pending: std::collections::HashSet::new(),
             cass_lookup_rx: None,
             cass_lookup_bead: None,
             cass_lookup_generation: 0,
@@ -1180,8 +1234,29 @@ impl App {
             return false; // file briefly missing mid-write — try again next tick
         };
         if self.watched_mtime == Some(current_mtime) {
+            self.reload_pending_mtime = None;
+            self.reload_pending_since = None;
             return false;
         }
+        // Debounce (#9): a writer that keeps touching the source (agent
+        // activity, `br sync`, another bvr instance) used to trigger a full
+        // `App::new` rebuild on every ~500ms tick — constant reloads, each
+        // one synchronous on the UI thread. Wait until the mtime has been
+        // quiet for RELOAD_DEBOUNCE; every new mtime restarts the quiet
+        // period, matching the worker's debounce semantics (`worker.rs`).
+        if self.reload_pending_mtime != Some(current_mtime) {
+            self.reload_pending_mtime = Some(current_mtime);
+            self.reload_pending_since = Some(std::time::Instant::now());
+            return false;
+        }
+        let quiet = self
+            .reload_pending_since
+            .is_some_and(|t| t.elapsed() >= RELOAD_DEBOUNCE);
+        if !quiet {
+            return false;
+        }
+        self.reload_pending_mtime = None;
+        self.reload_pending_since = None;
         self.reload_from_disk();
         true
     }
@@ -1291,6 +1366,13 @@ impl App {
         self.dep_tree_nodes = nodes;
     }
     /// Update cass session count for the selected bead (Go getCassSessionCount).
+    ///
+    /// The lookup is asynchronous (#9): `cass::search_sessions` shells out
+    /// to the cass CLI with a 3s bound, and running it here blocked the UI
+    /// thread for up to 3s *per cursor move* onto an uncached bead. Cached
+    /// counts apply immediately; misses queue a request on the background
+    /// worker, drained by `poll_session_counts` on the event-loop tick —
+    /// the same pattern `open_cass_modal`/`poll_cass_load` uses for `V`.
     fn update_session_count(&mut self) {
         self.session_count = 0;
         if !self.cass_available {
@@ -1302,12 +1384,41 @@ impl App {
             self.session_count = *n;
             return;
         }
-        // Bounded shell-out (Go `Correlate`'s 3s context): the previous
-        // `Command::output()` here had no timeout and ran on the UI thread
-        // on every cursor move onto an uncached bead.
-        let count = crate::cass::search_sessions(&id, 10).len();
-        self.cass_cache.insert(id, count);
-        self.session_count = count;
+        // Dedupe + bound the backlog: a fast scroll through hundreds of
+        // uncached beads must not queue hundreds of 3s-timeout searches.
+        if self.session_count_pending.len() >= SESSION_COUNT_PENDING_CAP {
+            return;
+        }
+        if !self.session_count_pending.insert(id.clone()) {
+            return; // already queued or in flight
+        }
+        let queued = self
+            .session_count_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(id.clone()).is_ok());
+        if !queued {
+            self.session_count_pending.remove(&id);
+        }
+    }
+
+    /// Drain completed cass session-count lookups into `cass_cache`.
+    /// Called from the run loop's tick alongside `poll_cass_load` so the
+    /// subprocess work never blocks a keypress. Returns whether the
+    /// status-bar badge may have changed, for the caller's redraw skip.
+    pub fn poll_session_counts(&mut self) -> bool {
+        let Some(rx) = &self.session_count_rx else {
+            return false;
+        };
+        let mut changed = false;
+        while let Ok((id, count)) = rx.try_recv() {
+            self.session_count_pending.remove(&id);
+            self.cass_cache.insert(id.clone(), count);
+            if self.selected().is_some_and(|r| r.id == id) {
+                self.session_count = count;
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn handle_search_key(&mut self, code: KeyCode) -> bool {
@@ -4015,11 +4126,29 @@ impl App {
         // `App::new` resets session-scoped state; carry over what a
         // reload must not clobber: terminal geometry (the next
         // `handle_resize` may be seconds away), the resolved theme,
-        // the update notice, and the instance-lock PID.
+        // the update notice, the instance-lock PID — and the navigation
+        // state (#9): cursor, filters, sort, view, detail pane. Without
+        // this every external write snapped the user back to row 0 in
+        // the List view.
         let (width, height, split_view) = (self.width, self.height, self.split_view);
         let theme = self.theme.clone();
         let (update_tag, update_url) = (self.update_tag.clone(), self.update_url.clone());
         let instance_pid = self.instance_pid;
+        let cursor = self.cursor;
+        let selected_id = self.selected().map(|r| r.id.clone());
+        let filter_mode = self.filter_mode;
+        let sort_mode = self.sort_mode;
+        let current_view = self.current_view;
+        let show_detail = self.show_detail;
+        let focus_detail = self.focus_detail;
+        let detail_scroll = self.detail_scroll;
+        let left_tree_mode = self.left_tree_mode;
+        let board_mode = self.board_mode;
+        let board_column = self.board_column;
+        let searching = self.searching;
+        let search_query = self.search_query.clone();
+        let label_filter = self.label_filter.clone();
+        let active_repo = self.active_repo.clone();
         let mut fresh = App::new(issues);
         fresh.width = width;
         fresh.height = height;
@@ -4028,6 +4157,37 @@ impl App {
         fresh.update_tag = update_tag;
         fresh.update_url = update_url;
         fresh.instance_pid = instance_pid;
+        fresh.filter_mode = filter_mode;
+        fresh.sort_mode = sort_mode;
+        fresh.current_view = current_view;
+        fresh.show_detail = show_detail;
+        fresh.focus_detail = focus_detail;
+        fresh.detail_scroll = detail_scroll;
+        fresh.left_tree_mode = left_tree_mode;
+        fresh.board_mode = board_mode;
+        fresh.board_column = board_column;
+        fresh.searching = searching;
+        fresh.search_query = search_query;
+        fresh.label_filter = label_filter;
+        fresh.active_repo = active_repo;
+        // Rebuild filtered_indices under the restored modes, then put the
+        // cursor back on the same bead when it still exists (issues may
+        // have been added, removed, or reordered while the file was being
+        // written); fall back to the clamped old index.
+        if fresh.searching && !fresh.search_query.is_empty() {
+            fresh.apply_search();
+        } else {
+            fresh.apply_filter();
+        }
+        fresh.cursor = selected_id
+            .as_ref()
+            .and_then(|id| {
+                fresh
+                    .filtered_indices
+                    .iter()
+                    .position(|&i| fresh.rows[i].id == *id)
+            })
+            .unwrap_or_else(|| cursor.min(fresh.filtered_indices.len().saturating_sub(1)));
         *self = fresh;
         self.status_msg = "Refreshed".to_string();
     }
@@ -5903,6 +6063,10 @@ fn tui_event_loop(
             // Go `cassSessionsLoadedMsg`): the correlate walk shells out to
             // the cass CLI and must never block a keypress.
             dirty |= app.poll_cass_load();
+            // Same for the per-cursor-move cass session *count* lookups —
+            // they used to run `cass search` synchronously inside the j/k
+            // handler, blocking input for up to 3s per uncached bead (#9).
+            dirty |= app.poll_session_counts();
             // Same for the background Time-Travel git walk (`t`/`T` keys).
             dirty |= app.poll_time_travel_load();
             // Wall-clock widgets. The previous loop redrew twice a second, so a
@@ -6932,10 +7096,43 @@ mod tests {
         // guarantee a strictly-later timestamp on the rewrite below.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&path, "{}\n").unwrap();
+        // The first changed-mtime observation only arms the debounce (#9)
+        // — a still-being-written file must not trigger a reload.
+        assert!(
+            !app.check_for_reload(),
+            "first mtime change must arm the debounce, not reload"
+        );
+        std::thread::sleep(RELOAD_DEBOUNCE + std::time::Duration::from_millis(50));
         assert!(
             app.check_for_reload(),
-            "changed mtime must trigger reload_from_disk"
+            "a quiet mtime must trigger reload_from_disk"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_for_reload_debounce_restarts_on_new_writes() {
+        let mut app = make_app(2);
+        let dir =
+            std::env::temp_dir().join(format!("bvr_watch_debounce_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("issues.jsonl");
+        std::fs::write(&path, "").unwrap();
+        app.watched_path = Some(path.clone());
+        app.watched_mtime = Some(std::fs::metadata(&path).unwrap().modified().unwrap());
+        // Arm the debounce, then keep writing inside the quiet window —
+        // each new mtime restarts it, so no reload may fire.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "{}\n").unwrap();
+        assert!(!app.check_for_reload());
+        for i in 0..3 {
+            std::thread::sleep(RELOAD_DEBOUNCE / 2);
+            std::fs::write(&path, format!("{{}}\n{i}\n")).unwrap();
+            assert!(
+                !app.check_for_reload(),
+                "a still-changing mtime must keep deferring the reload"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
