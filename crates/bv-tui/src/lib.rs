@@ -161,6 +161,17 @@ pub type TimeTravelLoad = (u64, String, Result<Vec<bv_core::model::Issue>, Strin
 /// `(generation, bead_id, sessions, keywords)`.
 pub type CassLookup = (u64, String, Vec<crate::cass::ScoredSession>, Vec<String>);
 
+/// Cached detail-pane content for one selected issue — see
+/// [`App::detail_cache`]. The validity key mirrors every input
+/// `render_detail` reads besides the issue itself.
+struct DetailCache {
+    issue_id: String,
+    has_graph_metrics: bool,
+    update_tag: Option<String>,
+    update_url: Option<String>,
+    lines: Vec<Line<'static>>,
+}
+
 /// Application state (Elm model).
 /// Stores computed graph metrics for rendering views.
 #[derive(Default, Clone)]
@@ -345,6 +356,12 @@ pub struct App {
     pub dep_tree_nodes: Vec<crate::views::deptree::DepNode>,
     /// The slice of `dep_tree_nodes` painted last frame.
     pub dep_tree_window: std::ops::Range<usize>,
+    /// `dep_tree_nodes` is stale and must be rebuilt before the next paint.
+    /// Set wherever `filtered_indices` is rewritten without going through
+    /// `apply_filter` (fuzzy/semantic search); cleared by
+    /// `rebuild_dep_tree`. Without it `render_list` rebuilt the whole tree
+    /// — hashmaps + a walk over every filtered issue — on *every frame*.
+    dep_tree_dirty: bool,
     /// Cursor position within the Alerts view list.
     pub alerts_cursor: usize,
     /// Cross-label flow data for the FlowMatrix view.
@@ -443,6 +460,19 @@ pub struct App {
     /// startup error).
     pub watched_path: Option<std::path::PathBuf>,
     pub watched_mtime: Option<std::time::SystemTime>,
+    /// Debounce state for live reload: the last mtime seen to differ from
+    /// `watched_mtime` and when it was first observed. `check_for_reload`
+    /// only spawns [`Self::spawn_background_reload`] once the file has
+    /// been quiet for [`RELOAD_DEBOUNCE`] — a writer touching the source
+    /// repeatedly (agent activity, `br sync`, another bvr instance) used
+    /// to trigger a full `App::new` rebuild on every ~500ms tick.
+    reload_pending_mtime: Option<std::time::SystemTime>,
+    reload_pending_since: Option<std::time::Instant>,
+    /// In-flight background live-reload (#9): `Some` while a worker thread
+    /// is running `load_issues` + `App::new` off the UI thread. Drained by
+    /// `poll_background_reload`; dropping it (manual Ctrl+R, App drop)
+    /// cancels the pending result.
+    reload_rx: Option<crossbeam_channel::Receiver<Result<App, String>>>,
     /// Sprint dashboard state (loaded from .beads/sprints.jsonl).
     pub sprint: Option<crate::views::sprint::SprintState>,
     /// When the snapshot was loaded (freshness badge, Go bv-h305)
@@ -475,6 +505,25 @@ pub struct App {
     /// `--robot-triage`'s builders) and read at render time. Empty until
     /// `App::new` fills it — render treats a missing entry as no decoration.
     pub row_triage: std::collections::HashMap<String, bv_analysis::triage::RowTriage>,
+    /// Cached detail-pane lines for the selected issue (#9 perf):
+    /// `build_detail_lines` walks the whole dependency subtree and formats
+    /// every description/design/notes/comments line, and `render_detail`
+    /// ran it on *every frame* — every keypress and every 1s tick — even
+    /// when the selection hadn't moved. Issues are immutable for the life
+    /// of an `App` (reload replaces the whole `App`), so the cache key is
+    /// the issue id plus the inputs that also feed the pane: graph-metrics
+    /// presence and the update notice.
+    detail_cache: Option<DetailCache>,
+    /// Status-bar counters, computed once in `App::new` — `rows` never
+    /// mutates in place, so the three `iter().filter().count()` passes
+    /// `render_status_bar` used to run per frame were constant.
+    status_open_count: usize,
+    status_blocked_count: usize,
+    status_closed_count: usize,
+    /// Freshness-badge thresholds (`BV_FRESHNESS_WARN_S`/`_STALE_S`),
+    /// resolved once at startup instead of two `env::var` lookups per frame.
+    freshness_warn_s: u64,
+    freshness_stale_s: u64,
     /// Quit-confirmation overlay (Go `showQuitConfirm` / `focusQuitConfirm`):
     /// at the main list, first Esc clears filters, second Esc shows this
     /// confirm box; Esc/Y quits, any other key cancels back to the list.
@@ -505,6 +554,12 @@ pub struct App {
     pub cass_modal: Option<crate::cass::CassModalState>,
     /// cass CLI availability cache
     cass_available: bool,
+    /// Bead-id → session count for the `💼 sessions` status badge. Populated
+    /// only by explicit user action — the `V` modal's `cass::correlate`
+    /// result (`poll_cass_load`) — never automatically on cursor move: the
+    /// original implementation ran `cass search` synchronously per j/k
+    /// (#9), and every async variant still spawned a subprocess per bead
+    /// visited. Cursor movement now only reads this cache.
     cass_cache: std::collections::HashMap<String, usize>,
     /// Go `m.cassRequest` + `cassSessionsLoadedMsg` (model.go:9582-9619):
     /// `V` queues a background `cass::correlate` — "queues a lookup without
@@ -532,6 +587,9 @@ pub struct App {
     pub agent_prompt_modal: Option<crate::agent_prompt_modal::AgentPromptModal>,
     /// Velocity-comparison overlay inside Sprint view (Go `v` sub-toggle).
     pub show_velocity: bool,
+    /// Lazily built velocity model, cached for the App's lifetime — see
+    /// [`App::velocity_model`].
+    velocity_model: Option<crate::views::velocity_comparison::VelocityComparisonModel>,
     /// Theme for consistent styling. Resolved from `--theme` > `BV_THEME` >
     /// `~/.config/bv/config.yaml` > auto — call
     /// [`App::apply_theme_preference`] once after [`App::new`] to install it.
@@ -781,6 +839,13 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 /// `Limit == 0`, so it is named here only to make the Go constant explicit.
 const HISTORY_COMMIT_LIMIT: i64 = 500;
 
+/// Quiet period the watched datasource must have before a live reload
+/// fires — the same value as the background worker's `DEFAULT_DEBOUNCE_MS`
+/// (`worker.rs`). The mtime poll runs on the ~500ms event tick, so the
+/// effective delay is this plus up to one tick.
+const RELOAD_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(crate::worker::DEFAULT_DEBOUNCE_MS);
+
 /// How many levels below the root the dependency tree (`D`) expands.
 ///
 /// Three matches `detail.rs`'s `max_depth: 3` and Go's `BuildDependencyTree`,
@@ -984,6 +1049,7 @@ impl App {
             .count();
         let alerts_total = alerts.len();
         let row_triage = bv_analysis::triage::compute_row_triage(&issues);
+        let cass_available = cass_installed();
         let rows: Vec<ListRow> = issues
             .iter()
             .map(|i| ListRow {
@@ -1000,10 +1066,35 @@ impl App {
                 repo_prefix: issue_repo_key(&i.id, &i.source_repo),
             })
             .collect();
+        // Status-bar counters are constant for the App's lifetime — `rows`
+        // is never mutated in place (a reload replaces the whole `App`).
+        let status_open_count = rows
+            .iter()
+            .filter(|r| matches!(r.status, Status::Open))
+            .count();
+        let status_blocked_count = rows
+            .iter()
+            .filter(|r| matches!(r.status, Status::Blocked))
+            .count();
+        let status_closed_count = rows.iter().filter(|r| r.status.is_closed()).count();
+        let freshness_warn_s = std::env::var("BV_FRESHNESS_WARN_S")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        let freshness_stale_s = std::env::var("BV_FRESHNESS_STALE_S")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120);
         let mut app = App {
             rows,
             issue_map,
             row_triage,
+            detail_cache: None,
+            status_open_count,
+            status_blocked_count,
+            status_closed_count,
+            freshness_warn_s,
+            freshness_stale_s,
             alerts_critical: a_crit,
             alerts_warning: a_warn,
             alerts_total,
@@ -1012,6 +1103,7 @@ impl App {
             left_tree_mode: true,
             dep_tree_nodes: Vec::new(),
             dep_tree_window: 0..0,
+            dep_tree_dirty: false,
             alerts_cursor: 0,
             flow: None,
             flow_cursor: 0,
@@ -1047,6 +1139,9 @@ impl App {
             priority_hints: None,
             watched_path: None,
             watched_mtime: None,
+            reload_pending_mtime: None,
+            reload_pending_since: None,
+            reload_rx: None,
             sprint: None,
             filtered_indices: Vec::new(),
             cursor: 0,
@@ -1089,7 +1184,7 @@ impl App {
             workspace_repos: None,
             active_repo: None,
             cass_modal: None,
-            cass_available: cass_installed(),
+            cass_available,
             cass_cache: std::collections::HashMap::new(),
             cass_lookup_rx: None,
             cass_lookup_bead: None,
@@ -1103,6 +1198,7 @@ impl App {
             show_agent_prompt: false,
             agent_prompt_modal: None,
             show_velocity: false,
+            velocity_model: None,
             theme: crate::theme::Theme::default(),
             key_registry: crate::keybindings::build_default_registry(),
         };
@@ -1163,14 +1259,15 @@ impl App {
             .and_then(|m| m.modified().ok());
     }
 
-    /// Poll the watched file's mtime and reload if it changed externally.
-    /// Called from the terminal event loop's existing ~500ms poll tick
-    /// (`tui_event_loop`) — no background thread, no `notify` watcher
-    /// dependency; same user-visible effect ("editing issues.jsonl updates
-    /// the TUI without a manual keypress") with fewer moving parts. A no-op
-    /// when `watched_path` is `None` (discovery failed or unsupported
-    /// datasource). Returns true if a reload happened, for the caller to
-    /// avoid double-work in the same tick.
+    /// Poll the watched file's mtime and, once it has been quiet for
+    /// [`RELOAD_DEBOUNCE`], hand the rebuild to a background worker
+    /// ([`Self::spawn_background_reload`]). Called from the terminal event
+    /// loop's existing ~500ms poll tick (`tui_event_loop`) — no `notify`
+    /// watcher dependency; same user-visible effect ("editing issues.jsonl
+    /// updates the TUI without a manual keypress") with fewer moving
+    /// parts. A no-op when `watched_path` is `None` (discovery failed or
+    /// unsupported datasource). Returns true when a reload was *spawned*,
+    /// for the caller to repaint the "Refreshing…" status.
     pub fn check_for_reload(&mut self) -> bool {
         let Some(path) = &self.watched_path else {
             return false;
@@ -1180,9 +1277,33 @@ impl App {
             return false; // file briefly missing mid-write — try again next tick
         };
         if self.watched_mtime == Some(current_mtime) {
+            self.reload_pending_mtime = None;
+            self.reload_pending_since = None;
             return false;
         }
-        self.reload_from_disk();
+        // Debounce (#9): a writer that keeps touching the source (agent
+        // activity, `br sync`, another bvr instance) used to trigger a full
+        // `App::new` rebuild on every ~500ms tick — constant reloads, each
+        // one synchronous on the UI thread. Wait until the mtime has been
+        // quiet for RELOAD_DEBOUNCE; every new mtime restarts the quiet
+        // period, matching the worker's debounce semantics (`worker.rs`).
+        if self.reload_pending_mtime != Some(current_mtime) {
+            self.reload_pending_mtime = Some(current_mtime);
+            self.reload_pending_since = Some(std::time::Instant::now());
+            return false;
+        }
+        let quiet = self
+            .reload_pending_since
+            .is_some_and(|t| t.elapsed() >= RELOAD_DEBOUNCE);
+        if !quiet {
+            return false;
+        }
+        self.reload_pending_mtime = None;
+        self.reload_pending_since = None;
+        // Hand the rebuild to a worker thread — `load_issues` + `App::new`
+        // (incl. `git rev-parse` datasource discovery) must not freeze
+        // input (#9). The result lands via `poll_background_reload`.
+        self.spawn_background_reload();
         true
     }
     /// The status-mode + label + repo predicate shared by `apply_filter`
@@ -1222,11 +1343,12 @@ impl App {
         // Reverse(id))` order — changing it would rebaseline every golden.)
         match self.sort_mode {
             SortMode::Default => {
-                self.filtered_indices.sort_by_key(|&i| {
-                    (
-                        self.rows[i].priority,
-                        std::cmp::Reverse(self.rows[i].id.clone()),
-                    )
+                // Borrow the id for the tiebreak — `sort_by_key` with
+                // `id.clone()` allocated a String per comparison.
+                let rows = &self.rows;
+                self.filtered_indices.sort_by(|&a, &b| {
+                    (rows[a].priority, std::cmp::Reverse(rows[a].id.as_str()))
+                        .cmp(&(rows[b].priority, std::cmp::Reverse(rows[b].id.as_str())))
                 });
             }
             _ => {
@@ -1289,25 +1411,24 @@ impl App {
             self.cursor,
         );
         self.dep_tree_nodes = nodes;
+        self.dep_tree_dirty = false;
     }
-    /// Update cass session count for the selected bead (Go getCassSessionCount).
+    /// Update the cass session-count badge for the selected bead (Go
+    /// getCassSessionCount). Cache read only (#9): this runs on every
+    /// j/k press, and every variant of an automatic lookup — synchronous,
+    /// per-tick, or settle-gated — still spawned a `cass search`
+    /// subprocess per bead visited. Counts enter `cass_cache` exclusively
+    /// from the explicit `V` modal lookup in `poll_cass_load`, so the badge
+    /// shows data the user asked for and navigation spawns nothing.
     fn update_session_count(&mut self) {
         self.session_count = 0;
         if !self.cass_available {
             return;
         }
         let Some(row) = self.selected() else { return };
-        let id = row.id.clone();
-        if let Some(n) = self.cass_cache.get(&id) {
+        if let Some(n) = self.cass_cache.get(&row.id) {
             self.session_count = *n;
-            return;
         }
-        // Bounded shell-out (Go `Correlate`'s 3s context): the previous
-        // `Command::output()` here had no timeout and ran on the UI thread
-        // on every cursor move onto an uncached bead.
-        let count = crate::cass::search_sessions(&id, 10).len();
-        self.cass_cache.insert(id, count);
-        self.session_count = count;
     }
 
     fn handle_search_key(&mut self, code: KeyCode) -> bool {
@@ -1386,6 +1507,7 @@ impl App {
         let idx: Vec<usize> = scored.into_iter().map(|(_, i)| i).collect();
         self.filtered_indices = idx;
         self.cursor = 0;
+        self.dep_tree_dirty = true;
     }
     /// Semantic search input (Ctrl+S mode): Esc clears and exits, Enter
     /// accepts (back to the standard filter order), typing re-ranks, Tab
@@ -1556,6 +1678,7 @@ impl App {
         });
         self.filtered_indices = scored.into_iter().map(|(_, i)| i).collect();
         self.cursor = 0;
+        self.dep_tree_dirty = true;
     }
 
     /// Fresh hash-embed text scores for every row (fallback when no
@@ -2911,6 +3034,11 @@ impl App {
             _ => {}
         }
         self.cursor = 0;
+        // Recipes mutate `filtered_indices` after `apply_filter` already
+        // rebuilt the dep tree — without this the cached tree's
+        // `filtered_pos` indices go stale and `render_list` can index out
+        // of bounds on the next frame.
+        self.dep_tree_dirty = true;
         self.status_msg = format!("Recipe: {}", def.name);
     }
 
@@ -3229,8 +3357,16 @@ impl App {
         }
         if sessions.is_empty() {
             self.status_msg = format!("No correlated sessions found for {bead_id}");
+            self.cass_cache.insert(bead_id, 0);
+            self.update_session_count();
             return true;
         }
+        // Feed the status-bar badge from the explicit lookup (#9): counts
+        // only ever enter `cass_cache` here, so `update_session_count` on
+        // cursor move is a pure cache read and navigation spawns no
+        // subprocesses.
+        self.cass_cache.insert(bead_id.clone(), sessions.len());
+        self.update_session_count();
         let search_cmd = if keywords.is_empty() {
             format!("cass search \"{bead_id}\"")
         } else {
@@ -3289,15 +3425,24 @@ impl App {
 
     /// Go's `velocityComparison` model (model.go:770, :1736, :1923). Go
     /// computes it from `analysis.ComputeAllHistoricalVelocity(issues, 4, now)`
-    /// and holds it on the model, refreshing it in `SetData`; Rust rebuilds it
-    /// from the live issue set each time the view is opened, which is the same
-    /// data without a stale cache to invalidate.
-    fn velocity_comparison(&self) -> crate::views::velocity_comparison::VelocityComparisonModel {
-        let mut model =
-            crate::views::velocity_comparison::VelocityComparisonModel::new(self.theme.clone());
-        let issues: Vec<bv_core::model::Issue> = self.issue_map.values().cloned().collect();
-        model.set_size(self.width as usize, self.height as usize);
-        model.set_data(&issues);
+    /// and holds it on the model, refreshing it in `SetData`.
+    ///
+    /// Cached per `App` (#9 perf): issues are immutable for the App's
+    /// lifetime (a reload replaces the whole `App`), so cloning every
+    /// issue and recomputing the velocity rows ran once at first open
+    /// instead of on every frame the overlay was visible. `set_size`
+    /// still runs each call so terminal resizes take effect.
+    fn velocity_model(&mut self) -> &crate::views::velocity_comparison::VelocityComparisonModel {
+        if self.velocity_model.is_none() {
+            let mut model =
+                crate::views::velocity_comparison::VelocityComparisonModel::new(self.theme.clone());
+            let issues: Vec<bv_core::model::Issue> = self.issue_map.values().cloned().collect();
+            model.set_data(&issues);
+            self.velocity_model = Some(model);
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let model = self.velocity_model.as_mut().unwrap();
+        model.set_size(w, h);
         model
     }
 
@@ -4001,6 +4146,13 @@ impl App {
 
     /// Reload issues from disk (Go Ctrl+R refresh).
     pub fn reload_from_disk(&mut self) {
+        // A manual reload supersedes any in-flight background one: drop the
+        // channel so the worker's send fails and its (now stale) App is
+        // discarded instead of double-applying.
+        self.reload_rx = None;
+        // Capture the watched mtime before loading (same race as the
+        // background worker — see `spawn_background_reload`).
+        let pre_mtime = self.current_watched_mtime();
         let cwd = std::env::current_dir().unwrap_or_default();
         // Go's Ctrl+R reload goes through `datasource.LoadIssues` — the same
         // freshness-selected source as startup (beads.db may beat issues.jsonl).
@@ -4012,24 +4164,184 @@ impl App {
             }
             None => loaded.issues,
         };
-        // `App::new` resets session-scoped state; carry over what a
-        // reload must not clobber: terminal geometry (the next
-        // `handle_resize` may be seconds away), the resolved theme,
-        // the update notice, and the instance-lock PID.
-        let (width, height, split_view) = (self.width, self.height, self.split_view);
-        let theme = self.theme.clone();
-        let (update_tag, update_url) = (self.update_tag.clone(), self.update_url.clone());
-        let instance_pid = self.instance_pid;
         let mut fresh = App::new(issues);
-        fresh.width = width;
-        fresh.height = height;
-        fresh.split_view = split_view;
-        fresh.theme = theme;
-        fresh.update_tag = update_tag;
-        fresh.update_url = update_url;
-        fresh.instance_pid = instance_pid;
+        // Only reuse the pre-load mtime when the watch target didn't flip
+        // (e.g. beads.db vs issues.jsonl freshness winner changed) — a
+        // mismatched stamp would fake a perpetual "changed" signal.
+        if fresh.watched_path.is_some() && fresh.watched_path == self.watched_path {
+            fresh.watched_mtime = pre_mtime.or(fresh.watched_mtime);
+        }
+        self.adopt_fresh_app(fresh);
+    }
+
+    /// The watched datasource file's current mtime, resolved the same way
+    /// `refresh_watch_target` picks the path — used to stamp a rebuilt App
+    /// with the pre-load mtime so mid-load writes still trigger a follow-up
+    /// reload instead of being marked "already seen".
+    fn current_watched_mtime(&self) -> Option<std::time::SystemTime> {
+        let path = self.watched_path.as_ref()?;
+        std::fs::metadata(path).ok()?.modified().ok()
+    }
+
+    /// Adopt a freshly built App: carry over the session/UI state a reload
+    /// must preserve, then kick the lazy-view loaders for the preserved
+    /// `current_view` — their entry keys already fired, so without this the
+    /// view strands on "Loading…"/"No data". Shared by the synchronous
+    /// Ctrl+R path and the background live-reload poll.
+    fn adopt_fresh_app(&mut self, mut fresh: App) {
+        Self::carry_over_ui_state(self, &mut fresh);
         *self = fresh;
+        match self.current_view {
+            ViewMode::LabelDashboard => self.load_label_health_if_needed(),
+            ViewMode::History => self.load_history_if_needed(),
+            ViewMode::Sprint => self.load_sprint_if_needed(),
+            ViewMode::Actionable => self.load_actionable_if_needed(),
+            _ => {}
+        }
         self.status_msg = "Refreshed".to_string();
+    }
+
+    /// Move the session/UI state a reload must preserve from `old` onto
+    /// the freshly built `new` App: terminal geometry (the next
+    /// `handle_resize` may be seconds away), the resolved theme, the
+    /// update notice, the instance-lock PID — and the navigation state
+    /// (#9): cursor, filters, sort, view, detail pane. Without this every
+    /// external write snapped the user back to row 0 in the List view.
+    ///
+    /// Shared by the synchronous Ctrl+R path (`reload_from_disk`) and the
+    /// background live-reload path (`poll_background_reload`).
+    fn carry_over_ui_state(old: &App, new: &mut App) {
+        new.width = old.width;
+        new.height = old.height;
+        new.split_view = old.split_view;
+        new.theme = old.theme.clone();
+        new.update_tag = old.update_tag.clone();
+        new.update_url = old.update_url.clone();
+        new.instance_pid = old.instance_pid;
+        new.filter_mode = old.filter_mode;
+        new.sort_mode = old.sort_mode;
+        new.current_view = old.current_view;
+        new.show_detail = old.show_detail;
+        new.focus_detail = old.focus_detail;
+        new.detail_scroll = old.detail_scroll;
+        new.left_tree_mode = old.left_tree_mode;
+        new.board_mode = old.board_mode;
+        new.board_column = old.board_column;
+        new.searching = old.searching;
+        new.search_query = old.search_query.clone();
+        new.label_filter = old.label_filter.clone();
+        new.active_repo = old.active_repo.clone();
+        // Data caches: `workspace_repos`/`graph_metrics` are injected by
+        // the binary after `App::new`, and `cass_cache` is populated by
+        // explicit `V` lookups — a reload must not silently drop them.
+        // `graph_metrics` describes the pre-reload issue set, so it can
+        // be slightly stale if issues changed; dropping it instead would
+        // lose Insights/detail scores until restart, which is worse.
+        new.workspace_repos = old.workspace_repos.clone();
+        new.graph_metrics = old.graph_metrics.clone();
+        new.cass_cache = old.cass_cache.clone();
+        // Plain view prefs worth keeping across a reload.
+        new.show_sidebar = old.show_sidebar;
+        new.show_priority_hints = old.show_priority_hints;
+        new.show_velocity = old.show_velocity;
+        new.tree_collapsed = old.tree_collapsed.clone();
+        // Rebuild filtered_indices under the restored modes, then put the
+        // cursor back on the same bead when it still exists (issues may
+        // have been added, removed, or reordered while the file was being
+        // written); fall back to the clamped old index.
+        if new.searching && !new.search_query.is_empty() {
+            new.apply_search();
+        } else {
+            new.apply_filter();
+        }
+        let selected_id = old.selected().map(|r| r.id.clone());
+        new.cursor = selected_id
+            .as_ref()
+            .and_then(|id| {
+                new.filtered_indices
+                    .iter()
+                    .position(|&i| new.rows[i].id == *id)
+            })
+            .unwrap_or_else(|| old.cursor.min(new.filtered_indices.len().saturating_sub(1)));
+    }
+
+    /// Spawn the background live-reload worker (#9): `load_issues` +
+    /// `App::new` (datasource read, full graph/triage/label-health rebuild,
+    /// and `refresh_watch_target`'s `git rev-parse` discovery — ~600ms on
+    /// Windows) used to run synchronously inside `check_for_reload`, so
+    /// every debounced external write froze input for hundreds of ms.
+    /// The built `App` comes back over `reload_rx` and is applied by
+    /// `poll_background_reload` on the event-loop tick. At most one reload
+    /// is in flight; a manual Ctrl+R (`reload_from_disk`) drops the
+    /// channel, which fails the worker's send and discards its result.
+    fn spawn_background_reload(&mut self) {
+        if self.reload_rx.is_some() {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let old_watched_path = self.watched_path.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.reload_rx = Some(rx);
+        self.status_msg = "Refreshing…".to_string();
+        std::thread::spawn(move || {
+            // Capture the watched file's mtime *before* loading. `App::new`
+            // re-stamps `watched_mtime` after its (slow) build, so a write
+            // landing mid-load would be marked "already seen" and the TUI
+            // would keep stale data forever. Stamping the pre-load mtime
+            // makes any mid-load write look newer to `check_for_reload`,
+            // which then schedules one more (converging) reload.
+            let pre_mtime = (|| {
+                let dir = bv_core::discovery::get_beads_dir(&cwd).ok()?;
+                let repo = dir.parent().unwrap_or(&cwd);
+                let src = bv_core::datasource::freshest_source_path(&dir, repo)?;
+                std::fs::metadata(src).ok()?.modified().ok()
+            })();
+            let (loaded, err) = bv_core::datasource::load_issues(&cwd);
+            let result = match err {
+                Some(e) => Err(e),
+                None => {
+                    let mut app = App::new(loaded.issues);
+                    // Same guard as `reload_from_disk`: only reuse the
+                    // pre-load mtime when the watch target didn't flip.
+                    if app.watched_path.is_some() && app.watched_path == old_watched_path {
+                        app.watched_mtime = pre_mtime.or(app.watched_mtime);
+                    }
+                    Ok(app)
+                }
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed background reload and adopt it (#9). Called from
+    /// the run loop's tick next to `check_for_reload`. Returns whether
+    /// visible state changed (a reload landed or an error status was
+    /// set), for the caller's redraw skip.
+    pub fn poll_background_reload(&mut self) -> bool {
+        let Some(rx) = &self.reload_rx else {
+            return false;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(crossbeam_channel::TryRecvError::Empty) => return false,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                // Worker died without sending — don't wedge the watch, and
+                // don't leave the "Refreshing…" status up forever.
+                self.reload_rx = None;
+                self.status_msg = "Refresh failed: reload worker stopped".to_string();
+                return false;
+            }
+        };
+        self.reload_rx = None;
+        match result {
+            Err(e) => {
+                self.status_msg = format!("Refresh failed: {e}");
+            }
+            Ok(fresh) => {
+                self.adopt_fresh_app(fresh);
+            }
+        }
+        true
     }
 }
 
@@ -4219,8 +4531,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 f.render_widget(msg, f.area());
             }
             if app.show_velocity {
-                let model = app.velocity_comparison();
-                crate::views::velocity_comparison::render_velocity_comparison(f, &model, f.area());
+                let model = app.velocity_model();
+                crate::views::velocity_comparison::render_velocity_comparison(f, model, f.area());
             }
             render_status_bar(f, app);
             render_overlays(f, app);
@@ -4976,10 +5288,14 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     // tree's, and `painted_row_for_screen` indexes `dep_tree_nodes` by the
     // same offset `handle_mouse` subtracts.
     if app.left_tree_mode {
-        // Rebuild here as well as in `apply_filter`: the resize that lands
-        // between two keystrokes changes `row_capacity`, and a rebuild is
-        // cheap (borrowed slices, no clones — see `views/tree.rs`).
-        app.rebuild_dep_tree();
+        // Rebuild only when the filtered set changed since the last build
+        // (`apply_filter`, fuzzy/semantic search, the `D` toggle all mark
+        // or perform it). Cursor moves and resizes leave the tree itself
+        // untouched — rebuilding it every frame was an O(filtered) pass
+        // of hashmap inserts plus a full tree walk per repaint.
+        if app.dep_tree_dirty {
+            app.rebuild_dep_tree();
+        }
         let tree_cursor =
             crate::views::deptree::tree_row_for_cursor(&app.dep_tree_nodes, app.cursor);
         app.dep_tree_window =
@@ -5132,58 +5448,88 @@ fn render_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     f.render_stateful_widget(list, list_area, &mut state);
 }
 
-fn render_detail(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let mut content: Vec<Line> = match app.selected() {
-        Some(row) => {
-            let graph_scores = app.graph_metrics.as_ref().and_then(|gm| {
-                gm.pagerank
-                    .get(&row.id)
-                    .map(|&pr| crate::detail::GraphScores {
-                        pagerank: pr,
-                        betweenness: gm.betweenness.get(&row.id).copied().unwrap_or(0.0),
-                        eigenvector: gm.eigenvector.get(&row.id).copied().unwrap_or(0.0),
-                        hubs: gm.hubs.get(&row.id).copied().unwrap_or(0.0),
-                        authorities: gm.authorities.get(&row.id).copied().unwrap_or(0.0),
-                        critical_path: 0.0,
-                    })
-            });
+fn render_detail(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    // `build_detail_lines` walks the whole dependency subtree and formats
+    // every description/design/notes/comments line; it used to run on every
+    // frame. Issues are immutable for the App's lifetime, so the rendered
+    // lines are cached and only rebuilt when the selection, the
+    // graph-metrics presence, or the update notice changes (#9 perf).
+    // `detail_scroll` and `focus_detail` are applied at render time and
+    // deliberately not part of the key.
+    let selected_id = app.selected().map(|r| r.id.clone()).unwrap_or_default();
+    let has_metrics = app.graph_metrics.is_some();
+    let cache_hit = app.detail_cache.as_ref().is_some_and(|c| {
+        c.issue_id == selected_id
+            && c.has_graph_metrics == has_metrics
+            && c.update_tag == app.update_tag
+            && c.update_url == app.update_url
+    });
+    if !cache_hit {
+        let mut content: Vec<Line> = match app.selected() {
+            Some(row) => {
+                let graph_scores = app.graph_metrics.as_ref().and_then(|gm| {
+                    gm.pagerank
+                        .get(&row.id)
+                        .map(|&pr| crate::detail::GraphScores {
+                            pagerank: pr,
+                            betweenness: gm.betweenness.get(&row.id).copied().unwrap_or(0.0),
+                            eigenvector: gm.eigenvector.get(&row.id).copied().unwrap_or(0.0),
+                            hubs: gm.hubs.get(&row.id).copied().unwrap_or(0.0),
+                            authorities: gm.authorities.get(&row.id).copied().unwrap_or(0.0),
+                            critical_path: 0.0,
+                        })
+                });
 
-            // Use full issue data from issue_map for detail rendering
-            if let Some(full_issue) = app.issue_map.get(&row.id) {
-                crate::detail::build_detail_lines(
-                    full_issue,
-                    graph_scores.as_ref(),
-                    Some(&app.issue_map),
-                )
-            } else {
-                vec![Line::from(""), Line::from("Issue not found in map")]
+                // Use full issue data from issue_map for detail rendering
+                if let Some(full_issue) = app.issue_map.get(&row.id) {
+                    crate::detail::build_detail_lines(
+                        full_issue,
+                        graph_scores.as_ref(),
+                        Some(&app.issue_map),
+                    )
+                } else {
+                    vec![Line::from(""), Line::from("Issue not found in map")]
+                }
             }
+            None => vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "No issue selected",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ],
+        };
+        // Go's `updateViewportContent` (`model.go:8894-8895`) opens with the
+        // update notice, ahead of the title block, and closes with a blank
+        // line. The raw `[tag](url)` is deliberate: Go writes the same
+        // literal string into a plain viewport, so the link syntax is shown,
+        // not resolved.
+        if let Some(tag) = &app.update_tag {
+            let url = app.update_url.as_deref().unwrap_or_default();
+            content.insert(
+                0,
+                Line::from(Span::styled(
+                    format!("\u{2b50} **Update Available:** [{tag}]({url})"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            );
+            content.insert(1, Line::from(""));
         }
-        None => vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "No issue selected",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ],
-    };
-    // Go's `updateViewportContent` (`model.go:8894-8895`) opens with the
-    // update notice, ahead of the title block, and closes with a blank line.
-    // The raw `[tag](url)` is deliberate: Go writes the same literal string
-    // into a plain viewport, so the link syntax is shown, not resolved.
-    if let Some(tag) = &app.update_tag {
-        let url = app.update_url.as_deref().unwrap_or_default();
-        content.insert(
-            0,
-            Line::from(Span::styled(
-                format!("\u{2b50} **Update Available:** [{tag}]({url})"),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        );
-        content.insert(1, Line::from(""));
+        app.detail_cache = Some(DetailCache {
+            issue_id: selected_id,
+            has_graph_metrics: has_metrics,
+            update_tag: app.update_tag.clone(),
+            update_url: app.update_url.clone(),
+            lines: content,
+        });
     }
+    let content = app
+        .detail_cache
+        .as_ref()
+        .map(|c| c.lines.clone())
+        .unwrap_or_default();
     let focused_border = if app.focus_detail {
         Color::Cyan
     } else {
@@ -5282,23 +5628,14 @@ fn render_status_bar(f: &mut Frame, app: &App) {
         ));
     }
 
-    // Stats section with colored indicators
-    let open_count = app
-        .rows
-        .iter()
-        .filter(|r| matches!(r.status, Status::Open))
-        .count();
+    // Stats section with colored indicators — counters are precomputed in
+    // `App::new` (rows never mutate in place); this used to be three full
+    // passes over every row on every frame.
     let ready_count = app.filtered_indices.len();
-    let blocked_count = app
-        .rows
-        .iter()
-        .filter(|r| matches!(r.status, Status::Blocked))
-        .count();
-    let closed_count = app.rows.iter().filter(|r| r.status.is_closed()).count();
 
     spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
     spans.push(Span::styled(
-        format!("○{open_count} "),
+        format!("○{} ", app.status_open_count),
         Style::default().fg(Color::Green),
     ));
     spans.push(Span::styled(
@@ -5306,11 +5643,11 @@ fn render_status_bar(f: &mut Frame, app: &App) {
         Style::default().fg(Color::Cyan),
     ));
     spans.push(Span::styled(
-        format!("◈{blocked_count} "),
+        format!("◈{} ", app.status_blocked_count),
         Style::default().fg(Color::Yellow),
     ));
     spans.push(Span::styled(
-        format!("●{closed_count}"),
+        format!("●{}", app.status_closed_count),
         Style::default().fg(Color::DarkGray),
     ));
 
@@ -5330,14 +5667,6 @@ fn render_status_bar(f: &mut Frame, app: &App) {
     // Freshness badge (Go bv-h305: warn 30s, stale 2min since snapshot)
     {
         let elapsed = app.loaded_at.elapsed();
-        let stale_s = std::env::var("BV_FRESHNESS_STALE_S")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(120);
-        let warn_s = std::env::var("BV_FRESHNESS_WARN_S")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
         let secs = elapsed.as_secs();
         let fmt_age = |s: u64| {
             if s < 60 {
@@ -5348,7 +5677,7 @@ fn render_status_bar(f: &mut Frame, app: &App) {
                 format!("{}h ago", s / 3600)
             }
         };
-        if secs >= stale_s {
+        if secs >= app.freshness_stale_s {
             spans.push(Span::styled(
                 format!(" \u{26a0} STALE: {} ", fmt_age(secs)),
                 Style::default()
@@ -5356,7 +5685,7 @@ fn render_status_bar(f: &mut Frame, app: &App) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ));
-        } else if secs >= warn_s {
+        } else if secs >= app.freshness_warn_s {
             spans.push(Span::styled(
                 format!(" \u{26a0} {} ", fmt_age(secs)),
                 Style::default().bg(Color::DarkGray).fg(Color::Yellow),
@@ -5894,7 +6223,10 @@ fn tui_event_loop(
             dirty |= app.poll_update_modal();
             // Live reload (Go fsnotify; TUI_UX_PARITY_PLAN.md Phase F): piggyback
             // on this same ~500ms tick instead of a background notify watcher.
+            // `check_for_reload` only detects + debounces; the rebuild itself
+            // runs on a worker thread and lands via `poll_background_reload`.
             dirty |= app.check_for_reload();
+            dirty |= app.poll_background_reload();
             // Same trick for the background History correlation walk (Go's
             // `HistoryLoadedMsg`): drain the channel here so a slow `git log -p`
             // never blocks a keypress.
@@ -5903,7 +6235,12 @@ fn tui_event_loop(
             // Go `cassSessionsLoadedMsg`): the correlate walk shells out to
             // the cass CLI and must never block a keypress.
             dirty |= app.poll_cass_load();
-            // Same for the background Time-Travel git walk (`t`/`T` keys).
+            // Central badge refresh (#9): the selection can change from
+            // many paths — j/k, page/tree moves, mouse, filter/search,
+            // recipes, reload cursor-restore — so refresh the cache-read
+            // badge once per tick instead of chasing every call site.
+            app.update_session_count();
+            // Same trick for the background Time-Travel git walk (`t`/`T` keys).
             dirty |= app.poll_time_travel_load();
             // Wall-clock widgets. The previous loop redrew twice a second, so a
             // badge showing "45s ago" refreshed every 500ms; redrawing once per
@@ -6932,10 +7269,43 @@ mod tests {
         // guarantee a strictly-later timestamp on the rewrite below.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&path, "{}\n").unwrap();
+        // The first changed-mtime observation only arms the debounce (#9)
+        // — a still-being-written file must not trigger a reload.
+        assert!(
+            !app.check_for_reload(),
+            "first mtime change must arm the debounce, not reload"
+        );
+        std::thread::sleep(RELOAD_DEBOUNCE + std::time::Duration::from_millis(50));
         assert!(
             app.check_for_reload(),
-            "changed mtime must trigger reload_from_disk"
+            "a quiet mtime must trigger reload_from_disk"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_for_reload_debounce_restarts_on_new_writes() {
+        let mut app = make_app(2);
+        let dir =
+            std::env::temp_dir().join(format!("bvr_watch_debounce_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("issues.jsonl");
+        std::fs::write(&path, "").unwrap();
+        app.watched_path = Some(path.clone());
+        app.watched_mtime = Some(std::fs::metadata(&path).unwrap().modified().unwrap());
+        // Arm the debounce, then keep writing inside the quiet window —
+        // each new mtime restarts it, so no reload may fire.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "{}\n").unwrap();
+        assert!(!app.check_for_reload());
+        for i in 0..3 {
+            std::thread::sleep(RELOAD_DEBOUNCE / 2);
+            std::fs::write(&path, format!("{{}}\n{i}\n")).unwrap();
+            assert!(
+                !app.check_for_reload(),
+                "a still-changing mtime must keep deferring the reload"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7411,7 +7781,7 @@ mod tests {
             app.handle_key(KeyCode::Char('v'));
             assert!(app.show_velocity);
 
-            let model = app.velocity_comparison();
+            let model = app.velocity_model();
             assert!(
                 model.data_count() >= 2,
                 "expected one row per label, got {}",
