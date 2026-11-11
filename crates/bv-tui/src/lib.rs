@@ -3034,6 +3034,11 @@ impl App {
             _ => {}
         }
         self.cursor = 0;
+        // Recipes mutate `filtered_indices` after `apply_filter` already
+        // rebuilt the dep tree — without this the cached tree's
+        // `filtered_pos` indices go stale and `render_list` can index out
+        // of bounds on the next frame.
+        self.dep_tree_dirty = true;
         self.status_msg = format!("Recipe: {}", def.name);
     }
 
@@ -3353,6 +3358,7 @@ impl App {
         if sessions.is_empty() {
             self.status_msg = format!("No correlated sessions found for {bead_id}");
             self.cass_cache.insert(bead_id, 0);
+            self.update_session_count();
             return true;
         }
         // Feed the status-bar badge from the explicit lookup (#9): counts
@@ -3360,6 +3366,7 @@ impl App {
         // cursor move is a pure cache read and navigation spawns no
         // subprocesses.
         self.cass_cache.insert(bead_id.clone(), sessions.len());
+        self.update_session_count();
         let search_cmd = if keywords.is_empty() {
             format!("cass search \"{bead_id}\"")
         } else {
@@ -4143,6 +4150,9 @@ impl App {
         // channel so the worker's send fails and its (now stale) App is
         // discarded instead of double-applying.
         self.reload_rx = None;
+        // Capture the watched mtime before loading (same race as the
+        // background worker — see `spawn_background_reload`).
+        let pre_mtime = self.current_watched_mtime();
         let cwd = std::env::current_dir().unwrap_or_default();
         // Go's Ctrl+R reload goes through `datasource.LoadIssues` — the same
         // freshness-selected source as startup (beads.db may beat issues.jsonl).
@@ -4154,11 +4164,40 @@ impl App {
             }
             None => loaded.issues,
         };
-        // `App::new` resets session-scoped state; carry over what a
-        // reload must not clobber (see `carry_over_ui_state`).
         let mut fresh = App::new(issues);
+        // Only reuse the pre-load mtime when the watch target didn't flip
+        // (e.g. beads.db vs issues.jsonl freshness winner changed) — a
+        // mismatched stamp would fake a perpetual "changed" signal.
+        if fresh.watched_path.is_some() && fresh.watched_path == self.watched_path {
+            fresh.watched_mtime = pre_mtime.or(fresh.watched_mtime);
+        }
+        self.adopt_fresh_app(fresh);
+    }
+
+    /// The watched datasource file's current mtime, resolved the same way
+    /// `refresh_watch_target` picks the path — used to stamp a rebuilt App
+    /// with the pre-load mtime so mid-load writes still trigger a follow-up
+    /// reload instead of being marked "already seen".
+    fn current_watched_mtime(&self) -> Option<std::time::SystemTime> {
+        let path = self.watched_path.as_ref()?;
+        std::fs::metadata(path).ok()?.modified().ok()
+    }
+
+    /// Adopt a freshly built App: carry over the session/UI state a reload
+    /// must preserve, then kick the lazy-view loaders for the preserved
+    /// `current_view` — their entry keys already fired, so without this the
+    /// view strands on "Loading…"/"No data". Shared by the synchronous
+    /// Ctrl+R path and the background live-reload poll.
+    fn adopt_fresh_app(&mut self, mut fresh: App) {
         Self::carry_over_ui_state(self, &mut fresh);
         *self = fresh;
+        match self.current_view {
+            ViewMode::LabelDashboard => self.load_label_health_if_needed(),
+            ViewMode::History => self.load_history_if_needed(),
+            ViewMode::Sprint => self.load_sprint_if_needed(),
+            ViewMode::Actionable => self.load_actionable_if_needed(),
+            _ => {}
+        }
         self.status_msg = "Refreshed".to_string();
     }
 
@@ -4192,6 +4231,20 @@ impl App {
         new.search_query = old.search_query.clone();
         new.label_filter = old.label_filter.clone();
         new.active_repo = old.active_repo.clone();
+        // Data caches: `workspace_repos`/`graph_metrics` are injected by
+        // the binary after `App::new`, and `cass_cache` is populated by
+        // explicit `V` lookups — a reload must not silently drop them.
+        // `graph_metrics` describes the pre-reload issue set, so it can
+        // be slightly stale if issues changed; dropping it instead would
+        // lose Insights/detail scores until restart, which is worse.
+        new.workspace_repos = old.workspace_repos.clone();
+        new.graph_metrics = old.graph_metrics.clone();
+        new.cass_cache = old.cass_cache.clone();
+        // Plain view prefs worth keeping across a reload.
+        new.show_sidebar = old.show_sidebar;
+        new.show_priority_hints = old.show_priority_hints;
+        new.show_velocity = old.show_velocity;
+        new.tree_collapsed = old.tree_collapsed.clone();
         // Rebuild filtered_indices under the restored modes, then put the
         // cursor back on the same bead when it still exists (issues may
         // have been added, removed, or reordered while the file was being
@@ -4226,14 +4279,35 @@ impl App {
             return;
         }
         let cwd = std::env::current_dir().unwrap_or_default();
+        let old_watched_path = self.watched_path.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.reload_rx = Some(rx);
         self.status_msg = "Refreshing…".to_string();
         std::thread::spawn(move || {
+            // Capture the watched file's mtime *before* loading. `App::new`
+            // re-stamps `watched_mtime` after its (slow) build, so a write
+            // landing mid-load would be marked "already seen" and the TUI
+            // would keep stale data forever. Stamping the pre-load mtime
+            // makes any mid-load write look newer to `check_for_reload`,
+            // which then schedules one more (converging) reload.
+            let pre_mtime = (|| {
+                let dir = bv_core::discovery::get_beads_dir(&cwd).ok()?;
+                let repo = dir.parent().unwrap_or(&cwd);
+                let src = bv_core::datasource::freshest_source_path(&dir, repo)?;
+                std::fs::metadata(src).ok()?.modified().ok()
+            })();
             let (loaded, err) = bv_core::datasource::load_issues(&cwd);
             let result = match err {
                 Some(e) => Err(e),
-                None => Ok(App::new(loaded.issues)),
+                None => {
+                    let mut app = App::new(loaded.issues);
+                    // Same guard as `reload_from_disk`: only reuse the
+                    // pre-load mtime when the watch target didn't flip.
+                    if app.watched_path.is_some() && app.watched_path == old_watched_path {
+                        app.watched_mtime = pre_mtime.or(app.watched_mtime);
+                    }
+                    Ok(app)
+                }
             };
             let _ = tx.send(result);
         });
@@ -4251,8 +4325,10 @@ impl App {
             Ok(r) => r,
             Err(crossbeam_channel::TryRecvError::Empty) => return false,
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                // Worker died without sending — don't wedge the watch.
+                // Worker died without sending — don't wedge the watch, and
+                // don't leave the "Refreshing…" status up forever.
                 self.reload_rx = None;
+                self.status_msg = "Refresh failed: reload worker stopped".to_string();
                 return false;
             }
         };
@@ -4261,10 +4337,8 @@ impl App {
             Err(e) => {
                 self.status_msg = format!("Refresh failed: {e}");
             }
-            Ok(mut fresh) => {
-                Self::carry_over_ui_state(self, &mut fresh);
-                *self = fresh;
-                self.status_msg = "Refreshed".to_string();
+            Ok(fresh) => {
+                self.adopt_fresh_app(fresh);
             }
         }
         true
@@ -6161,6 +6235,11 @@ fn tui_event_loop(
             // Go `cassSessionsLoadedMsg`): the correlate walk shells out to
             // the cass CLI and must never block a keypress.
             dirty |= app.poll_cass_load();
+            // Central badge refresh (#9): the selection can change from
+            // many paths — j/k, page/tree moves, mouse, filter/search,
+            // recipes, reload cursor-restore — so refresh the cache-read
+            // badge once per tick instead of chasing every call site.
+            app.update_session_count();
             // Same trick for the background Time-Travel git walk (`t`/`T` keys).
             dirty |= app.poll_time_travel_load();
             // Wall-clock widgets. The previous loop redrew twice a second, so a
