@@ -462,12 +462,17 @@ pub struct App {
     pub watched_mtime: Option<std::time::SystemTime>,
     /// Debounce state for live reload: the last mtime seen to differ from
     /// `watched_mtime` and when it was first observed. `check_for_reload`
-    /// only fires `reload_from_disk` once the file has been quiet for
-    /// [`RELOAD_DEBOUNCE`] — a writer touching the source repeatedly
-    /// (agent activity, `br sync`, another bvr instance) used to trigger a
-    /// full `App::new` rebuild on every ~500ms tick.
+    /// only spawns [`Self::spawn_background_reload`] once the file has
+    /// been quiet for [`RELOAD_DEBOUNCE`] — a writer touching the source
+    /// repeatedly (agent activity, `br sync`, another bvr instance) used
+    /// to trigger a full `App::new` rebuild on every ~500ms tick.
     reload_pending_mtime: Option<std::time::SystemTime>,
     reload_pending_since: Option<std::time::Instant>,
+    /// In-flight background live-reload (#9): `Some` while a worker thread
+    /// is running `load_issues` + `App::new` off the UI thread. Drained by
+    /// `poll_background_reload`; dropping it (manual Ctrl+R, App drop)
+    /// cancels the pending result.
+    reload_rx: Option<crossbeam_channel::Receiver<Result<App, String>>>,
     /// Sprint dashboard state (loaded from .beads/sprints.jsonl).
     pub sprint: Option<crate::views::sprint::SprintState>,
     /// When the snapshot was loaded (freshness badge, Go bv-h305)
@@ -1163,6 +1168,7 @@ impl App {
             watched_mtime: None,
             reload_pending_mtime: None,
             reload_pending_since: None,
+            reload_rx: None,
             sprint: None,
             filtered_indices: Vec::new(),
             cursor: 0,
@@ -1283,14 +1289,15 @@ impl App {
             .and_then(|m| m.modified().ok());
     }
 
-    /// Poll the watched file's mtime and reload if it changed externally.
-    /// Called from the terminal event loop's existing ~500ms poll tick
-    /// (`tui_event_loop`) — no background thread, no `notify` watcher
-    /// dependency; same user-visible effect ("editing issues.jsonl updates
-    /// the TUI without a manual keypress") with fewer moving parts. A no-op
-    /// when `watched_path` is `None` (discovery failed or unsupported
-    /// datasource). Returns true if a reload happened, for the caller to
-    /// avoid double-work in the same tick.
+    /// Poll the watched file's mtime and, once it has been quiet for
+    /// [`RELOAD_DEBOUNCE`], hand the rebuild to a background worker
+    /// ([`Self::spawn_background_reload`]). Called from the terminal event
+    /// loop's existing ~500ms poll tick (`tui_event_loop`) — no `notify`
+    /// watcher dependency; same user-visible effect ("editing issues.jsonl
+    /// updates the TUI without a manual keypress") with fewer moving
+    /// parts. A no-op when `watched_path` is `None` (discovery failed or
+    /// unsupported datasource). Returns true when a reload was *spawned*,
+    /// for the caller to repaint the "Refreshing…" status.
     pub fn check_for_reload(&mut self) -> bool {
         let Some(path) = &self.watched_path else {
             return false;
@@ -1323,7 +1330,10 @@ impl App {
         }
         self.reload_pending_mtime = None;
         self.reload_pending_since = None;
-        self.reload_from_disk();
+        // Hand the rebuild to a worker thread — `load_issues` + `App::new`
+        // (incl. `git rev-parse` datasource discovery) must not freeze
+        // input (#9). The result lands via `poll_background_reload`.
+        self.spawn_background_reload();
         true
     }
     /// The status-mode + label + repo predicate shared by `apply_filter`
@@ -4191,6 +4201,10 @@ impl App {
 
     /// Reload issues from disk (Go Ctrl+R refresh).
     pub fn reload_from_disk(&mut self) {
+        // A manual reload supersedes any in-flight background one: drop the
+        // channel so the worker's send fails and its (now stale) App is
+        // discarded instead of double-applying.
+        self.reload_rx = None;
         let cwd = std::env::current_dir().unwrap_or_default();
         // Go's Ctrl+R reload goes through `datasource.LoadIssues` — the same
         // freshness-selected source as startup (beads.db may beat issues.jsonl).
@@ -4203,72 +4217,119 @@ impl App {
             None => loaded.issues,
         };
         // `App::new` resets session-scoped state; carry over what a
-        // reload must not clobber: terminal geometry (the next
-        // `handle_resize` may be seconds away), the resolved theme,
-        // the update notice, the instance-lock PID — and the navigation
-        // state (#9): cursor, filters, sort, view, detail pane. Without
-        // this every external write snapped the user back to row 0 in
-        // the List view.
-        let (width, height, split_view) = (self.width, self.height, self.split_view);
-        let theme = self.theme.clone();
-        let (update_tag, update_url) = (self.update_tag.clone(), self.update_url.clone());
-        let instance_pid = self.instance_pid;
-        let cursor = self.cursor;
-        let selected_id = self.selected().map(|r| r.id.clone());
-        let filter_mode = self.filter_mode;
-        let sort_mode = self.sort_mode;
-        let current_view = self.current_view;
-        let show_detail = self.show_detail;
-        let focus_detail = self.focus_detail;
-        let detail_scroll = self.detail_scroll;
-        let left_tree_mode = self.left_tree_mode;
-        let board_mode = self.board_mode;
-        let board_column = self.board_column;
-        let searching = self.searching;
-        let search_query = self.search_query.clone();
-        let label_filter = self.label_filter.clone();
-        let active_repo = self.active_repo.clone();
+        // reload must not clobber (see `carry_over_ui_state`).
         let mut fresh = App::new(issues);
-        fresh.width = width;
-        fresh.height = height;
-        fresh.split_view = split_view;
-        fresh.theme = theme;
-        fresh.update_tag = update_tag;
-        fresh.update_url = update_url;
-        fresh.instance_pid = instance_pid;
-        fresh.filter_mode = filter_mode;
-        fresh.sort_mode = sort_mode;
-        fresh.current_view = current_view;
-        fresh.show_detail = show_detail;
-        fresh.focus_detail = focus_detail;
-        fresh.detail_scroll = detail_scroll;
-        fresh.left_tree_mode = left_tree_mode;
-        fresh.board_mode = board_mode;
-        fresh.board_column = board_column;
-        fresh.searching = searching;
-        fresh.search_query = search_query;
-        fresh.label_filter = label_filter;
-        fresh.active_repo = active_repo;
+        Self::carry_over_ui_state(self, &mut fresh);
+        *self = fresh;
+        self.status_msg = "Refreshed".to_string();
+    }
+
+    /// Move the session/UI state a reload must preserve from `old` onto
+    /// the freshly built `new` App: terminal geometry (the next
+    /// `handle_resize` may be seconds away), the resolved theme, the
+    /// update notice, the instance-lock PID — and the navigation state
+    /// (#9): cursor, filters, sort, view, detail pane. Without this every
+    /// external write snapped the user back to row 0 in the List view.
+    ///
+    /// Shared by the synchronous Ctrl+R path (`reload_from_disk`) and the
+    /// background live-reload path (`poll_background_reload`).
+    fn carry_over_ui_state(old: &App, new: &mut App) {
+        new.width = old.width;
+        new.height = old.height;
+        new.split_view = old.split_view;
+        new.theme = old.theme.clone();
+        new.update_tag = old.update_tag.clone();
+        new.update_url = old.update_url.clone();
+        new.instance_pid = old.instance_pid;
+        new.filter_mode = old.filter_mode;
+        new.sort_mode = old.sort_mode;
+        new.current_view = old.current_view;
+        new.show_detail = old.show_detail;
+        new.focus_detail = old.focus_detail;
+        new.detail_scroll = old.detail_scroll;
+        new.left_tree_mode = old.left_tree_mode;
+        new.board_mode = old.board_mode;
+        new.board_column = old.board_column;
+        new.searching = old.searching;
+        new.search_query = old.search_query.clone();
+        new.label_filter = old.label_filter.clone();
+        new.active_repo = old.active_repo.clone();
         // Rebuild filtered_indices under the restored modes, then put the
         // cursor back on the same bead when it still exists (issues may
         // have been added, removed, or reordered while the file was being
         // written); fall back to the clamped old index.
-        if fresh.searching && !fresh.search_query.is_empty() {
-            fresh.apply_search();
+        if new.searching && !new.search_query.is_empty() {
+            new.apply_search();
         } else {
-            fresh.apply_filter();
+            new.apply_filter();
         }
-        fresh.cursor = selected_id
+        let selected_id = old.selected().map(|r| r.id.clone());
+        new.cursor = selected_id
             .as_ref()
             .and_then(|id| {
-                fresh
-                    .filtered_indices
+                new.filtered_indices
                     .iter()
-                    .position(|&i| fresh.rows[i].id == *id)
+                    .position(|&i| new.rows[i].id == *id)
             })
-            .unwrap_or_else(|| cursor.min(fresh.filtered_indices.len().saturating_sub(1)));
-        *self = fresh;
-        self.status_msg = "Refreshed".to_string();
+            .unwrap_or_else(|| old.cursor.min(new.filtered_indices.len().saturating_sub(1)));
+    }
+
+    /// Spawn the background live-reload worker (#9): `load_issues` +
+    /// `App::new` (datasource read, full graph/triage/label-health rebuild,
+    /// and `refresh_watch_target`'s `git rev-parse` discovery — ~600ms on
+    /// Windows) used to run synchronously inside `check_for_reload`, so
+    /// every debounced external write froze input for hundreds of ms.
+    /// The built `App` comes back over `reload_rx` and is applied by
+    /// `poll_background_reload` on the event-loop tick. At most one reload
+    /// is in flight; a manual Ctrl+R (`reload_from_disk`) drops the
+    /// channel, which fails the worker's send and discards its result.
+    fn spawn_background_reload(&mut self) {
+        if self.reload_rx.is_some() {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.reload_rx = Some(rx);
+        self.status_msg = "Refreshing…".to_string();
+        std::thread::spawn(move || {
+            let (loaded, err) = bv_core::datasource::load_issues(&cwd);
+            let result = match err {
+                Some(e) => Err(e),
+                None => Ok(App::new(loaded.issues)),
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain a completed background reload and adopt it (#9). Called from
+    /// the run loop's tick next to `check_for_reload`. Returns whether
+    /// visible state changed (a reload landed or an error status was
+    /// set), for the caller's redraw skip.
+    pub fn poll_background_reload(&mut self) -> bool {
+        let Some(rx) = &self.reload_rx else {
+            return false;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(crossbeam_channel::TryRecvError::Empty) => return false,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                // Worker died without sending — don't wedge the watch.
+                self.reload_rx = None;
+                return false;
+            }
+        };
+        self.reload_rx = None;
+        match result {
+            Err(e) => {
+                self.status_msg = format!("Refresh failed: {e}");
+            }
+            Ok(mut fresh) => {
+                Self::carry_over_ui_state(self, &mut fresh);
+                *self = fresh;
+                self.status_msg = "Refreshed".to_string();
+            }
+        }
+        true
     }
 }
 
@@ -6150,7 +6211,10 @@ fn tui_event_loop(
             dirty |= app.poll_update_modal();
             // Live reload (Go fsnotify; TUI_UX_PARITY_PLAN.md Phase F): piggyback
             // on this same ~500ms tick instead of a background notify watcher.
+            // `check_for_reload` only detects + debounces; the rebuild itself
+            // runs on a worker thread and lands via `poll_background_reload`.
             dirty |= app.check_for_reload();
+            dirty |= app.poll_background_reload();
             // Same trick for the background History correlation walk (Go's
             // `HistoryLoadedMsg`): drain the channel here so a slow `git log -p`
             // never blocks a keypress.
