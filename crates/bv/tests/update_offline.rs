@@ -53,23 +53,37 @@ fn comparable_path(path: &std::path::Path) -> String {
 }
 
 fn run_in(dir: &Path, binary: &Path, args: &[&str]) -> Output {
-    Command::new(binary)
-        .current_dir(dir)
-        .args(args)
-        .args(["--db", "issues.jsonl"])
-        // Both HTTP stacks honour these; setting every alias covers the
-        // upper/lower-case split without depending on which one is read.
-        .env("HTTP_PROXY", DEAD_PROXY)
-        .env("HTTPS_PROXY", DEAD_PROXY)
-        .env("ALL_PROXY", DEAD_PROXY)
-        .env("http_proxy", DEAD_PROXY)
-        .env("https_proxy", DEAD_PROXY)
-        .env("all_proxy", DEAD_PROXY)
-        .env("NO_PROXY", "")
-        .env("no_proxy", "")
-        .stdin(Stdio::null())
-        .output()
-        .expect("binary runs")
+    // Executing a binary that was just written can fail with ETXTBSY
+    // ("Text file busy") on Linux — retry briefly instead of flaking.
+    for attempt in 0..20 {
+        let mut cmd = Command::new(binary);
+        cmd.current_dir(dir)
+            .args(args)
+            .args(["--db", "issues.jsonl"])
+            // Both HTTP stacks honour these; setting every alias covers the
+            // upper/lower-case split without depending on which one is read.
+            .env("HTTP_PROXY", DEAD_PROXY)
+            .env("HTTPS_PROXY", DEAD_PROXY)
+            .env("ALL_PROXY", DEAD_PROXY)
+            .env("http_proxy", DEAD_PROXY)
+            .env("https_proxy", DEAD_PROXY)
+            .env("all_proxy", DEAD_PROXY)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .stdin(Stdio::null());
+        match cmd.output() {
+            Ok(out) => return out,
+            Err(e)
+                if (e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    || e.raw_os_error() == Some(26))
+                    && attempt < 19 =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("binary runs: {e}"),
+        }
+    }
+    unreachable!()
 }
 
 /// Copy the binary under test into `dir` so its `<exe>.backup` lookup is
