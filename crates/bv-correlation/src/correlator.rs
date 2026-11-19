@@ -138,6 +138,59 @@ pub fn correlate(
         .iter()
         .map(|i| (crate::history::normalize_bead_id(&i.id), i))
         .collect();
+
+    // Per-issue precomputation — the temporal pass below is O(commits ×
+    // issues) and used to re-parse `created_at`/`closed_at`, rebuild
+    // `title_words` and re-lowercase every file path for EVERY pair.
+    // Everything here is a pure function of the issue/commit, so hoisting it
+    // cannot change a single emitted field.
+    struct IssueTime {
+        /// `created_at` parsed once; `None` reproduces the original
+        /// "unparseable -> skip" branch.
+        created: Option<jiff::Timestamp>,
+        /// `closed_at` parsed once (`None` = open OR unparseable — the
+        /// original `.and_then(parse)` collapsed both the same way).
+        closed: Option<jiff::Timestamp>,
+        norm_id: String,
+        /// `title.split_whitespace().filter(len>3).map(lowercase)` — built once.
+        title_words: Vec<String>,
+    }
+    let issue_meta: Vec<IssueTime> = issues
+        .iter()
+        .map(|i| IssueTime {
+            created: i
+                .created_at
+                .as_deref()
+                .and_then(|s| s.parse::<jiff::Timestamp>().ok()),
+            closed: i
+                .closed_at
+                .as_deref()
+                .and_then(|s| s.parse::<jiff::Timestamp>().ok()),
+            norm_id: crate::history::normalize_bead_id(&i.id),
+            title_words: i
+                .title
+                .split_whitespace()
+                .filter(|w| w.len() > 3)
+                .map(|w| w.to_lowercase())
+                .collect(),
+        })
+        .collect();
+    // Assignee -> issue indices. The temporal gate accepts an issue whose
+    // assignee equals EITHER the commit author or author_email; indexing by
+    // assignee turns the per-commit scan into two hash lookups. Indices are
+    // collected into a BTreeSet so candidates still process in issue order
+    // (an assignee matching both author and email must not double-count).
+    let mut by_assignee: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, issue) in issues.iter().enumerate() {
+        if !issue.assignee.is_empty() {
+            by_assignee
+                .entry(issue.assignee.as_str())
+                .or_default()
+                .push(idx);
+        }
+    }
+
     let mut report: BTreeMap<String, Vec<CorrelatedCommit>> = BTreeMap::new();
 
     for commit in commits {
@@ -175,27 +228,33 @@ pub fn correlate(
         let Ok(commit_ts) = commit.timestamp.parse::<jiff::Timestamp>() else {
             continue;
         };
-        for issue in issues {
-            if mentioned_ids.contains(crate::history::normalize_bead_id(&issue.id).as_str()) {
+        // Lowercase each touched path ONCE per commit — the hint match used
+        // to redo it per issue.
+        let lower_files: Vec<String> = commit.files.iter().map(|f| f.to_lowercase()).collect();
+        // Candidate issues = assignee == author OR assignee == author_email,
+        // deduplicated and kept in issue order.
+        let mut candidates: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        if let Some(v) = by_assignee.get(commit.author.as_str()) {
+            candidates.extend(v.iter().copied());
+        }
+        if let Some(v) = by_assignee.get(commit.author_email.as_str()) {
+            candidates.extend(v.iter().copied());
+        }
+        for idx in candidates {
+            let issue = &issues[idx];
+            let meta = &issue_meta[idx];
+            if mentioned_ids.contains(meta.norm_id.as_str()) {
                 continue;
             }
-            if issue.assignee.is_empty()
-                || issue.assignee != commit.author && issue.assignee != commit.author_email
-            {
-                continue;
-            }
-            let Some(created) = issue
-                .created_at
-                .as_deref()
-                .and_then(|s| s.parse::<jiff::Timestamp>().ok())
-            else {
+            let Some(created) = meta.created else {
                 continue;
             };
-            let end = issue
-                .closed_at
-                .as_deref()
-                .and_then(|s| s.parse::<jiff::Timestamp>().ok())
-                .unwrap_or(commit_ts.max(created));
+            // Original: `closed_at.parse().unwrap_or(commit_ts.max(created))`.
+            // Past the `commit_ts < created` guard below, commit_ts >= created
+            // so `max` is commit_ts — but the guard runs AFTER `end` is
+            // computed, and for a closed issue `end` never depended on
+            // commit_ts anyway, so this is identical.
+            let end = meta.closed.unwrap_or_else(|| commit_ts.max(created));
             if commit_ts < created || commit_ts > end {
                 continue;
             }
@@ -203,16 +262,9 @@ pub fn correlate(
                 .total(jiff::Unit::Second)
                 .unwrap_or(0.0)
                 .max(0.0);
-            let title_words: Vec<String> = issue
-                .title
-                .split_whitespace()
-                .filter(|w| w.len() > 3)
-                .map(|w| w.to_lowercase())
-                .collect();
-            let paths_match_hints = commit.files.iter().any(|f| {
-                let lower = f.to_lowercase();
-                title_words.iter().any(|w| lower.contains(w.as_str()))
-            });
+            let paths_match_hints = lower_files
+                .iter()
+                .any(|lower| meta.title_words.iter().any(|w| lower.contains(w.as_str())));
             let confidence = temporal_confidence(&TemporalWindow {
                 active_beads: 1,
                 window_duration: Duration::from_secs_f64(window_secs),

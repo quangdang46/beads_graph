@@ -108,6 +108,17 @@ impl VectorIndex {
         self.entries = entries;
     }
 
+    /// Drop entries failing `keep`, then apply `updates` — index_sync's
+    /// publish without cloning unchanged vectors into a staging map.
+    pub fn entries_retain_extend(
+        &mut self,
+        keep: impl Fn(&str) -> bool,
+        updates: BTreeMap<String, VectorEntry>,
+    ) {
+        self.entries.retain(|id, _| keep(id));
+        self.entries.extend(updates);
+    }
+
     /// Sorted IDs (Go `sortedIDs` — BTreeMap iterates sorted already).
     pub fn sorted_ids(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
@@ -128,22 +139,24 @@ impl VectorIndex {
         if k == 0 {
             return Ok(Vec::new());
         }
-        let mut scored: Vec<(String, f64)> = self
+        // Score by reference and clone only the surviving top-K IDs — the
+        // old form allocated a `String` per entry before sorting.
+        let mut scored: Vec<(&String, f64)> = self
             .entries
             .iter()
-            .map(|(id, e)| (id.clone(), dot_f32(query, &e.vector)))
+            .map(|(id, e)| (id, dot_f32(query, &e.vector)))
             .collect();
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.0.cmp(b.0))
         });
         let k = k.min(scored.len());
         Ok(scored
             .into_iter()
             .take(k)
             .map(|(id, score)| SearchHit {
-                issue_id: id,
+                issue_id: id.clone(),
                 score,
             })
             .collect())

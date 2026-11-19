@@ -31,8 +31,11 @@ pub struct GraphData {
 
 impl GraphData {
     pub fn build(issues: Vec<Issue>, metrics: Option<super::super::GraphMetrics>) -> Self {
-        let issue_map: HashMap<String, Issue> =
-            issues.iter().map(|i| (i.id.clone(), i.clone())).collect();
+        // Id-set for the `contains_key` probe; the map itself is built by
+        // CONSUMING `issues` at the end — the old form cloned every `Issue`
+        // (description/notes/deps included) just to populate the lookup map.
+        let id_set: std::collections::HashSet<&str> =
+            issues.iter().map(|i| i.id.as_str()).collect();
         let mut sorted_ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
         sorted_ids.sort();
 
@@ -47,7 +50,7 @@ impl GraphData {
                 // `conditional-blocks` and `waits-for` — consistent with
                 // `deptree.rs`/`detail.rs` (audit: `audit-tui-graph-legacy-deps`).
                 let target = dep.effective_depends_on();
-                if dep.r#type.is_blocking() && issue_map.contains_key(target) {
+                if dep.r#type.is_blocking() && id_set.contains(target) {
                     my_blockers.push(target.to_string());
                     dependents
                         .entry(target.to_string())
@@ -61,6 +64,12 @@ impl GraphData {
         for deps in dependents.values_mut() {
             deps.sort();
         }
+
+        // Consume the Vec: each Issue moves into the map, only its id String
+        // is cloned for the key. Duplicate ids keep the LAST occurrence —
+        // identical to the old `collect()` into a HashMap.
+        let issue_map: HashMap<String, Issue> =
+            issues.into_iter().map(|i| (i.id.clone(), i)).collect();
 
         GraphData {
             issue_map,

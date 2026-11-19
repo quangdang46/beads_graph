@@ -193,22 +193,33 @@ pub fn compute_row_triage(issues: &[Issue]) -> std::collections::HashMap<String,
     }
 
     // Go `buildQuickWins` ranking over the claimable subset.
+    // `blocked_by_count` is "how many open issues carry a blocking dep on
+    // this id" — a pure function of the id, so the reverse map is built ONCE
+    // here instead of re-scanning every issue+dep per quick-win candidate
+    // (O(candidates × issues × deps) -> O(issues × deps)). `.any()` in the
+    // original counts each source issue once per target even when several
+    // of its deps point there, so targets are deduped per issue first.
+    let total = issues.len().max(1) as f64;
+    let mut blocked_by_counts: HashMap<&str, usize> = HashMap::new();
+    for o in issues {
+        if closed_like(o.status) {
+            continue;
+        }
+        let mut targets: HashSet<&str> = HashSet::new();
+        for d in &o.dependencies {
+            if d.r#type.is_blocking() {
+                targets.insert(d.effective_depends_on());
+            }
+        }
+        for t in targets {
+            *blocked_by_counts.entry(t).or_insert(0) += 1;
+        }
+    }
     let blocker_ratio_of = |id: &str| -> f64 {
-        let Some(issue) = by_id.get(id) else {
+        if !by_id.contains_key(id) {
             return 0.0;
-        };
-        let total = issues.len().max(1) as f64;
-        let blocked_by_count = issues
-            .iter()
-            .filter(|o| {
-                !closed_like(o.status)
-                    && o.dependencies
-                        .iter()
-                        .any(|d| d.r#type.is_blocking() && d.effective_depends_on() == id)
-            })
-            .count() as f64;
-        let _ = issue;
-        blocked_by_count / total
+        }
+        blocked_by_counts.get(id).copied().unwrap_or(0) as f64 / total
     };
     let mut qw_candidates: Vec<(f64, &str)> = Vec::new();
     for issue in issues {
@@ -1617,6 +1628,7 @@ fn build_triage_inner(
     // substituting 0 granted it. On large_cyclic_600 that inflated Cyc-2 by
     // exactly base_score * 0.15 and reordered the whole list.
     let mut blocker_depths: BTreeMap<String, i64> = BTreeMap::new();
+    let mut memo: BTreeMap<String, i64> = BTreeMap::new();
     for issue in issues {
         // Every SCORED issue needs a depth, not just the open ones. Go
         // asks `TriageContext.BlockerDepth(id)` per recommendation
@@ -1632,7 +1644,11 @@ fn build_triage_inner(
         if matches!(issue.status, Status::Closed | Status::Tombstone) {
             continue;
         }
-        let mut memo: BTreeMap<String, i64> = BTreeMap::new();
+        // One shared memo for the whole pass: `blocker_depth` only ever
+        // memoizes fully-resolved depths (cycle -1 unwinds without writing),
+        // and a depth is a pure function of the graph — so a value cached
+        // under one root is identical to what any other root would compute.
+        // A fresh memo per issue made chain graphs O(n²).
         let depth = blocker_depth(&issue.id, readiness, &mut memo);
         blocker_depths.insert(issue.id.clone(), depth);
     }

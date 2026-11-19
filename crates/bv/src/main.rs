@@ -411,7 +411,7 @@ mod impact_network {
                 if !dep.r#type.is_blocking() {
                     continue;
                 }
-                let to = dep.depends_on_id.as_str();
+                let to = dep.effective_depends_on();
                 if to.is_empty() || to == issue.id || !nodes.contains_key(to) {
                     continue;
                 }
@@ -4395,22 +4395,18 @@ fn apply_recipe_scope(
     };
 
     let now = robot_now();
-    let g = bv_analysis::analyzer::build_graph(issues);
-    // `analyze_with_profile` takes ownership of the graph, and the triage
-    // scores below still need one. Building twice is cheaper than the two
-    // halves disagreeing about node ordering, which would silently change the
-    // ranking: `build_graph` assigns indices in sorted-id order precisely so
-    // the floating-point results match Go.
-    let build_for_metrics = bv_analysis::analyzer::build_graph(issues);
+    // One graph, shared: `analyze_with_profile` takes an `Arc` handle and the
+    // triage scores below borrow the same graph. `build_graph` assigns indices
+    // in sorted-id order, so a single build keeps the floating-point results
+    // identical to Go — building twice was pure waste.
+    let g = std::sync::Arc::new(bv_analysis::analyzer::build_graph(issues));
 
     // Go only builds the metric sources the recipe's sort chain reads
     // (`NeedsGraphMetrics` / `NeedsTriageScores`).
     let graph = if resolved.needs_graph_metrics() {
         let config = bv_analysis::analyzer::config_for_size(g.len(), g.edge_count(), 0.0);
-        let (analysis, _) = bv_analysis::analyzer::analyze_with_profile(
-            std::sync::Arc::new(build_for_metrics),
-            &config,
-        );
+        let (analysis, _) =
+            bv_analysis::analyzer::analyze_with_profile(std::sync::Arc::clone(&g), &config);
         Some(RecipeGraphMetrics {
             pagerank: analysis.page_rank.clone().unwrap_or_default(),
             betweenness: analysis.betweenness.clone().unwrap_or_default(),
@@ -4421,7 +4417,11 @@ fn apply_recipe_scope(
     };
 
     let triage_scores = if resolved.needs_triage_scores() {
-        Some(bv_analysis::triage::compute_triage_scores(issues, &g, now))
+        Some(bv_analysis::triage::compute_triage_scores(
+            issues,
+            g.as_ref(),
+            now,
+        ))
     } else {
         None
     };
@@ -5461,7 +5461,10 @@ fn load_issues_auto_meta_raw(
                 &resolved[..resolved.len().min(7)]
             );
         }
-        let hash = bv_core::data_hash::compute_data_hash(&issues);
+        // One fingerprint pass feeds both digests — the analysed-set hash and
+        // the file hash with tombstone stubs used to each re-hash the corpus.
+        let (hash, file_hash) =
+            bv_core::data_hash::compute_data_hash_pair(&issues, &stats.tombstone_ids);
         // Built before the tuple: `Some(resolved)` moves `resolved` when the
         // third element is evaluated, which is before the fourth.
         //
@@ -5480,7 +5483,7 @@ fn load_issues_auto_meta_raw(
             errors: stats.errors,
             skipped: stats.skipped,
             tombstones: stats.tombstones(),
-            file_hash: bv_core::data_hash::source_issues_hash(&issues, &stats.tombstone_ids),
+            file_hash,
             ..Default::default()
         };
         return Ok((issues, hash, Some(resolved), source));
@@ -5549,10 +5552,14 @@ fn load_issues_auto_meta_raw(
         record_failed_source(&loaded, e);
         return Err(e.clone());
     }
-    let source = source_meta_from_load(&loaded);
+    // One fingerprint pass feeds both digests — `source_meta_from_load`'s
+    // file hash and the analysed-set `data_hash` used to each re-hash the
+    // whole corpus.
+    let (hash, file_hash) =
+        bv_core::data_hash::compute_data_hash_pair(&loaded.issues, &loaded.report.tombstone_ids);
+    let source = source_meta_from_load_with_hash(&loaded, file_hash);
     record_selected_source(source.clone());
     let issues = loaded.issues;
-    let hash = bv_core::data_hash::compute_data_hash(&issues);
     Ok((issues, hash, None, source))
 }
 
@@ -5560,6 +5567,17 @@ fn load_issues_auto_meta_raw(
 /// the `LoadResult` the datasource layer actually produced — path, kind,
 /// counts, staleness, warnings and the file digest with tombstone stubs.
 fn source_meta_from_load(loaded: &bv_core::datasource::LoadResult) -> SourceMeta {
+    let file_hash =
+        bv_core::data_hash::source_issues_hash(&loaded.issues, &loaded.report.tombstone_ids);
+    source_meta_from_load_with_hash(loaded, file_hash)
+}
+
+/// [`source_meta_from_load`] with the file digest supplied by the caller —
+/// for load paths that already computed it via `compute_data_hash_pair`.
+fn source_meta_from_load_with_hash(
+    loaded: &bv_core::datasource::LoadResult,
+    file_hash: String,
+) -> SourceMeta {
     let report = &loaded.report;
     let path = if loaded.source.path.as_os_str().is_empty() {
         report.path.clone()
@@ -5574,7 +5592,7 @@ fn source_meta_from_load(loaded: &bv_core::datasource::LoadResult) -> SourceMeta
         errors: report.errors,
         skipped: report.skipped,
         tombstones: report.tombstone_ids.len(),
-        file_hash: bv_core::data_hash::source_issues_hash(&loaded.issues, &report.tombstone_ids),
+        file_hash,
         read_errors: report.read_errors,
         stale: report.stale,
         warning_count: report.warning_count + report.authority_warnings.len(),
@@ -11016,10 +11034,17 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     // (cmd/bv/main.go:2645-2652). Without it the insights payload described
     // the WORKING TREE while its contents came from a commit.
     let mut source: Option<SourceMeta> = None;
-    let issues = if let Some(ref revision) = as_of {
+    // `(issues, precomputed_loader_hash)` — the `--as-of` arm already ran the
+    // corpus fingerprint for the source file hash, so it hands the analysed-
+    // set digest along instead of hashing twice.
+    let (issues, as_of_hash) = if let Some(ref revision) = as_of {
         let loader = bv_core::discovery::GitLoader::new(&cwd);
-        match loader.load_at(revision) {
-            Ok(issues) => {
+        // Single `load_at_with_stats` call — the previous code ran `load_at`
+        // and then `load_at_with_stats` for the same revision, parsing (or
+        // cloning out of cache) the corpus twice.
+        match loader.load_at_with_stats(revision) {
+            Ok((issues, stats)) => {
+                let mut hash = None;
                 if let Ok(sha) = loader.resolve_revision(revision) {
                     // Go guards this line with `if !envRobot`
                     // (cmd/bv/main.go:2671): in robot mode stdout carries only
@@ -11034,9 +11059,10 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
                         );
                     }
                     set_as_of(revision.clone(), sha.clone());
-                    let (loaded, stats) = loader
-                        .load_at_with_stats(revision)
-                        .unwrap_or_else(|_| (issues.clone(), Default::default()));
+                    // One fingerprint pass feeds both digests.
+                    let (data_hash, file_hash) =
+                        bv_core::data_hash::compute_data_hash_pair(&issues, &stats.tombstone_ids);
+                    hash = Some(data_hash);
                     source = Some(SourceMeta {
                         path: format!(".beads/issues.jsonl@{sha}"),
                         envelope_path: format!(".beads@{revision}"),
@@ -11045,14 +11071,11 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
                         errors: stats.errors,
                         skipped: stats.skipped,
                         tombstones: stats.tombstones(),
-                        file_hash: bv_core::data_hash::source_issues_hash(
-                            &loaded,
-                            &stats.tombstone_ids,
-                        ),
+                        file_hash,
                         ..Default::default()
                     });
                 }
-                issues
+                (issues, hash)
             }
             Err(e) => {
                 // Go writes the degraded envelope to stdout before the stderr
@@ -11087,7 +11110,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
         }
     } else {
         match load_issues_tracked(&cwd) {
-            Ok((issues, _)) => issues,
+            Ok((issues, _)) => (issues, None),
             Err(e) => {
                 if is_unresolved_source_error(&e.to_string()) {
                     return Err(emit_unresolved_source(&e.to_string()));
@@ -11099,7 +11122,7 @@ fn load_full() -> Result<AnalysisResultFull, ExitCode> {
     };
     // Go main.go:2786 — scope before analysis; `--repo` re-hashes
     // (main.go:4883-4884), `--label` keeps the loader's hash (:4901).
-    let loader_hash = bv_core::data_hash::compute_data_hash(&issues);
+    let loader_hash = as_of_hash.unwrap_or_else(|| bv_core::data_hash::compute_data_hash(&issues));
     let (issues, hash_override) = apply_scope(&issues);
     let data_hash = hash_override.unwrap_or_else(|| loader_hash.clone());
     let source = source.unwrap_or_else(|| source_meta_for(&issues));
@@ -17404,7 +17427,8 @@ fn run_robot_related(args: &[String]) -> ExitCode {
                 let deps: Vec<String> = issue
                     .dependencies
                     .iter()
-                    .map(|d| d.depends_on_id.clone())
+                    .map(|d| d.effective_depends_on().to_string())
+                    .filter(|s| !s.is_empty())
                     .collect();
                 if deps.is_empty() {
                     None

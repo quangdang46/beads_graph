@@ -22,7 +22,7 @@ use crate::discovery::go_path_error;
 use crate::fingerprint::{format_go_instant, parse_go_timestamp};
 use crate::model::{Comment, Dependency, DependencyType, Issue, Status};
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags, Row};
+use rusqlite::{Connection, OpenFlags, Row, Statement};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -113,6 +113,57 @@ struct SqliteSchema {
 struct ScannedIssue {
     issue: Issue,
     status_raw: String,
+}
+
+/// Per-issue child queries (dependencies / comments / labels-table) prepared
+/// ONCE per load instead of inside every row — Go re-prepares on each call,
+/// which is pure overhead: the same SQL on the same connection always
+/// prepares to the same statement or fails with the same error. A captured
+/// prepare error replays Go's per-call prepare failure warning for every
+/// issue, so report text/order is unchanged.
+struct ChildStatements<'a> {
+    /// `None` when the dependencies table/type expr is absent (Go's empty
+    /// `dependencyTypeExpr` early-returns before ever preparing).
+    dependencies: Option<Result<Statement<'a>, String>>,
+    comments: Option<Result<Statement<'a>, String>>,
+    labels: Option<Result<Statement<'a>, String>>,
+}
+
+impl<'a> ChildStatements<'a> {
+    fn prepare_dependencies(conn: &'a Connection, type_expr: &str) -> Self {
+        let dependencies = if type_expr.is_empty() {
+            None
+        } else {
+            Some(
+                conn.prepare(&format!(
+                    "SELECT depends_on_id, {type_expr} FROM dependencies WHERE issue_id = ?1"
+                ))
+                .map_err(|e| sqlite_err(&e).to_string()),
+            )
+        };
+        Self {
+            dependencies,
+            comments: None,
+            labels: None,
+        }
+    }
+
+    fn prepare_comments(&mut self, conn: &'a Connection) {
+        self.comments = Some(
+            conn.prepare(
+                "SELECT id, author, text, created_at FROM comments \
+                 WHERE issue_id = ?1 ORDER BY created_at",
+            )
+            .map_err(|e| sqlite_err(&e).to_string()),
+        );
+    }
+
+    fn prepare_labels(&mut self, conn: &'a Connection) {
+        self.labels = Some(
+            conn.prepare("SELECT label FROM labels WHERE issue_id = ?1")
+                .map_err(|e| sqlite_err(&e).to_string()),
+        );
+    }
 }
 
 impl SqliteReader {
@@ -363,6 +414,12 @@ impl SqliteReader {
             matches!(decltype(col).as_str(), "DATE" | "DATETIME" | "TIMESTAMP")
         };
 
+        let mut children =
+            ChildStatements::prepare_dependencies(&self.conn, &schema.dependency_type);
+        if schema.comments_table {
+            children.prepare_comments(&self.conn);
+        }
+
         let mut out = Vec::new();
         loop {
             let row = match rows.next() {
@@ -370,7 +427,7 @@ impl SqliteReader {
                 Ok(None) => break,
                 Err(e) => return Err(format!("error iterating issues: {}", sqlite_err(&e))),
             };
-            match self.scan_main_row(row, &dateish, schema, report) {
+            match self.scan_main_row(row, &dateish, schema, &mut children, report) {
                 Ok(scanned) => out.push(scanned),
                 Err(e) => {
                     report.errors += 1;
@@ -428,6 +485,15 @@ impl SqliteReader {
             .query([])
             .map_err(|e| format!("query failed: {}", sqlite_err(&e)))?;
 
+        let mut children =
+            ChildStatements::prepare_dependencies(&self.conn, &schema.dependency_type);
+        if schema.comments_table {
+            children.prepare_comments(&self.conn);
+        }
+        if schema.labels_table {
+            children.prepare_labels(&self.conn);
+        }
+
         let mut out = Vec::new();
         loop {
             let row = match rows.next() {
@@ -435,7 +501,7 @@ impl SqliteReader {
                 Ok(None) => break,
                 Err(e) => return Err(format!("error iterating issues: {}", sqlite_err(&e))),
             };
-            match self.scan_simple_row(row, schema, report) {
+            match self.scan_simple_row(row, schema, &mut children, report) {
                 Ok(scanned) => out.push(scanned),
                 Err(e) => {
                     report.errors += 1;
@@ -454,6 +520,7 @@ impl SqliteReader {
         row: &Row<'_>,
         dateish: &dyn Fn(usize, &str) -> bool,
         schema: &SqliteSchema,
+        children: &mut ChildStatements<'_>,
         report: &mut SqliteReport,
     ) -> Result<ScannedIssue, ScanError> {
         let id = scan_req_string(row, 0)?;
@@ -521,9 +588,9 @@ impl SqliteReader {
             comments: Vec::new(),
             source_repo,
         };
-        issue.dependencies = self.load_dependencies(&id, &schema.dependency_type, report);
+        issue.dependencies = load_dependencies(children.dependencies.as_mut(), &id, report);
         if schema.comments_table {
-            issue.comments = self.load_comments(&id, report);
+            issue.comments = load_comments(children.comments.as_mut(), &id, report);
         }
         Ok(ScannedIssue { issue, status_raw })
     }
@@ -533,6 +600,7 @@ impl SqliteReader {
         &self,
         row: &Row<'_>,
         schema: &SqliteSchema,
+        children: &mut ChildStatements<'_>,
         report: &mut SqliteReport,
     ) -> Result<ScannedIssue, ScanError> {
         let id = scan_req_string(row, 0)?;
@@ -565,7 +633,7 @@ impl SqliteReader {
         // Go's simple path DOES fall back to the labels table
         // (sqlite.go:532-535, "beads-rs compatibility").
         if schema.labels_table && labels.is_empty() {
-            labels = self.load_labels_from_table(&id, report);
+            labels = load_labels_from_table(children.labels.as_mut(), &id, report);
         }
 
         let status = Status::parse(&status_raw).unwrap_or(Status::Open);
@@ -597,9 +665,9 @@ impl SqliteReader {
             comments: Vec::new(),
             source_repo: String::new(),
         };
-        issue.dependencies = self.load_dependencies(&id, &schema.dependency_type, report);
+        issue.dependencies = load_dependencies(children.dependencies.as_mut(), &id, report);
         if schema.comments_table {
-            issue.comments = self.load_comments(&id, report);
+            issue.comments = load_comments(children.comments.as_mut(), &id, report);
         }
         Ok(ScannedIssue { issue, status_raw })
     }
@@ -621,217 +689,214 @@ impl SqliteReader {
             }
         }
     }
+}
 
-    /// Go `loadLabelsFromTable` (sqlite.go:554-578).
-    fn load_labels_from_table(&self, issue_id: &str, report: &mut SqliteReport) -> Vec<String> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT label FROM labels WHERE issue_id = ?1")
-        {
-            Ok(s) => s,
-            Err(e) => {
-                report.read_errors += 1;
-                push_warning(
-                    report,
-                    format!("reading labels for {issue_id:?}: {}", sqlite_err(&e)),
-                );
-                return Vec::new();
-            }
-        };
-        let mut rows = match stmt.query([issue_id]) {
-            Ok(r) => r,
-            Err(e) => {
-                report.read_errors += 1;
-                push_warning(
-                    report,
-                    format!("reading labels for {issue_id:?}: {}", sqlite_err(&e)),
-                );
-                return Vec::new();
-            }
-        };
-        let mut labels = Vec::new();
-        loop {
-            match rows.next() {
-                Ok(Some(row)) => match scan_req_string(row, 0) {
-                    Ok(label) => labels.push(label),
-                    Err(e) => {
-                        report.read_errors += 1;
-                        push_warning(report, format!("reading label for {issue_id:?}: {e}"));
-                    }
-                },
-                Ok(None) => break,
-                Err(e) => {
-                    report.read_errors += 1;
-                    push_warning(
-                        report,
-                        format!("iterating labels for {issue_id:?}: {}", sqlite_err(&e)),
-                    );
-                    break;
-                }
-            }
-        }
-        labels
-    }
-
-    /// Go `loadDependencies` (sqlite.go:581-617). `created_at`/`created_by`
-    /// are deliberately NOT selected — they stay zero values.
-    fn load_dependencies(
-        &self,
-        issue_id: &str,
-        dependency_type_expr: &str,
-        report: &mut SqliteReport,
-    ) -> Vec<Dependency> {
-        if dependency_type_expr.is_empty() {
+/// Go `loadLabelsFromTable` (sqlite.go:554-578) on the once-prepared
+/// statement. `None` means the caller never prepared (labels table absent);
+/// a captured `Err` replays Go's per-call prepare failure.
+fn load_labels_from_table(
+    prepared: Option<&mut Result<Statement<'_>, String>>,
+    issue_id: &str,
+    report: &mut SqliteReport,
+) -> Vec<String> {
+    let stmt = match prepared {
+        None => return Vec::new(),
+        Some(Err(e)) => {
+            report.read_errors += 1;
+            push_warning(report, format!("reading labels for {issue_id:?}: {e}"));
             return Vec::new();
         }
-        let query = format!(
-            "SELECT depends_on_id, {dependency_type_expr} FROM dependencies WHERE issue_id = ?1"
-        );
-        let mut stmt = match self.conn.prepare(&query) {
-            Ok(s) => s,
+        Some(Ok(s)) => s,
+    };
+    let mut rows = match stmt.query([issue_id]) {
+        Ok(r) => r,
+        Err(e) => {
+            report.read_errors += 1;
+            push_warning(
+                report,
+                format!("reading labels for {issue_id:?}: {}", sqlite_err(&e)),
+            );
+            return Vec::new();
+        }
+    };
+    let mut labels = Vec::new();
+    loop {
+        match rows.next() {
+            Ok(Some(row)) => match scan_req_string(row, 0) {
+                Ok(label) => labels.push(label),
+                Err(e) => {
+                    report.read_errors += 1;
+                    push_warning(report, format!("reading label for {issue_id:?}: {e}"));
+                }
+            },
+            Ok(None) => break,
             Err(e) => {
                 report.read_errors += 1;
                 push_warning(
                     report,
-                    format!("reading dependencies for {issue_id:?}: {}", sqlite_err(&e)),
+                    format!("iterating labels for {issue_id:?}: {}", sqlite_err(&e)),
                 );
-                return Vec::new();
+                break;
             }
-        };
-        let mut rows = match stmt.query([issue_id]) {
-            Ok(r) => r,
+        }
+    }
+    labels
+}
+
+/// Go `loadDependencies` (sqlite.go:581-617) on the once-prepared
+/// statement. `created_at`/`created_by` are deliberately NOT selected —
+/// they stay zero values.
+fn load_dependencies(
+    prepared: Option<&mut Result<Statement<'_>, String>>,
+    issue_id: &str,
+    report: &mut SqliteReport,
+) -> Vec<Dependency> {
+    let stmt = match prepared {
+        None => return Vec::new(),
+        Some(Err(e)) => {
+            report.read_errors += 1;
+            push_warning(
+                report,
+                format!("reading dependencies for {issue_id:?}: {e}"),
+            );
+            return Vec::new();
+        }
+        Some(Ok(s)) => s,
+    };
+    let mut rows = match stmt.query([issue_id]) {
+        Ok(r) => r,
+        Err(e) => {
+            report.read_errors += 1;
+            push_warning(
+                report,
+                format!("reading dependencies for {issue_id:?}: {}", sqlite_err(&e)),
+            );
+            return Vec::new();
+        }
+    };
+    let mut deps = Vec::new();
+    loop {
+        let row = match rows.next() {
+            Ok(Some(r)) => r,
+            Ok(None) => break,
             Err(e) => {
                 report.read_errors += 1;
                 push_warning(
                     report,
-                    format!("reading dependencies for {issue_id:?}: {}", sqlite_err(&e)),
+                    format!(
+                        "iterating dependencies for {issue_id:?}: {}",
+                        sqlite_err(&e)
+                    ),
                 );
-                return Vec::new();
+                break;
             }
         };
-        let mut deps = Vec::new();
-        loop {
-            let row = match rows.next() {
-                Ok(Some(r)) => r,
-                Ok(None) => break,
-                Err(e) => {
-                    report.read_errors += 1;
-                    push_warning(
-                        report,
-                        format!(
-                            "iterating dependencies for {issue_id:?}: {}",
-                            sqlite_err(&e)
-                        ),
-                    );
-                    break;
-                }
-            };
-            let scanned = (|| -> Result<(String, String), ScanError> {
-                let target = scan_req_string(row, 0)?;
-                let ty = scan_req_string(row, 1)?;
-                Ok((target, ty))
-            })();
-            let (depends_on_id, dep_type) = match scanned {
-                Ok(v) => v,
-                Err(e) => {
-                    report.read_errors += 1;
-                    push_warning(report, format!("reading dependency for {issue_id:?}: {e}"));
-                    continue;
-                }
-            };
-            // Go: `TrimSpace(DependsOnID) == "" || (Type != "" && !Type.IsValid())`
-            // where IsValid is a non-blank test — a whitespace-only type is
-            // invalid, an empty one is kept.
-            if depends_on_id.trim().is_empty()
-                || (!dep_type.is_empty() && dep_type.trim().is_empty())
-            {
+        let scanned = (|| -> Result<(String, String), ScanError> {
+            let target = scan_req_string(row, 0)?;
+            let ty = scan_req_string(row, 1)?;
+            Ok((target, ty))
+        })();
+        let (depends_on_id, dep_type) = match scanned {
+            Ok(v) => v,
+            Err(e) => {
                 report.read_errors += 1;
-                push_warning(
+                push_warning(report, format!("reading dependency for {issue_id:?}: {e}"));
+                continue;
+            }
+        };
+        // Go: `TrimSpace(DependsOnID) == "" || (Type != "" && !Type.IsValid())`
+        // where IsValid is a non-blank test — a whitespace-only type is
+        // invalid, an empty one is kept.
+        if depends_on_id.trim().is_empty() || (!dep_type.is_empty() && dep_type.trim().is_empty()) {
+            report.read_errors += 1;
+            push_warning(
                     report,
                     format!(
                         "invalid dependency for {issue_id:?}: target {depends_on_id:?}, type {dep_type:?}"
                     ),
                 );
-                continue;
-            }
-            deps.push(Dependency {
-                issue_id: issue_id.to_string(),
-                depends_on_id,
-                depends_on_legacy: String::new(),
-                target_id_legacy: String::new(),
-                r#type: DependencyType::parse(&dep_type),
-                created_at: None,
-                created_by: String::new(),
-            });
+            continue;
         }
-        deps
+        deps.push(Dependency {
+            issue_id: issue_id.to_string(),
+            depends_on_id,
+            depends_on_legacy: String::new(),
+            target_id_legacy: String::new(),
+            r#type: DependencyType::parse(&dep_type),
+            created_at: None,
+            created_by: String::new(),
+        });
     }
+    deps
+}
 
-    /// Go `loadComments` (sqlite.go:652-684).
-    fn load_comments(&self, issue_id: &str, report: &mut SqliteReport) -> Vec<Comment> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT id, author, text, created_at FROM comments WHERE issue_id = ?1 ORDER BY created_at",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                report.read_errors += 1;
-                push_warning(report, format!("reading comments for {issue_id:?}: {}", sqlite_err(&e)));
-                return Vec::new();
-            }
-        };
-        let mut rows = match stmt.query([issue_id]) {
-            Ok(r) => r,
+/// Go `loadComments` (sqlite.go:652-684) on the once-prepared statement.
+fn load_comments(
+    prepared: Option<&mut Result<Statement<'_>, String>>,
+    issue_id: &str,
+    report: &mut SqliteReport,
+) -> Vec<Comment> {
+    let stmt = match prepared {
+        None => return Vec::new(),
+        Some(Err(e)) => {
+            report.read_errors += 1;
+            push_warning(report, format!("reading comments for {issue_id:?}: {e}"));
+            return Vec::new();
+        }
+        Some(Ok(s)) => s,
+    };
+    let mut rows = match stmt.query([issue_id]) {
+        Ok(r) => r,
+        Err(e) => {
+            report.read_errors += 1;
+            push_warning(
+                report,
+                format!("reading comments for {issue_id:?}: {}", sqlite_err(&e)),
+            );
+            return Vec::new();
+        }
+    };
+    let mut comments = Vec::new();
+    loop {
+        let row = match rows.next() {
+            Ok(Some(r)) => r,
+            Ok(None) => break,
             Err(e) => {
                 report.read_errors += 1;
                 push_warning(
                     report,
-                    format!("reading comments for {issue_id:?}: {}", sqlite_err(&e)),
+                    format!("iterating comments for {issue_id:?}: {}", sqlite_err(&e)),
                 );
-                return Vec::new();
+                break;
             }
         };
-        let mut comments = Vec::new();
-        loop {
-            let row = match rows.next() {
-                Ok(Some(r)) => r,
-                Ok(None) => break,
-                Err(e) => {
-                    report.read_errors += 1;
-                    push_warning(
-                        report,
-                        format!("iterating comments for {issue_id:?}: {}", sqlite_err(&e)),
-                    );
-                    break;
-                }
-            };
-            let scanned = (|| -> Result<Comment, ScanError> {
-                let id = scan_req_string(row, 0)?;
-                let author = scan_req_string(row, 1)?;
-                let text = scan_req_string(row, 2)?;
-                let created_raw = scan_opt_string(row, 3)?;
-                // Go: invalid created_at is silently left as the zero time —
-                // no ReadErrors, no warning (sqlite.go:671-675).
-                let created_at = created_raw
-                    .as_deref()
-                    .and_then(|s| parse_sqlite_time(s).map(|(sec, n)| format_go_instant(sec, n)));
-                Ok(Comment {
-                    id,
-                    issue_id: issue_id.to_string(),
-                    author,
-                    text,
-                    created_at,
-                })
-            })();
-            match scanned {
-                Ok(c) => comments.push(c),
-                Err(e) => {
-                    report.read_errors += 1;
-                    push_warning(report, format!("reading comment for {issue_id:?}: {e}"));
-                }
+        let scanned = (|| -> Result<Comment, ScanError> {
+            let id = scan_req_string(row, 0)?;
+            let author = scan_req_string(row, 1)?;
+            let text = scan_req_string(row, 2)?;
+            let created_raw = scan_opt_string(row, 3)?;
+            // Go: invalid created_at is silently left as the zero time —
+            // no ReadErrors, no warning (sqlite.go:671-675).
+            let created_at = created_raw
+                .as_deref()
+                .and_then(|s| parse_sqlite_time(s).map(|(sec, n)| format_go_instant(sec, n)));
+            Ok(Comment {
+                id,
+                issue_id: issue_id.to_string(),
+                author,
+                text,
+                created_at,
+            })
+        })();
+        match scanned {
+            Ok(c) => comments.push(c),
+            Err(e) => {
+                report.read_errors += 1;
+                push_warning(report, format!("reading comment for {issue_id:?}: {e}"));
             }
         }
-        comments
     }
+    comments
 }
 
 // ---------------------------------------------------------------------------

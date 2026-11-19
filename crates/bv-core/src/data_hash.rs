@@ -334,51 +334,100 @@ pub fn source_issues_hash(issues: &[Issue], tombstone_ids: &[String]) -> String 
         return "empty".to_string();
     }
 
-    let mut w = FingerprintWriter::new();
-    let mut fingerprints: Vec<OrderedFingerprint> = Vec::with_capacity(issues.len() + stubs.len());
-    for (i, issue) in issues.iter().enumerate() {
-        fingerprints.push(ordered_fingerprint(&mut w, issue, i));
-    }
-    if !stubs.is_empty() {
-        let mut stub = Issue {
-            id: String::new(),
-            content_hash: String::new(),
-            title: String::new(),
-            description: String::new(),
-            design: String::new(),
-            acceptance_criteria: String::new(),
-            notes: String::new(),
-            status: crate::model::Status::Tombstone,
-            priority: 0,
-            issue_type: String::new(),
-            assignee: String::new(),
-            estimated_minutes: None,
-            created_at: None,
-            updated_at: None,
-            due_date: None,
-            defer_until: None,
-            closed_at: None,
-            external_ref: None,
-            compaction_level: 0,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: 0,
-            labels: vec![],
-            dependencies: vec![],
-            comments: vec![],
-            source_repo: String::new(),
-        };
-        for (j, id) in stubs.iter().enumerate() {
-            stub.id.clear();
-            stub.id.push_str(id);
-            fingerprints.push(ordered_fingerprint(&mut w, &stub, issues.len() + j));
-        }
-    }
+    let mut fingerprints = issue_fingerprints(issues);
+    append_stub_fingerprints(&mut fingerprints, issues.len(), &stubs);
     finish_data_hash(fingerprints)
+}
+
+/// The per-issue `(id, content hash, dependency hash)` triples — the
+/// expensive half of every v0.25.0 digest, shared by
+/// [`compute_data_hash`] and [`source_issues_hash`].
+fn issue_fingerprints(issues: &[Issue]) -> Vec<OrderedFingerprint> {
+    let mut w = FingerprintWriter::new();
+    issues
+        .iter()
+        .enumerate()
+        .map(|(i, issue)| ordered_fingerprint(&mut w, issue, i))
+        .collect()
+}
+
+/// Append one bare `{id, status: tombstone}` fingerprint per stub id not
+/// already present in the visible set, positioned after the real issues —
+/// exactly what `source_issues_hash` did inline.
+fn append_stub_fingerprints(
+    fingerprints: &mut Vec<OrderedFingerprint>,
+    base_position: usize,
+    stubs: &[&str],
+) {
+    if stubs.is_empty() {
+        return;
+    }
+    let mut w = FingerprintWriter::new();
+    let mut stub = Issue {
+        id: String::new(),
+        content_hash: String::new(),
+        title: String::new(),
+        description: String::new(),
+        design: String::new(),
+        acceptance_criteria: String::new(),
+        notes: String::new(),
+        status: crate::model::Status::Tombstone,
+        priority: 0,
+        issue_type: String::new(),
+        assignee: String::new(),
+        estimated_minutes: None,
+        created_at: None,
+        updated_at: None,
+        due_date: None,
+        defer_until: None,
+        closed_at: None,
+        external_ref: None,
+        compaction_level: 0,
+        compacted_at: None,
+        compacted_at_commit: None,
+        original_size: 0,
+        labels: vec![],
+        dependencies: vec![],
+        comments: vec![],
+        source_repo: String::new(),
+    };
+    for (j, id) in stubs.iter().enumerate() {
+        stub.id.clear();
+        stub.id.push_str(id);
+        fingerprints.push(ordered_fingerprint(&mut w, &stub, base_position + j));
+    }
+}
+
+/// Both load digests from a SINGLE fingerprint pass.
+///
+/// Robot load paths need `compute_data_hash(issues)` (the analysed set) and
+/// `source_issues_hash(issues, tombstones)` (the file that was read) over the
+/// same corpus; each used to re-run `ordered_fingerprint` — a full SHA-256
+/// over every field of every issue — for the same triples. Only the
+/// sort/write tail differs between the two, so the triples are computed once
+/// and each digest finishes independently. Returns
+/// `(compute_data_hash, source_issues_hash)`; byte-identical to calling the
+/// two functions separately, including every `"empty"` degenerate case.
+pub fn compute_data_hash_pair(issues: &[Issue], tombstone_ids: &[String]) -> (String, String) {
+    let seen: std::collections::HashSet<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    let stubs: Vec<&str> = tombstone_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !seen.contains(id))
+        .collect();
+    if issues.is_empty() && stubs.is_empty() {
+        return ("empty".to_string(), "empty".to_string());
+    }
+    let fingerprints = issue_fingerprints(issues);
+    let data_hash = finish_data_hash(fingerprints.clone());
+    let mut all = fingerprints;
+    append_stub_fingerprints(&mut all, issues.len(), &stubs);
+    (data_hash, finish_data_hash(all))
 }
 
 /// One (id, content hash, dependency hash) triple plus the input position that
 /// breaks duplicate-id ties exactly the way the Go sort does.
+#[derive(Clone)]
 struct OrderedFingerprint {
     id: String,
     content_hash: String,

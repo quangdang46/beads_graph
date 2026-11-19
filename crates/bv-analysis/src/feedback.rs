@@ -196,6 +196,14 @@ impl fmt::Display for GoTime {
     }
 }
 
+/// Go's absent `time.Time` field decodes to the zero time — serde's
+/// `#[serde(default)]` needs this to fill a missing `created_at`-style key.
+impl Default for GoTime {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 impl Serialize for GoTime {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&self.to_rfc3339())
@@ -216,29 +224,43 @@ impl<'de> Deserialize<'de> for GoTime {
 }
 
 /// A single feedback action (Go `FeedbackEvent`, feedback.go:18-23).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Every field defaults like Go's `encoding/json`: an absent key leaves the
+/// Go zero value (`""`, `0`, `0.0`, zero `time.Time`), which `normalize_loaded`
+/// then reconciles — serde must not reject the file first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeedbackEvent {
+    #[serde(default)]
     pub issue_id: String,
     /// "accept" or "ignore".
+    #[serde(default)]
     pub action: String,
     /// Score at the time of feedback.
+    #[serde(default)]
     pub score: f64,
+    #[serde(default)]
     pub timestamp: GoTime,
 }
 
 /// A smoothed weight adjustment (Go `WeightAdjustment`, feedback.go:26-31).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Same absent-field-is-zero semantics as [`FeedbackEvent`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WeightAdjustment {
+    #[serde(default)]
     pub name: String,
     /// Multiplier, clamped to the 0.5-2.0 range.
+    #[serde(default)]
     pub adjustment: f64,
     /// Number of feedback events that touched this factor.
+    #[serde(default)]
     pub samples: usize,
+    #[serde(default)]
     pub last_updated: GoTime,
 }
 
 /// Aggregate feedback metrics (Go `FeedbackStats`, feedback.go:45-50).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FeedbackStats {
     pub total_accepted: usize,
     pub total_ignored: usize,
@@ -250,8 +272,11 @@ pub struct FeedbackStats {
 /// feedback.go:34-42). Field order is the on-disk key order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeedbackData {
+    #[serde(default)]
     pub version: String,
+    #[serde(default)]
     pub created_at: GoTime,
+    #[serde(default)]
     pub updated_at: GoTime,
     #[serde(default)]
     pub events: Vec<FeedbackEvent>,
@@ -1028,5 +1053,38 @@ mod tests {
         let back: GoTime = serde_json::from_str(&raw).unwrap();
         assert_eq!(back, now);
         assert!(!back.is_zero());
+    }
+
+    /// Go's `encoding/json` leaves absent fields at their zero values, so a
+    /// `feedback.json` that only carries `"version"` — or is literally `{}` —
+    /// must still decode; `normalize_loaded` then fills the gaps. serde used
+    /// to reject these files outright on the missing required keys.
+    #[test]
+    fn partial_feedback_files_decode_like_go() {
+        for raw in ["{}", r#"{"version":"1.0"}"#] {
+            let loaded: FeedbackData = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("{raw} must decode like Go: {e}"));
+            let fb = normalize_loaded(loaded);
+            assert_eq!(fb.version, "1.0");
+            assert!(!fb.created_at.is_zero(), "created_at reconciles to now");
+            assert_eq!(fb.adjustments.len(), ADJUSTMENT_NAMES.len());
+            assert!(fb.events.is_empty());
+            assert_eq!(fb.stats, FeedbackStats::default());
+        }
+
+        // A sparse nested event/adjustment/stats also decodes: absent keys are
+        // zero-valued, matching Go's struct decode.
+        let raw = r#"{"events":[{"issue_id":"A-1"}],"adjustments":[{"name":"Risk"}],"stats":{}}"#;
+        let loaded: FeedbackData = serde_json::from_str(raw).unwrap();
+        let event = &loaded.events[0];
+        assert_eq!(event.issue_id, "A-1");
+        assert_eq!(event.action, "");
+        assert_eq!(event.score, 0.0);
+        assert!(event.timestamp.is_zero());
+        assert_eq!(loaded.adjustments[0].name, "Risk");
+        assert_eq!(loaded.adjustments[0].adjustment, 0.0);
+        assert_eq!(loaded.adjustments[0].samples, 0);
+        assert!(loaded.adjustments[0].last_updated.is_zero());
+        assert_eq!(loaded.stats, FeedbackStats::default());
     }
 }

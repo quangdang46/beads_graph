@@ -3,7 +3,7 @@
 //! removed. Field names and semantics identical so algorithm modules can
 //! be included via #[path] without modification (Phase 2a parity rule).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Directed graph optimized for graph algorithms.
 /// adj[u] = nodes u points to; rev_adj[v] = nodes pointing at v.
@@ -13,6 +13,11 @@ pub struct DiGraph {
     pub(crate) node_index: HashMap<String, usize>,
     pub(crate) adj: Vec<Vec<usize>>,
     pub(crate) rev_adj: Vec<Vec<usize>>,
+    /// Per-source dedup set mirroring `adj` — `add_edge`'s idempotence check
+    /// was a linear `contains` over the out-neighbour list, O(out_degree)
+    /// per call. The set answers in O(1); `adj` keeps insertion order so
+    /// every algorithm sees identical adjacency.
+    pub(crate) adj_set: Vec<HashSet<usize>>,
     pub(crate) edge_count: usize,
 }
 
@@ -25,6 +30,7 @@ impl DiGraph {
             node_index: HashMap::new(),
             adj: Vec::new(),
             rev_adj: Vec::new(),
+            adj_set: Vec::new(),
             edge_count: 0,
         }
     }
@@ -37,6 +43,7 @@ impl DiGraph {
             node_index: HashMap::with_capacity(node_capacity),
             adj: Vec::with_capacity(node_capacity),
             rev_adj: Vec::with_capacity(node_capacity),
+            adj_set: Vec::with_capacity(node_capacity),
             edge_count: 0,
         }
     }
@@ -51,6 +58,7 @@ impl DiGraph {
         self.node_index.insert(id.to_string(), idx);
         self.adj.push(Vec::new());
         self.rev_adj.push(Vec::new());
+        self.adj_set.push(HashSet::new());
         idx
     }
 
@@ -59,7 +67,9 @@ impl DiGraph {
         if from >= self.nodes.len() || to >= self.nodes.len() {
             return;
         }
-        if self.adj[from].contains(&to) {
+        // `insert` returns false when the edge already exists — the same
+        // idempotence `adj[from].contains(&to)` enforced, in O(1).
+        if !self.adj_set[from].insert(to) {
             return;
         }
         self.adj[from].push(to);

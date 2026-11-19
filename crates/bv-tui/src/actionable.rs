@@ -106,7 +106,7 @@ pub fn compute_actionable(issues: &[Issue]) -> Vec<ActionableItem> {
             .iter()
             .filter(|i| {
                 i.dependencies.iter().any(|d| {
-                    d.depends_on_id == issue.id
+                    d.effective_depends_on() == issue.id
                         && d.r#type == bv_core::model::DependencyType::Blocks
                 })
             })

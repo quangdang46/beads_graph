@@ -336,6 +336,18 @@ pub struct App {
     pub alerts: Vec<bv_analysis::drift::Alert>,
     /// Collapsed node ids in the Tree view (all nodes start expanded).
     pub tree_collapsed: std::collections::HashSet<String>,
+    /// Flat-tree node list for `ViewMode::Tree`, rebuilt only when the
+    /// corpus hash or the collapsed set changes — `render` runs every frame
+    /// and `build_tree_nodes` is O(issues × deps).
+    tree_view_nodes: Vec<crate::views::tree::TreeNode>,
+    /// Cache key for `tree_view_nodes`: (data hash, collapsed set).
+    tree_view_key: Option<(String, std::collections::HashSet<String>)>,
+    /// `"{id} {title}"` fuzzy-search haystack per row, built once — the old
+    /// code `format!`-ed it for every row on every keystroke.
+    search_haystacks: Vec<String>,
+    /// Per-row hash-embed vectors for the no-index semantic fallback,
+    /// computed once instead of re-embedding every row per keystroke.
+    semantic_vectors: std::cell::OnceCell<Vec<Vec<f32>>>,
     /// List pane shows issues as a dependency tree instead of a flat list.
     ///
     /// Toggled with `D`. Go's list is flat, so this is an addition to the
@@ -1077,6 +1089,13 @@ impl App {
             .filter(|r| matches!(r.status, Status::Blocked))
             .count();
         let status_closed_count = rows.iter().filter(|r| r.status.is_closed()).count();
+        // Fuzzy-search haystack per row, built once — `rows` never mutates
+        // in place (a reload replaces the whole `App`), so this stays valid
+        // for the App's lifetime and saves a `format!` per row per keystroke.
+        let search_haystacks: Vec<String> = rows
+            .iter()
+            .map(|r| format!("{} {}", r.id, r.title))
+            .collect();
         let freshness_warn_s = std::env::var("BV_FRESHNESS_WARN_S")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -1100,6 +1119,10 @@ impl App {
             alerts_total,
             alerts,
             tree_collapsed: std::collections::HashSet::new(),
+            tree_view_nodes: Vec::new(),
+            tree_view_key: None,
+            search_haystacks,
+            semantic_vectors: std::cell::OnceCell::new(),
             left_tree_mode: true,
             dep_tree_nodes: Vec::new(),
             dep_tree_window: 0..0,
@@ -1214,8 +1237,11 @@ impl App {
             bv_analysis::label_health::compute_label_attention_scores(&issues, &cfg, now);
         app.attention_labels = attention.labels;
         // Build graph data for the Graph view (blocker/dependent maps).
+        // `issues` is moved in — `GraphData::build` consumes it into its own
+        // map, so this avoids the old `issue_map.values().cloned().collect()`
+        // deep copy of the entire corpus.
         app.graph_data = Some(crate::views::graph::GraphData::build(
-            app.issue_map.values().cloned().collect(),
+            issues,
             app.graph_metrics.clone(),
         ));
         // Initialize history view (empty for now — populated when user presses h).
@@ -1489,13 +1515,15 @@ impl App {
         let folded = self.search_query.to_lowercase();
         let needle = nucleo_matcher::Utf32Str::new(&folded, &mut needle_buf);
         let mut scored: Vec<(u16, usize)> = Vec::new();
-        for (i, r) in self.rows.iter().enumerate() {
+        for i in 0..self.rows.len() {
             if !self.row_passes_filters(i) {
                 continue;
             }
-            let haystack = format!("{} {}", r.id, r.title);
+            // `search_haystacks[i]` is the same `"{id} {title}"` string,
+            // built once in `App::new` — `rows` never mutates in place.
+            let haystack = self.search_haystacks[i].as_str();
             haystack_buf.clear();
-            let hay = nucleo_matcher::Utf32Str::new(&haystack, &mut haystack_buf);
+            let hay = nucleo_matcher::Utf32Str::new(haystack, &mut haystack_buf);
             if let Some(score) = matcher.fuzzy_match(hay, needle) {
                 scored.push((score, i));
             }
@@ -1684,20 +1712,29 @@ impl App {
     /// Fresh hash-embed text scores for every row (fallback when no
     /// persistent index is available — same vectors the index stores).
     fn fresh_text_scores(&self, query_vec: &[f32], dim: usize) -> Vec<(usize, f64)> {
-        let _ = dim;
+        // Embed every row's document text once and cache the matrix —
+        // `rows` and `semantic_docs` cannot change within one `App`, so the
+        // vectors stay valid for its lifetime and repeated queries only pay
+        // for the cosine pass. Index and fallback must agree: both embed
+        // the Go `IssueDocument` text (ID×3/title×2/labels/desc), not the
+        // old title+description pair.
+        let vecs = self.semantic_vectors.get_or_init(|| {
+            self.rows
+                .iter()
+                .map(|r| {
+                    let text: std::borrow::Cow<'_, str> = match self.semantic_docs().get(&r.id) {
+                        Some(doc) => std::borrow::Cow::Borrowed(doc.text.as_str()),
+                        None => std::borrow::Cow::Owned(format!("{} {}", r.title, r.description)),
+                    };
+                    bv_search::embedder::hash_embed(&text, dim)
+                })
+                .collect::<Vec<Vec<f32>>>()
+        });
         self.rows
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| {
-                // Index and fallback must agree: both embed the Go
-                // `IssueDocument` text (ID×3/title×2/labels/desc), not the
-                // old title+description pair.
-                let text: std::borrow::Cow<'_, str> = match self.semantic_docs().get(&r.id) {
-                    Some(doc) => std::borrow::Cow::Borrowed(doc.text.as_str()),
-                    None => std::borrow::Cow::Owned(format!("{} {}", r.title, r.description)),
-                };
-                let issue_vec = bv_search::embedder::hash_embed(&text, dim);
-                let score = bv_search::embedder::cosine_similarity(query_vec, &issue_vec);
+            .filter_map(|(i, _)| {
+                let score = bv_search::embedder::cosine_similarity(query_vec, &vecs[i]);
                 (score > 0.0).then_some((i, score))
             })
             .collect()
@@ -4405,17 +4442,31 @@ pub(crate) fn age_str(created_at: &Option<String>) -> String {
 pub fn render(f: &mut Frame, app: &mut App) {
     match app.current_view {
         ViewMode::Tree => {
-            // Borrow, don't clone: the tree walks `id`/`title`/`dependencies`
-            // only, and `.values().cloned().collect()` was deep-copying every
-            // large text field (~3 MB on ultraworkers) on every frame to do it.
-            let issues: Vec<&bv_core::model::Issue> = app.issue_map.values().collect();
-            let nodes = crate::views::tree::build_tree_nodes(&issues, &app.tree_collapsed);
+            // Cache the built tree across frames: `build_tree_nodes` is
+            // O(issues × deps) and the inputs (`issue_map` contents via
+            // `data_hash`, `tree_collapsed`) only change on reload or
+            // expand/collapse — rebuild only when the key differs.
+            let key = (app.live_data_hash(), app.tree_collapsed.clone());
+            if app.tree_view_key.as_ref() != Some(&key) {
+                let nodes = {
+                    // Borrow, don't clone: the tree walks
+                    // `id`/`title`/`dependencies` only, and
+                    // `.values().cloned().collect()` was deep-copying every
+                    // large text field (~3 MB on ultraworkers) on every
+                    // frame to do it.
+                    let issues: Vec<&bv_core::model::Issue> = app.issue_map.values().collect();
+                    crate::views::tree::build_tree_nodes(&issues, &app.tree_collapsed)
+                };
+                app.tree_view_nodes = nodes;
+                app.tree_view_key = Some(key);
+            }
+            let nodes = &app.tree_view_nodes;
             // The tree has no cursor, so the window is always anchored at the
             // top: build only the rows that fit, which is all a
             // non-scrolled `Paragraph` would paint anyway.
             let height = usize::from(f.area().height.saturating_sub(2));
             let window = crate::views::tree::visible_range(nodes.len(), 0, height);
-            let lines = crate::views::tree::render_tree_lines(&nodes, window);
+            let lines = crate::views::tree::render_tree_lines(nodes, window);
             let block = ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
                 .title(" TREE VIEW ");

@@ -473,7 +473,7 @@ pub fn compute_cross_label_flow(issues: &[Issue], cfg: &LabelHealthConfig) -> Cr
             if !dep.r#type.is_blocking() {
                 continue;
             }
-            let Some(blocker) = issue_map.get(dep.depends_on_id.as_str()) else {
+            let Some(blocker) = issue_map.get(dep.effective_depends_on()) else {
                 continue;
             };
             if !cfg.include_closed_in_flow && is_closed_like(blocker.status) {
@@ -710,7 +710,7 @@ pub fn compute_label_health_for_label(
             if !dep.r#type.is_blocking() {
                 continue;
             }
-            for bl in labels_for_issue(issues, &dep.depends_on_id) {
+            for bl in labels_for_issue(issues, dep.effective_depends_on()) {
                 if bl != label {
                     incoming_deps += 1;
                     seen_in.insert(bl.to_string());
@@ -728,7 +728,7 @@ pub fn compute_label_health_for_label(
         }
         let mut counted = false;
         for dep in &other.dependencies {
-            if !dep.r#type.is_blocking() || !labeled_set.contains(dep.depends_on_id.as_str()) {
+            if !dep.r#type.is_blocking() || !labeled_set.contains(dep.effective_depends_on()) {
                 continue;
             }
             for ol in &other.labels {
@@ -1186,7 +1186,7 @@ fn compute_label_attention(
                 continue;
             }
             for dep in &other.dependencies {
-                if dep.depends_on_id == iss.id && dep.r#type.is_blocking() {
+                if dep.effective_depends_on() == iss.id && dep.r#type.is_blocking() {
                     block_impact += 1;
                 }
             }

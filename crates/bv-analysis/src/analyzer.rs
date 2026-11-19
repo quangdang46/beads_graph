@@ -856,39 +856,64 @@ fn idx_to_score_map(g: &DiGraph, scores: Vec<f64>) -> BTreeMap<String, f64> {
         .collect()
 }
 
-/// Run one Phase-2 metric on a thread with timeout; panic or overrun -> Err.
-fn run_with_timeout<T: Send + 'static>(
-    budget: Duration,
+/// Spawn one Phase-2 metric worker up front so every enabled metric runs
+/// concurrently — Go's `computePhase2` fans out one goroutine per metric,
+/// each with its own timer (pkg/analysis/graph.go). Running them serially
+/// made wall time the SUM of the per-metric budgets instead of the max.
+///
+/// The worker reports its own compute `Duration` so the status `ms` field
+/// keeps meaning "how long this metric took", not "how long we waited".
+/// Panic payloads are preserved so unraced metrics can re-throw exactly
+/// like the direct calls they replace.
+type MetricResult<T> = Result<(T, Duration), Box<dyn std::any::Any + Send + 'static>>;
+
+fn spawn_metric<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, ()> {
-    // A zero budget is an already-fired timer, not a race. Go arms
-    // `time.NewTimer(config.PageRankTimeout)` and selects against it
-    // (graph.go:2020-2022); a zero duration arms a timer that is firing now,
-    // so the timeout branch is taken without the worker having been given a
-    // chance to run.
-    //
-    // `recv_timeout(Duration::ZERO)` does not model that — it degrades to a
-    // non-blocking `try_recv`, which *loses* whenever the worker happens to
-    // win the scheduler. On an 8-node graph that is a genuine coin-flip, and
-    // the metric it flips is the parity-visible `pagerank_timeout` flag. It
-    // failed intermittently here for exactly that reason.
-    //
-    // `AnalysisBudget::timeout_for` never returns zero, so this is reached only
-    // by an explicit zero in `AnalysisConfigReport`, which is the case Go's
-    // timer also resolves as a timeout.
+) -> std::sync::mpsc::Receiver<MetricResult<T>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map(|v| (v, t0.elapsed()));
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Collect a fanned-out metric against the shared fan-out deadline: every
+/// worker launched at `fanout_start` gets `budget` from that instant, the
+/// same shape as Go arming `time.NewTimer(budget)` when each goroutine
+/// starts. A zero budget is an already-fired timer -> `Err`, matching
+/// `run_with_timeout`.
+fn collect_metric<T>(
+    rx: std::sync::mpsc::Receiver<MetricResult<T>>,
+    budget: Duration,
+    fanout_start: Instant,
+) -> Result<(T, Duration), ()> {
     if budget.is_zero() {
         return Err(());
     }
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        // Panic inside f is caught by converting the join result.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(budget) {
+    // `checked_sub` → None means the shared deadline already passed; a zero
+    // remainder degrades to `recv_timeout(0)` = try_recv, which still accepts
+    // a result the worker managed to send before we got here (Go's select
+    // has the same arrive-before-deadline-wins raciness).
+    let remaining = budget.saturating_sub(fanout_start.elapsed());
+    match rx.recv_timeout(remaining) {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(_)) => Err(()), // panic -> timeout status (Go parity)
-        Err(_) => Err(()),     // recv_timeout elapsed
+        // Panic (Err payload) and recv timeout are indistinguishable to the
+        // caller — both surface as the metric's timeout status, as in Go.
+        _ => Err(()),
+    }
+}
+
+/// Collect an UNRACED metric (no Go timeout): block until the worker
+/// reports, re-throwing a panic payload so behavior matches the direct call
+/// this replaces.
+fn collect_metric_blocking<T>(rx: std::sync::mpsc::Receiver<MetricResult<T>>) -> (T, Duration) {
+    match rx.recv() {
+        Ok(Ok(v)) => v,
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => unreachable!("metric worker terminated without sending a result"),
     }
 }
 
@@ -910,6 +935,47 @@ pub fn analyze_phase2_blocking(
     // a metric Go never computed.
     let order_available = topological_order_available(&g);
 
+    // Fan-out: spawn every enabled metric worker BEFORE collecting any
+    // result so they all run concurrently against one shared deadline —
+    // Go's goroutine-per-metric fan-out. Collecting serially after the
+    // spawns keeps result handling deterministic.
+    let timeout = budget.timeout_for(n);
+    let fanout_start = Instant::now();
+
+    // k-core / articulation / slack run even under BV_SKIP_PHASE2 (Go
+    // ApplyEnvOverrides), so their workers launch unconditionally.
+    let kcore_rx = {
+        let gc = std::sync::Arc::clone(&g);
+        Some(spawn_metric(move || kcore(&gc)))
+    };
+    let art_rx = {
+        let gc = std::sync::Arc::clone(&g);
+        Some(spawn_metric(move || {
+            crate::algorithms::articulation::articulation_points(&gc)
+        }))
+    };
+    let slack_rx = if order_available {
+        let gc = std::sync::Arc::clone(&g);
+        Some(spawn_metric(move || crate::algorithms::slack::slack(&gc)))
+    } else {
+        None
+    };
+
+    // Phase-2 workers — `None` receiver means "skipped", decided up front.
+    let mut pr_rx = None;
+    let mut bw_rx = None;
+    let mut bw_approx_used = false;
+    let mut bw_sample = 0usize;
+    let mut bw_skip_reason = "";
+    let mut ev_rx = None;
+    let mut hits_rx = None;
+    let mut hits_skip_reason = "";
+    let mut crit_rx = None;
+    let mut cyc_rx = None;
+    // Tri-state for cycles: skipped / computed-empty (acyclic) / enumerated.
+    let mut cycles_skipped = false;
+    let mut cycles_acyclic = false;
+
     if budget.skip_phase2 {
         let reason = "BV_SKIP_PHASE2 set";
         status.page_rank = StatusEntry::skipped(reason);
@@ -921,171 +987,191 @@ pub fn analyze_phase2_blocking(
         // k-core/articulation/slack REMAIN enabled (Go ApplyEnvOverrides).
     } else {
         // PageRank
-        let t0 = Instant::now();
         let gc = std::sync::Arc::clone(&g);
-        match run_with_timeout(budget.timeout_for(n), move || {
+        pr_rx = Some(spawn_metric(move || {
             let _t = crate::metrics::time(&crate::metrics::TIMING_PAGERANK_COMPUTE);
             pagerank_default(&gc)
-        }) {
-            Ok(pr) => {
-                status.page_rank = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
-                out.page_rank = Some(idx_to_score_map(&g, pr));
-            }
-            Err(()) => status.page_rank = StatusEntry::timeout(0.0),
-        }
+        }));
 
         // Betweenness: density-aware mode selection (Go ConfigForSize parity).
-        let t0 = Instant::now();
         let sample = recommend_sample_size(n);
         let (bw_approx, bw_skip) = budget.betweenness_mode(n);
         if bw_skip {
-            status.betweenness = StatusEntry::skipped("graph too dense (density > 0.01)");
-        } else if !bw_approx {
-            let gc = std::sync::Arc::clone(&g);
-            match run_with_timeout(budget.timeout_for(n), move || {
-                let _t = crate::metrics::time(&crate::metrics::TIMING_BETWEENNESS_COMPUTE);
-                betweenness(&gc)
-            }) {
-                Ok(bw) => {
-                    status.betweenness = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
-                    out.betweenness = Some(idx_to_score_map(&g, bw));
-                }
-                Err(()) => status.betweenness = StatusEntry::timeout(0.0),
-            }
+            bw_skip_reason = "graph too dense (density > 0.01)";
         } else {
             let gc = std::sync::Arc::clone(&g);
-            match run_with_timeout(budget.timeout_for(n), move || {
-                let _t = crate::metrics::time(&crate::metrics::TIMING_BETWEENNESS_COMPUTE);
-                betweenness_approx(&gc, sample, Some(1))
-            }) {
-                Ok(bw) => {
-                    // Go: state stays "computed" with reason "approximate"
-                    // (betweennessReason) plus the sample size.
-                    let mut e = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
-                    e.reason = "approximate".into();
-                    e.sample = sample;
-                    status.betweenness = e;
-                    out.betweenness = Some(idx_to_score_map(&g, bw));
-                }
-                Err(()) => status.betweenness = StatusEntry::timeout(0.0),
+            if bw_approx {
+                bw_approx_used = true;
+                bw_sample = sample;
+                bw_rx = Some(spawn_metric(move || {
+                    let _t = crate::metrics::time(&crate::metrics::TIMING_BETWEENNESS_COMPUTE);
+                    betweenness_approx(&gc, sample, Some(1))
+                }));
+            } else {
+                bw_rx = Some(spawn_metric(move || {
+                    let _t = crate::metrics::time(&crate::metrics::TIMING_BETWEENNESS_COMPUTE);
+                    betweenness(&gc)
+                }));
             }
         }
 
         // Eigenvector (fixed 50 iterations — Go parity).
-        let t0 = Instant::now();
         let gc = std::sync::Arc::clone(&g);
-        match run_with_timeout(budget.timeout_for(n), move || {
+        ev_rx = Some(spawn_metric(move || {
             crate::algorithms::eigenvector::eigenvector_default(&gc)
-        }) {
-            Ok(ev) => {
-                status.eigenvector = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
-                out.eigenvector = Some(idx_to_score_map(&g, ev));
-            }
-            Err(()) => status.eigenvector = StatusEntry::timeout(0.0),
-        }
+        }));
 
         // HITS (tol 1e-3 — Go network.HITS(g, 1e-3)).
         // Skip for XL dense graphs (Go ConfigForSize: density >= 0.001).
         if budget.skip_hits(n) {
-            status.hits = StatusEntry::skipped("graph too large and dense");
+            hits_skip_reason = "graph too large and dense";
         } else {
-            let t0 = Instant::now();
             let gc = std::sync::Arc::clone(&g);
-            match run_with_timeout(budget.timeout_for(n), move || {
+            hits_rx = Some(spawn_metric(move || {
                 let _t = crate::metrics::time(&crate::metrics::TIMING_HITS_COMPUTE);
                 hits_default(&gc)
-            }) {
-                Ok(h) => {
-                    status.hits = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
-                    out.hubs = Some(idx_to_score_map(&g, h.hubs));
-                    out.authorities = Some(idx_to_score_map(&g, h.authorities));
+            }));
+        }
+
+        // Critical path heights DP — order-dependent (Go graph.go:2163).
+        if order_available {
+            let gc = std::sync::Arc::clone(&g);
+            crit_rx = Some(spawn_metric(move || critical_path_heights(&gc)));
+        }
+
+        // Cycles: skip entirely for XL graphs (Go ConfigForSize: >2000
+        // nodes). Tarjan pre-check is cheap; only enumeration is raced.
+        if budget.skip_cycles(n) {
+            cycles_skipped = true;
+        } else {
+            let cap = budget.max_cycles(n);
+            let scc = tarjan_scc(&g);
+            if !scc.has_cycles {
+                cycles_acyclic = true;
+            } else {
+                let gc = std::sync::Arc::clone(&g);
+                cyc_rx = Some(spawn_metric(move || enumerate_cycles(&gc, cap)));
+            }
+        }
+    }
+
+    // --- Collect phase-2 results (deterministic field order) ---
+    if !budget.skip_phase2 {
+        // PageRank
+        match pr_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+            Some((pr, elapsed)) => {
+                status.page_rank = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
+                out.page_rank = Some(idx_to_score_map(&g, pr));
+            }
+            None => status.page_rank = StatusEntry::timeout(0.0),
+        }
+
+        // Betweenness
+        if !bw_skip_reason.is_empty() {
+            status.betweenness = StatusEntry::skipped(bw_skip_reason);
+        } else {
+            match bw_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+                Some((bw, elapsed)) => {
+                    if bw_approx_used {
+                        // Go: state stays "computed" with reason "approximate"
+                        // (betweennessReason) plus the sample size.
+                        let mut e = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
+                        e.reason = "approximate".into();
+                        e.sample = bw_sample;
+                        status.betweenness = e;
+                    } else {
+                        status.betweenness = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
+                    }
+                    out.betweenness = Some(idx_to_score_map(&g, bw));
                 }
-                Err(()) => status.hits = StatusEntry::timeout(0.0),
+                None => status.betweenness = StatusEntry::timeout(0.0),
             }
         }
 
-        // Critical path heights DP. Go's unavailable branch still charges the
-        // elapsed time to the profile (graph.go:2179), but a measured duration
-        // is not reproducible and the pinned-clock pass zeroes it, so the
-        // skipped entry carries ms 0 — byte-identical to Go under
-        // SOURCE_DATE_EPOCH, and the only deterministic choice without one.
+        // Eigenvector
+        match ev_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+            Some((ev, elapsed)) => {
+                status.eigenvector = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
+                out.eigenvector = Some(idx_to_score_map(&g, ev));
+            }
+            None => status.eigenvector = StatusEntry::timeout(0.0),
+        }
+
+        // HITS
+        if !hits_skip_reason.is_empty() {
+            status.hits = StatusEntry::skipped(hits_skip_reason);
+        } else {
+            match hits_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+                Some((h, elapsed)) => {
+                    status.hits = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
+                    out.hubs = Some(idx_to_score_map(&g, h.hubs));
+                    out.authorities = Some(idx_to_score_map(&g, h.authorities));
+                }
+                None => status.hits = StatusEntry::timeout(0.0),
+            }
+        }
+
+        // Critical path
         if order_available {
-            let t0 = Instant::now();
-            let gc = std::sync::Arc::clone(&g);
-            match run_with_timeout(budget.timeout_for(n), move || critical_path_heights(&gc)) {
-                Ok(heights) => {
-                    status.critical = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
+            match crit_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+                Some((heights, elapsed)) => {
+                    status.critical = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
                     let mut m = BTreeMap::new();
                     for (i, v) in heights.into_iter().enumerate() {
                         m.insert(g.node_id(i).unwrap_or_default().to_string(), v);
                     }
                     out.critical_path_score = Some(m);
                 }
-                Err(()) => status.critical = StatusEntry::timeout(0.0),
+                None => status.critical = StatusEntry::timeout(0.0),
             }
         } else {
             status.critical = StatusEntry::skipped(CYCLE_UNAVAILABLE_REASON);
         }
 
-        // Cycles: skip entirely for XL graphs (Go ConfigForSize: >2000 nodes).
-        // Tarjan pre-check then enumerate capped by tier.
-        if budget.skip_cycles(n) {
+        // Cycles
+        if cycles_skipped {
             status.cycles = StatusEntry::skipped("graph too large (>2000 nodes)");
+        } else if cycles_acyclic {
+            status.cycles = StatusEntry::computed(0.0);
+            out.cycles = Some(Vec::new());
         } else {
-            let t0 = Instant::now();
-            let cap = budget.max_cycles(n);
-            let scc = tarjan_scc(&g);
-            if !scc.has_cycles {
-                status.cycles = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
-                out.cycles = Some(Vec::new());
-            } else {
-                let gc = std::sync::Arc::clone(&g);
-                match run_with_timeout(budget.timeout_for(n), move || enumerate_cycles(&gc, cap)) {
-                    Ok(cycles) => {
-                        status.cycles = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
-                        let named: Vec<Vec<String>> = cycles
-                            .into_iter()
-                            .map(|c| {
-                                c.into_iter()
-                                    .map(|i| g.node_id(i).unwrap_or_default().to_string())
-                                    .collect()
-                            })
-                            .collect();
-                        out.cycles = Some(named);
-                    }
-                    Err(()) => status.cycles = StatusEntry::timeout(0.0),
+            match cyc_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+                Some((cycles, elapsed)) => {
+                    status.cycles = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
+                    let named: Vec<Vec<String>> = cycles
+                        .into_iter()
+                        .map(|c| {
+                            c.into_iter()
+                                .map(|i| g.node_id(i).unwrap_or_default().to_string())
+                                .collect()
+                        })
+                        .collect();
+                    out.cycles = Some(named);
                 }
+                None => status.cycles = StatusEntry::timeout(0.0),
             }
-        } // end else !skip_cycles
+        }
     }
 
-    // k-core / articulation / slack: always-on even under BV_SKIP_PHASE2.
-    let t0 = Instant::now();
-    let gc = std::sync::Arc::clone(&g);
-    match run_with_timeout(budget.timeout_for(n), move || kcore(&gc)) {
-        Ok(cores) => {
-            status.kcore = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
+    // k-core
+    match kcore_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+        Some((cores, elapsed)) => {
+            status.kcore = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
             let mut m = BTreeMap::new();
             for (i, v) in cores.into_iter().enumerate() {
                 m.insert(g.node_id(i).unwrap_or_default().to_string(), v);
             }
             out.core_number = Some(m);
         }
-        Err(()) => status.kcore = StatusEntry::timeout(0.0),
+        None => status.kcore = StatusEntry::timeout(0.0),
     }
 
-    let gc = std::sync::Arc::clone(&g);
-    match run_with_timeout(budget.timeout_for(n), move || {
-        crate::algorithms::articulation::articulation_points(&gc)
-    }) {
-        Ok(points) => {
-            // Go records `profile.Articulation = 0` with the comment "Computed
-            // together with k-core" (pkg/analysis/graph.go:2266) — the cut
-            // vertices fall out of the k-core pass, so there is no separate
-            // duration to report. Timing this independently made the status
-            // entry carry an `ms` the oracle never emits, and since
-            // `statusEntry` drops the key only at exactly zero, the extra key
-            // showed up in every `--robot-insights` payload.
+    // Articulation — Go records `profile.Articulation = 0` with the comment
+    // "Computed together with k-core" (pkg/analysis/graph.go:2266); the cut
+    // vertices fall out of the k-core pass, so there is no separate duration
+    // to report.
+    match art_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+        Some((points, _elapsed)) => {
             status.articulation = StatusEntry::computed(0.0);
             out.articulation = Some(
                 points
@@ -1094,22 +1180,17 @@ pub fn analyze_phase2_blocking(
                     .collect(),
             );
         }
-        Err(()) => status.articulation = StatusEntry::timeout(0.0),
+        None => status.articulation = StatusEntry::timeout(0.0),
     }
 
-    let t0 = Instant::now();
-    // Go gate at pkg/analysis/graph.go:2271, with the same unavailable branch
-    // as critical path above (graph.go:2163).
+    // Slack
     if order_available {
-        let gc = std::sync::Arc::clone(&g);
-        match run_with_timeout(budget.timeout_for(n), move || {
-            crate::algorithms::slack::slack(&gc)
-        }) {
-            Ok(slacks) => {
-                status.slack = StatusEntry::computed(t0.elapsed().as_secs_f64() * 1000.0);
+        match slack_rx.and_then(|rx| collect_metric(rx, timeout, fanout_start).ok()) {
+            Some((slacks, elapsed)) => {
+                status.slack = StatusEntry::computed(elapsed.as_secs_f64() * 1000.0);
                 out.slack = Some(idx_to_score_map(&g, slacks));
             }
-            Err(()) => status.slack = StatusEntry::timeout(0.0),
+            None => status.slack = StatusEntry::timeout(0.0),
         }
     } else {
         status.slack = StatusEntry::skipped(CYCLE_UNAVAILABLE_REASON);
@@ -1276,128 +1357,69 @@ fn analyze_phase2_with_profile(
         .as_ref()
         .filter(|order| order.len() == n);
 
-    // --- PageRank (graph.go:1993-2044) ---
-    if config.compute_page_rank {
-        let t0 = Instant::now();
-        let gc = std::sync::Arc::clone(g);
-        match run_with_timeout(timeout_from_ns(config.page_rank_timeout_ns), move || {
-            pagerank_default(&gc)
-        }) {
-            Ok(pr) => {
-                out.page_rank = Some(idx_to_score_map(g, pr));
-            }
-            Err(()) => {
-                profile.pagerank_timeout = true;
-                // Go's uniform fallback keeps downstream normalization fed with
-                // a full map instead of an empty one (graph.go:2005-2009).
-                let uniform = 1.0 / n as f64;
-                let fallback = (0..n)
-                    .map(|i| (g.node_id(i).unwrap_or_default().to_string(), uniform))
-                    .collect();
-                out.page_rank = Some(fallback);
-            }
-        }
-        profile.pagerank = t0.elapsed();
-    }
+    // Fan-out: Go's profiled pass launches each metric as its own goroutine
+    // with a per-metric timer; spawning every enabled worker before
+    // collecting makes wall time the max, not the sum, of the budgets —
+    // the same contract `analyze_phase2_blocking` now implements.
+    let fanout_start = Instant::now();
 
-    // --- Betweenness (graph.go:2046-2106) ---
+    let mut pr_rx = None;
+    let mut bw_rx = None;
+    let mut ev_rx = None;
+    let mut hits_rx = None;
+    let mut crit_rx = None;
+    let mut cyc_rx = None;
+    let mut kcore_rx = None;
+    let mut art_rx = None;
+    let mut slack_rx = None;
+    // Go reports `actualBetweennessSample`, which only becomes non-zero
+    // when the approximate branch actually ran.
     let mut betweenness_sample_used = 0usize;
+
+    if config.compute_page_rank {
+        let gc = std::sync::Arc::clone(g);
+        pr_rx = Some(spawn_metric(move || pagerank_default(&gc)));
+    }
     if config.compute_betweenness {
-        let t0 = Instant::now();
         let sample = config.betweenness_sample_size;
         if config.betweenness_mode == "approximate" && sample > 0 {
             betweenness_sample_used = sample;
             let gc = std::sync::Arc::clone(g);
-            match run_with_timeout(timeout_from_ns(config.betweenness_timeout_ns), move || {
+            bw_rx = Some(spawn_metric(move || {
                 betweenness_approx(&gc, sample, Some(1))
-            }) {
-                Ok(bw) => {
-                    out.betweenness = Some(idx_to_score_map(g, bw));
-                }
-                Err(()) => {
-                    profile.betweenness_timeout = true;
-                }
-            }
+            }));
         } else {
             let gc = std::sync::Arc::clone(g);
-            match run_with_timeout(timeout_from_ns(config.betweenness_timeout_ns), move || {
-                betweenness(&gc)
-            }) {
-                Ok(bw) => {
-                    out.betweenness = Some(idx_to_score_map(g, bw));
-                }
-                Err(()) => {
-                    profile.betweenness_timeout = true;
-                }
-            }
+            bw_rx = Some(spawn_metric(move || betweenness(&gc)));
         }
-        profile.betweenness = t0.elapsed();
     }
-
-    // --- Eigenvector (graph.go:2108-2116) ---
-    // Go calls this one inline with no timeout race, and `StartupProfile` has no
-    // eigenvector-timeout field to report into, so the direct call is what
-    // reproduces the document.
     if config.compute_eigenvector {
-        let t0 = Instant::now();
-        let ev = crate::algorithms::eigenvector::eigenvector_default(g);
-        out.eigenvector = Some(idx_to_score_map(g, ev));
-        profile.eigenvector = t0.elapsed();
-    }
-
-    // --- HITS (graph.go:2118-2158) ---
-    if config.compute_hits && g.edge_count() > 0 {
-        let t0 = Instant::now();
         let gc = std::sync::Arc::clone(g);
-        match run_with_timeout(timeout_from_ns(config.hits_timeout_ns), move || {
-            hits_default(&gc)
-        }) {
-            Ok(h) => {
-                out.hubs = Some(idx_to_score_map(g, h.hubs));
-                out.authorities = Some(idx_to_score_map(g, h.authorities));
-            }
-            Err(()) => {
-                profile.hits_timeout = true;
-            }
-        }
-        profile.hits = t0.elapsed();
+        ev_rx = Some(spawn_metric(move || {
+            crate::algorithms::eigenvector::eigenvector_default(&gc)
+        }));
     }
-
-    // --- Critical path (graph.go:2160-2180) ---
-    let mut critical_unavailable = "";
-    if config.compute_critical_path {
-        let t0 = Instant::now();
-        if topo_order.is_some() {
-            let heights = critical_path_heights(g);
-            out.critical_path_score = Some(idx_to_score_map(g, heights));
-        } else {
-            critical_unavailable =
-                "dependency graph contains a cycle; topological order unavailable";
-        }
-        profile.critical_path = t0.elapsed();
+    if config.compute_hits && g.edge_count() > 0 {
+        let gc = std::sync::Arc::clone(g);
+        hits_rx = Some(spawn_metric(move || hits_default(&gc)));
     }
-
-    // --- Cycles (graph.go:2182-2253) ---
-    // `truncation_note` carries Go's "truncated to N of M cycle
-    // representatives" suffix, which is only built when the cap actually bit.
-    let mut truncation_note = String::new();
+    if config.compute_critical_path && topo_order.is_some() {
+        let gc = std::sync::Arc::clone(g);
+        crit_rx = Some(spawn_metric(move || critical_path_heights(&gc)));
+    }
     if config.compute_cycles {
-        let t0 = Instant::now();
+        // `truncation_note` carries Go's "truncated to N of M cycle
+        // representatives" suffix, which is only built when the cap actually
+        // bit. Go races the whole cycle pass — Tarjan SCC plus representative
+        // enumeration — against `CyclesTimeout` (graph.go:2182-2253) and
+        // reports `cyclesTimeout` when the timer wins.
         let cap = if config.max_cycles_to_store == 0 {
             100
         } else {
             config.max_cycles_to_store
         };
-        // Go races the whole cycle pass — Tarjan SCC plus representative
-        // enumeration — against `CyclesTimeout` (graph.go:2182-2253) and
-        // reports `cyclesTimeout` when the timer wins. The previous port ran
-        // `enumerate_cycles_with_info` synchronously, so `profile.cycles_timeout`
-        // was never set and a pathological cyclic graph hung instead of
-        // reporting the timeout Go emits. `run_with_timeout` is the same
-        // thread + recv_timeout pattern every other raced metric uses; a zero
-        // `CyclesTimeout` resolves as Go's already-fired timer -> timeout.
         let gc = std::sync::Arc::clone(g);
-        match run_with_timeout(timeout_from_ns(config.cycles_timeout_ns), move || {
+        cyc_rx = Some(spawn_metric(move || {
             let scc = tarjan_scc(&gc);
             if !scc.has_cycles {
                 // Acyclic: Go still counts zero components and stores an
@@ -1414,9 +1436,121 @@ fn analyze_phase2_with_profile(
                     &gc, cap,
                 )),
             )
-        }) {
-            Ok((cycle_count, found)) => {
+        }));
+    }
+    // Go computes k-core and articulation inside one timed window
+    // (graph.go:2262-2268) and reports the whole duration on KCore, leaving
+    // Articulation at zero.
+    let kcore_art_spawned = config.compute_kcore || config.compute_articulation;
+    if config.compute_kcore {
+        let gc = std::sync::Arc::clone(g);
+        kcore_rx = Some(spawn_metric(move || kcore(&gc)));
+    }
+    if config.compute_articulation {
+        let gc = std::sync::Arc::clone(g);
+        art_rx = Some(spawn_metric(move || {
+            crate::algorithms::articulation::articulation_points(&gc)
+        }));
+    }
+    if config.compute_slack && topo_order.is_some() {
+        let gc = std::sync::Arc::clone(g);
+        slack_rx = Some(spawn_metric(move || crate::algorithms::slack::slack(&gc)));
+    }
+
+    // --- Collect (deterministic order mirrors the original sequential pass) ---
+
+    // --- PageRank (graph.go:1993-2044) ---
+    if let Some(rx) = pr_rx {
+        match collect_metric(
+            rx,
+            timeout_from_ns(config.page_rank_timeout_ns),
+            fanout_start,
+        ) {
+            Ok((pr, elapsed)) => {
+                out.page_rank = Some(idx_to_score_map(g, pr));
+                profile.pagerank = elapsed;
+            }
+            Err(()) => {
+                profile.pagerank_timeout = true;
+                profile.pagerank = timeout_from_ns(config.page_rank_timeout_ns);
+                // Go's uniform fallback keeps downstream normalization fed with
+                // a full map instead of an empty one (graph.go:2005-2009).
+                let uniform = 1.0 / n as f64;
+                let fallback = (0..n)
+                    .map(|i| (g.node_id(i).unwrap_or_default().to_string(), uniform))
+                    .collect();
+                out.page_rank = Some(fallback);
+            }
+        }
+    }
+
+    // --- Betweenness (graph.go:2046-2106) ---
+    if let Some(rx) = bw_rx {
+        match collect_metric(
+            rx,
+            timeout_from_ns(config.betweenness_timeout_ns),
+            fanout_start,
+        ) {
+            Ok((bw, elapsed)) => {
+                out.betweenness = Some(idx_to_score_map(g, bw));
+                profile.betweenness = elapsed;
+            }
+            Err(()) => {
+                profile.betweenness_timeout = true;
+                profile.betweenness = timeout_from_ns(config.betweenness_timeout_ns);
+            }
+        }
+    }
+
+    // --- Eigenvector (graph.go:2108-2116) ---
+    // Go calls this one inline with no timeout race, and `StartupProfile` has
+    // no eigenvector-timeout field to report into. The worker's panic
+    // payload is re-thrown by `collect_metric_blocking`, matching the direct
+    // call it replaces.
+    if let Some(rx) = ev_rx {
+        let (ev, elapsed) = collect_metric_blocking(rx);
+        out.eigenvector = Some(idx_to_score_map(g, ev));
+        profile.eigenvector = elapsed;
+    }
+
+    // --- HITS (graph.go:2118-2158) ---
+    if let Some(rx) = hits_rx {
+        match collect_metric(rx, timeout_from_ns(config.hits_timeout_ns), fanout_start) {
+            Ok((h, elapsed)) => {
+                out.hubs = Some(idx_to_score_map(g, h.hubs));
+                out.authorities = Some(idx_to_score_map(g, h.authorities));
+                profile.hits = elapsed;
+            }
+            Err(()) => {
+                profile.hits_timeout = true;
+                profile.hits = timeout_from_ns(config.hits_timeout_ns);
+            }
+        }
+    }
+
+    // --- Critical path (graph.go:2160-2180) ---
+    let mut critical_unavailable = "";
+    if config.compute_critical_path {
+        if let Some(rx) = crit_rx {
+            let (heights, elapsed) = collect_metric_blocking(rx);
+            out.critical_path_score = Some(idx_to_score_map(g, heights));
+            profile.critical_path = elapsed;
+        } else {
+            critical_unavailable =
+                "dependency graph contains a cycle; topological order unavailable";
+            profile.critical_path = Instant::now().elapsed();
+        }
+    }
+
+    // --- Cycles (graph.go:2182-2253) ---
+    // `truncation_note` carries Go's "truncated to N of M cycle
+    // representatives" suffix, which is only built when the cap actually bit.
+    let mut truncation_note = String::new();
+    if let Some(rx) = cyc_rx {
+        match collect_metric(rx, timeout_from_ns(config.cycles_timeout_ns), fanout_start) {
+            Ok(((cycle_count, found), elapsed)) => {
                 profile.cycle_count = cycle_count;
+                profile.cycles = elapsed;
                 match found {
                     None => {
                         // An acyclic graph computed its cycles metric
@@ -1448,22 +1582,20 @@ fn analyze_phase2_with_profile(
             }
             Err(()) => {
                 profile.cycles_timeout = true;
+                profile.cycles = timeout_from_ns(config.cycles_timeout_ns);
             }
         }
-        profile.cycles = t0.elapsed();
     }
 
     // --- k-core + articulation (graph.go:2262-2268) ---
     // Go computes the pair inside one timed window and reports the whole
-    // duration on KCore, leaving Articulation at zero. The Rust port keeps the
-    // two algorithms separate but times them as one window so the emitted
-    // numbers mean the same thing.
-    let mut kcore_ran = false;
-    if config.compute_kcore || config.compute_articulation {
-        let t0 = Instant::now();
-        if config.compute_kcore {
-            let gc = std::sync::Arc::clone(g);
-            let cores = kcore(&gc);
+    // duration on KCore, leaving Articulation at zero. The window here
+    // covers the parallel pair — wall time of the slower half, not the sum.
+    let kcore_ran = kcore_art_spawned;
+    if kcore_art_spawned {
+        let kwin = Instant::now();
+        if let Some(rx) = kcore_rx {
+            let (cores, _) = collect_metric_blocking(rx);
             out.core_number = Some(
                 cores
                     .into_iter()
@@ -1472,29 +1604,29 @@ fn analyze_phase2_with_profile(
                     .collect(),
             );
         }
-        if config.compute_articulation {
-            let gc = std::sync::Arc::clone(g);
+        if let Some(rx) = art_rx {
+            let (points, _) = collect_metric_blocking(rx);
             out.articulation = Some(
-                crate::algorithms::articulation::articulation_points(&gc)
+                points
                     .into_iter()
                     .map(|i| g.node_id(i).unwrap_or_default().to_string())
                     .collect(),
             );
         }
-        profile.kcore = t0.elapsed();
-        kcore_ran = true;
+        profile.kcore = kwin.elapsed();
     }
 
     // --- Slack (graph.go:2270-2278) ---
     let mut slack_unavailable = "";
     if config.compute_slack {
-        let t0 = Instant::now();
-        if topo_order.is_some() {
-            out.slack = Some(idx_to_score_map(g, crate::algorithms::slack::slack(g)));
+        if let Some(rx) = slack_rx {
+            let (slacks, elapsed) = collect_metric_blocking(rx);
+            out.slack = Some(idx_to_score_map(g, slacks));
+            profile.slack = elapsed;
         } else {
             slack_unavailable = "dependency graph contains a cycle; topological order unavailable";
+            profile.slack = Instant::now().elapsed();
         }
-        profile.slack = t0.elapsed();
     }
 
     // Go graph.go:2320-2360 — the status snapshot is built from the config

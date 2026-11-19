@@ -1021,21 +1021,43 @@ fn temporal_windows_from_events(events: &[BeadEvent], bead_filter: &str) -> Vec<
     }
     // Concurrency pass: a span overlaps the window when it started before the
     // window ended and (if it closed) closed after the window started.
-    let span_snapshot: Vec<(&str, &str, &str, Option<&str>)> = spans
+    // Every timestamp is parsed to an instant ONCE up front — the overlap
+    // test is O(windows × spans) and re-parsing RFC3339 per pair dominated it.
+    // `ts_nanos` preserves `ts_before`/`ts_after` semantics exactly: an
+    // unparseable side makes `before` true and `after` false.
+    let ts_nanos = |s: &str| parse_ts(s).map(|t| t.as_nanosecond());
+    type SpanTime<'a> = (&'a str, Option<i128>, Option<Option<i128>>);
+    let span_times: Vec<SpanTime<'_>> = spans
         .iter()
-        .map(|(id, (email, start, end))| (*id, email.as_str(), start.as_str(), end.as_deref()))
+        .map(|(_, (email, start, end))| {
+            (
+                email.as_str(),
+                ts_nanos(start),
+                end.as_ref().map(|e| ts_nanos(e)),
+            )
+        })
         .collect();
     for w in &mut windows {
+        let w_start = ts_nanos(&w.start);
+        let w_end = ts_nanos(&w.end);
         let mut concurrent = 0usize;
-        for (_, email, start, end) in &span_snapshot {
+        for (email, start_ns, end_ns) in &span_times {
             if *email != w.author_email {
                 continue;
             }
-            if !ts_before(start, &w.end) {
+            let before = match (*start_ns, w_end) {
+                (Some(a), Some(b)) => a < b,
+                _ => true,
+            };
+            if !before {
                 continue;
             }
-            if let Some(end) = end {
-                if !ts_after(end, &w.start) {
+            if let Some(end_inner) = end_ns {
+                let after = match (*end_inner, w_start) {
+                    (Some(a), Some(b)) => a > b,
+                    _ => false,
+                };
+                if !after {
                     continue;
                 }
             }
@@ -1044,22 +1066,6 @@ fn temporal_windows_from_events(events: &[BeadEvent], bead_filter: &str) -> Vec<
         w.active_beads = concurrent;
     }
     windows
-}
-
-fn ts_before(a: &str, b: &str) -> bool {
-    match (parse_ts(a), parse_ts(b)) {
-        (Some(a), Some(b)) => a < b,
-        // Unparseable timestamps: Go's time.Time zero value compares as "not
-        // after", so treat an unknown start as before the window end.
-        _ => true,
-    }
-}
-
-fn ts_after(a: &str, b: &str) -> bool {
-    match (parse_ts(a), parse_ts(b)) {
-        (Some(a), Some(b)) => a > b,
-        _ => false,
-    }
 }
 
 /// Go `extractPathHints` — file paths, package roots and component keywords
@@ -1157,9 +1163,30 @@ fn temporal_reason(
 }
 
 /// Go `commitInWindow` — author match (email preferred) inside [start, end].
-/// Both bounds are inclusive, as in Go's `Before`/`After` guards.
-fn commit_in_window(w: &TemporalWindow, wc: &WalkedCommit) -> bool {
-    if ts_before(&wc.timestamp, &w.start) || ts_after(&wc.timestamp, &w.end) {
+/// Both bounds are inclusive, as in Go's `Before`/`After` guards. Timestamps
+/// arrive pre-parsed as nanosecond instants (`None` = unparseable, which
+/// `ts_before`/`ts_after` treat as "not before"/"not after" → outside).
+fn commit_in_window(
+    w_start_ns: Option<i128>,
+    w_end_ns: Option<i128>,
+    wc_ts_ns: Option<i128>,
+    w: &TemporalWindow,
+    wc: &WalkedCommit,
+) -> bool {
+    // `ts_before(wc.ts, w.start)`: unparseable side -> true -> outside.
+    let before = match (wc_ts_ns, w_start_ns) {
+        (Some(a), Some(b)) => a < b,
+        _ => true,
+    };
+    if before {
+        return false;
+    }
+    // `ts_after(wc.ts, w.end)`: unparseable side -> false -> inside.
+    let after = match (wc_ts_ns, w_end_ns) {
+        (Some(a), Some(b)) => a > b,
+        _ => false,
+    };
+    if after {
         return false;
     }
     if !w.author_email.is_empty() {
@@ -1185,16 +1212,40 @@ fn extract_temporal_candidates(
     if windows.is_empty() {
         return Ok(Vec::new());
     }
-    let mut pairs: Vec<(&TemporalWindow, &WalkedCommit)> = Vec::new();
+    // Parse every timestamp and `touches_beads_dir` scan ONCE per window /
+    // commit — the pair loop below is O(windows × commits) and used to
+    // re-do both per pair.
+    let window_times: Vec<(Option<i128>, Option<i128>)> = windows
+        .iter()
+        .map(|w| {
+            (
+                parse_ts(&w.start).map(|t| t.as_nanosecond()),
+                parse_ts(&w.end).map(|t| t.as_nanosecond()),
+            )
+        })
+        .collect();
+    let commit_meta: Vec<(Option<i128>, bool)> = walk
+        .iter()
+        .map(|wc| {
+            (
+                parse_ts(&wc.timestamp).map(|t| t.as_nanosecond()),
+                wc.touches_beads_dir(),
+            )
+        })
+        .collect();
+    // (window_idx, commit_idx) pairs — refs are re-derived after the scan.
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
     let mut shas: Vec<String> = Vec::new();
-    let mut queued = BTreeSet::new();
-    for w in &windows {
-        for wc in walk {
-            if wc.touches_beads_dir() || !commit_in_window(w, wc) {
+    let mut queued: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (wi, w) in windows.iter().enumerate() {
+        let (w_start_ns, w_end_ns) = window_times[wi];
+        for (ci, wc) in walk.iter().enumerate() {
+            let (wc_ts_ns, touches_beads) = commit_meta[ci];
+            if touches_beads || !commit_in_window(w_start_ns, w_end_ns, wc_ts_ns, w, wc) {
                 continue;
             }
-            pairs.push((w, wc));
-            if queued.insert(wc.sha.clone()) {
+            pairs.push((wi, ci));
+            if queued.insert(wc.sha.as_str()) {
                 shas.push(wc.sha.clone());
             }
         }
@@ -1205,7 +1256,9 @@ fn extract_temporal_candidates(
     cache.prime(repo, &shas)?;
 
     let mut candidates = Vec::with_capacity(pairs.len());
-    for (w, wc) in pairs {
+    for (wi, ci) in pairs {
+        let w = &windows[wi];
+        let wc = &walk[ci];
         let files = cache.code_files(&wc.sha);
         if files.is_empty() {
             continue;
@@ -1524,29 +1577,40 @@ fn build_histories(
         })
         .collect();
 
-    let mut events_by_bead: BTreeMap<&str, Vec<BeadEvent>> = BTreeMap::new();
+    // Group BORROWED refs first — cloning into the group maps and then again
+    // into each history doubled every event/commit allocation. Each item is
+    // cloned exactly once, at its destination.
+    let mut events_by_bead: BTreeMap<&str, Vec<&BeadEvent>> = BTreeMap::new();
     for e in events {
         events_by_bead
             .entry(e.bead_id.as_str())
             .or_default()
-            .push(e.clone());
+            .push(e);
     }
-    let mut commits_by_bead: BTreeMap<&str, Vec<HistoryCommit>> = BTreeMap::new();
+    let mut commits_by_bead: BTreeMap<&str, Vec<&HistoryCommit>> = BTreeMap::new();
     for c in commits {
         if !c.bead_id.is_empty() {
             commits_by_bead
                 .entry(c.bead_id.as_str())
                 .or_default()
-                .push(c.clone());
+                .push(c);
         }
     }
 
     for (bead_id, history) in histories.iter_mut() {
         if let Some(evs) = events_by_bead.get(bead_id.as_str()) {
-            history.events = evs.clone();
+            history.events = evs.iter().map(|e| (*e).clone()).collect();
         }
         if let Some(cs) = commits_by_bead.get(bead_id.as_str()) {
-            let deduped = dedup_commits(cs);
+            // Same first-occurrence-per-sha dedup as `dedup_commits`, but over
+            // refs so each commit is cloned once into the history.
+            let mut seen = BTreeSet::new();
+            let deduped: Vec<HistoryCommit> = cs
+                .iter()
+                .copied()
+                .filter(|c| seen.insert(c.sha.as_str()))
+                .map(|c| (*c).clone())
+                .collect();
             if !deduped.is_empty() {
                 history.commits = Some(deduped);
             }
@@ -2039,6 +2103,13 @@ mod tests {
         }
     }
 
+    /// Test shim: `commit_in_window` takes pre-parsed nanosecond instants;
+    /// tests pass RFC3339 strings, so parse them here.
+    fn ciw(w: &TemporalWindow, wc: &WalkedCommit) -> bool {
+        let ns = |s: &str| parse_ts(s).map(|t| t.as_nanosecond());
+        commit_in_window(ns(&w.start), ns(&w.end), ns(&wc.timestamp), w, wc)
+    }
+
     #[test]
     fn walk_parses_records_oldest_first_after_reverse() {
         // Two records in git's newest-first order; the walker reverses them.
@@ -2388,9 +2459,9 @@ mod tests {
             "Tran Quang Dang",
             "dang@example.com",
         );
-        assert!(commit_in_window(&w, &inside), "inside the window");
+        assert!(ciw(&w, &inside), "inside the window");
         // Both bounds are inclusive.
-        assert!(commit_in_window(
+        assert!(ciw(
             &w,
             &wc(
                 "2026-08-23T00:25:54+07:00",
@@ -2398,7 +2469,7 @@ mod tests {
                 "dang@example.com"
             )
         ));
-        assert!(commit_in_window(
+        assert!(ciw(
             &w,
             &wc(
                 "2026-08-23T03:38:55+07:00",
@@ -2407,7 +2478,7 @@ mod tests {
             )
         ));
         // Before the claim and after the close are both outside.
-        assert!(!commit_in_window(
+        assert!(!ciw(
             &w,
             &wc(
                 "2026-08-23T00:25:53+07:00",
@@ -2415,7 +2486,7 @@ mod tests {
                 "dang@example.com"
             )
         ));
-        assert!(!commit_in_window(
+        assert!(!ciw(
             &w,
             &wc(
                 "2026-08-23T03:38:56+07:00",
@@ -2424,7 +2495,7 @@ mod tests {
             )
         ));
         // Right window, wrong author.
-        assert!(!commit_in_window(
+        assert!(!ciw(
             &w,
             &wc(
                 "2026-08-23T01:18:39+07:00",
@@ -2453,7 +2524,7 @@ mod tests {
             body: String::new(),
             files: Vec::new(),
         };
-        assert!(commit_in_window(&w, &wc), "case-insensitive name match");
+        assert!(ciw(&w, &wc), "case-insensitive name match");
     }
 
     #[test]

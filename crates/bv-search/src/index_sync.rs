@@ -108,7 +108,6 @@ pub fn sync_index(
         match idx.get(id) {
             Some(existing) if existing.content_hash == hash => {
                 stats.skipped += 1;
-                staged.insert(id.clone(), existing.clone());
             }
             Some(_) => {
                 stats.updated += 1;
@@ -162,7 +161,9 @@ pub fn sync_index(
         }
     }
     // Publish all-or-nothing (Go publishes under one lock acquisition).
-    idx.entries_replace(staged);
+    // Unchanged entries stay in place — cloning every vector into `staged`
+    // made each sync O(index size) in allocations for zero new information.
+    idx.entries_retain_extend(|id| docs.contains_key(id), staged);
     Ok(stats)
 }
 
