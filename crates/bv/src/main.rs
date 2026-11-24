@@ -9853,7 +9853,7 @@ fn run_robot_drift() -> ExitCode {
                 "generated_at": jiff_now(),
                 "error": format!("Error capturing baseline: {e}"),
             });
-            emit_json(&payload);
+            let _ = emit_json(&payload);
             return ExitCode::from(1);
         }
     };
@@ -9898,7 +9898,7 @@ fn run_robot_drift() -> ExitCode {
         "alerts": result.alerts,
         "baseline": drift_baseline_block(&baseline_created_at, &baseline_commit_sha),
     });
-    emit_json(&payload);
+    let _ = emit_json(&payload);
     ExitCode::from(result.exit_code())
 }
 
@@ -14788,7 +14788,7 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
             "what": "Empty graph - no issues match the filter criteria",
             "when_to_use": "Adjust filter parameters to include more issues",
         });
-        emit_json(&payload);
+        let _ = emit_json(&payload);
         return ExitCode::from(0);
     }
 
@@ -14872,7 +14872,7 @@ fn run_robot_graph(args: &[String]) -> ExitCode {
                 "when_to_use": "When you need an embeddable diagram for documentation or GitHub issues",
             })
         };
-        emit_json(&payload);
+        let _ = emit_json(&payload);
         return ExitCode::from(0);
     }
 
@@ -20325,7 +20325,7 @@ fn run_robot_docs(args: &[String]) -> ExitCode {
     let unknown = payload.get("error").is_some();
     // Same as the robot-help arm above: the payload is already in Go's
     // sorted-key order, so it emits directly.
-    emit_json(&payload);
+    let _ = emit_json(&payload);
     if unknown {
         return ExitCode::from(2);
     }

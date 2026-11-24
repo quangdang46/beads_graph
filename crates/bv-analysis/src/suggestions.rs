@@ -1655,13 +1655,9 @@ pub fn generate_all_suggestions(
                     return false;
                 }
             }
-            if !config.filter_bead.is_empty()
-                && sug.target_bead != config.filter_bead
-                && sug.related_bead.as_deref() != Some(config.filter_bead.as_str())
-            {
-                return false;
-            }
-            true
+            config.filter_bead.is_empty()
+                || sug.target_bead == config.filter_bead
+                || sug.related_bead.as_deref() == Some(config.filter_bead.as_str())
         })
         .collect();
 
